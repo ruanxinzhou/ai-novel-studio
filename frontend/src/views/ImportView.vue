@@ -141,10 +141,12 @@ watch(currentProjectId, () => {
 </script>
 
 <template>
-  <div v-if="!currentProjectId">
-    <el-empty description="先在顶部选择一个小说项目，导入的原文与拆解结果都归入该项目" />
-  </div>
-  <template v-else>
+  <!-- 单根包裹：v-show 依赖单根元素，多根时 display:none 不生效 -->
+  <div>
+    <div v-if="!currentProjectId">
+      <el-empty description="先在顶部选择一个小说项目，导入的原文与拆解结果都归入该项目" />
+    </div>
+    <template v-else>
     <el-row :gutter="12">
       <el-col :span="12">
         <el-card shadow="never">
@@ -248,5 +250,6 @@ watch(currentProjectId, () => {
         <el-table-column prop="chars" label="字数" width="120" />
       </el-table>
     </el-card>
-  </template>
+    </template>
+  </div>
 </template>

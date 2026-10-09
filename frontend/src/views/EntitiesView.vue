@@ -158,10 +158,12 @@ watch(currentProjectId, () => {
 </script>
 
 <template>
-  <div v-if="!currentProjectId">
-    <el-empty description="先在顶部选择一个小说项目" />
-  </div>
-  <template v-else>
+  <!-- 单根包裹：v-show 依赖单根元素，多根时 display:none 不生效 -->
+  <div>
+    <div v-if="!currentProjectId">
+      <el-empty description="先在顶部选择一个小说项目" />
+    </div>
+    <template v-else>
     <el-card shadow="never">
       <template #header>
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px">
@@ -288,5 +290,6 @@ watch(currentProjectId, () => {
         <el-button type="primary" :loading="extracting" @click="doExtract">开始抽取</el-button>
       </template>
     </el-dialog>
-  </template>
+    </template>
+  </div>
 </template>
