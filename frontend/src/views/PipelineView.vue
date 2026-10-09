@@ -1,5 +1,6 @@
 <script setup lang="ts">
-// 层运行台：选层 → 输入 x → 勾模块 → 检索范文 → 运行 → 结果与断点收据
+// 运行台：任务制高级工作台——选任务 → 填要点 → 生成 → 三出口（采纳/改后采纳/复制）
+// 面向想越过向导直接控制单层的作者；日常写作请走创作向导与今日章台
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
@@ -16,21 +17,70 @@ import {
   type LayerRunResult,
   type SkillModule,
 } from '../api'
-import { currentProjectId } from '../state'
+import { activeTab, currentProjectId } from '../state'
 
-const layer = ref<string>('draft')
+// ---------- 任务模式：给作者的目标语言，映射到底层 layer ----------
+interface TaskCard {
+  key: 'intro' | 'outline' | 'chapter' | 'advanced'
+  layer: string
+  title: string
+  desc: string
+  inputHint: string
+  example: string
+}
+
+const TASKS: TaskCard[] = [
+  {
+    key: 'intro',
+    layer: 'intro',
+    title: '故事简介',
+    desc: '把你的点子要点，扩成一段能立住的故事简介',
+    inputHint: '每行写一个点子要点：题材背景、主角设定、金手指、核心冲突……',
+    example: '例：克苏鲁无限流，主角是普通人，被古神选中穿梭各宇宙做单元剧冒险',
+  },
+  {
+    key: 'outline',
+    layer: 'outline',
+    title: '全书大纲',
+    desc: '根据简介和要点，排出分章大纲（每行一个「第N章」）',
+    inputHint: '每行一个「第N章」+ 这一章发生什么。前几章是黄金三章，建议写细。',
+    example: '例：第1章 主角加班夜归，捡到会低语的青铜镜，被拉入第一场试炼',
+  },
+  {
+    key: 'chapter',
+    layer: 'chapter',
+    title: '章节正文',
+    desc: '根据大纲写第 N 章正文，自动带上该章待兑现的必现情节标记',
+    inputHint: '每行写本章的一个要点：开场、冲突、转折、结尾钩子……',
+    example: '例：主角在旧书店发现前一位持有者的笔记，镜面开始渗血',
+  },
+  {
+    key: 'advanced',
+    layer: 'draft',
+    title: '自由运行',
+    desc: '选任意运行目标，配写作模块、检索范文——全部能力都在这里',
+    inputHint: '每行一个输入块，格式依所选目标而定',
+    example: '给熟悉系统的作者：剧情/正文/润色/审稿/杂务层、模块与范文组合',
+  },
+]
+
+const task = ref<TaskCard>(TASKS[0])
+const layer = computed(() => task.value.layer)
+const isAdvanced = computed(() => task.value.key === 'advanced')
+
 const userDirective = ref('')
-const xLines = ref('') // 每行一个 x 块
+const xLines = ref('') // 每行一个要点
 const xChunkLength = ref<number | null>(null)
-const chapterNo = ref<number | null>(null) // 提供时注入该章必现标记
+const chapterNo = ref<number | null>(null)
+const showAdvancedOpts = ref<string[]>([])
 const running = ref(false)
 const result = ref<LayerRunResult | null>(null)
-const reviewing = ref(false)
-const review = ref<ChapterReview | null>(null)
+const adopted = ref(false)
+const editableY = ref('') // 结果可改——作者改后采纳是一级公民
 const adoptNote = ref('')
 const adopting = ref(false)
 
-// 实时流式状态：思考过程 / 正文增量 / 块进度 / 通道提示
+// ---------- 实时流式状态 ----------
 const liveThinking = ref('')
 const liveText = ref('')
 const liveIndex = ref(0)
@@ -53,6 +103,9 @@ function resetLive() {
   notices.value = []
 }
 
+const hasFailed = computed(() => !!result.value && result.value.journal.failed > 0)
+
+// ---------- 模块与范文（高级选项，折叠收纳） ----------
 const modules = ref<SkillModule[]>([])
 const selectedModules = ref<string[]>([])
 const allExcerptTypes = ref<{ type: string; count: number }[]>([])
@@ -79,6 +132,13 @@ onMounted(async () => {
 
 function syncDefaults() {
   selectedModules.value = [...defaultsForLayer.value]
+}
+
+function pickTask(t: TaskCard) {
+  task.value = t
+  result.value = null
+  adopted.value = false
+  syncDefaults()
 }
 
 async function previewCorpus() {
@@ -123,15 +183,19 @@ const body = () => ({
 async function doRun() {
   const pairs = buildXPairs()
   if (!pairs.length) {
-    ElMessage.warning('请至少输入一行 x 内容（每行一个块）')
+    ElMessage.warning('请至少输入一行要点')
+    return
+  }
+  if (task.value.key === 'chapter' && !chapterNo.value) {
+    ElMessage.warning('写正文请先填章号——会自动带上该章待兑现的必现情节标记')
     return
   }
   running.value = true
   result.value = null
-  review.value = null
+  adopted.value = false
   resetLive()
   try {
-    // 流式运行：思考与正文实时上屏，结束拿完整结果；completed 块自动命中收据
+    // 流式运行：思考与正文实时上屏；已完成块自动命中收据秒回，失败块只补失败
     const r = await runsApi.stream(layer.value, body(), {
       onThinking: (text, index) => {
         liveIndex.value = index
@@ -152,9 +216,10 @@ async function doRun() {
       },
     })
     result.value = r
+    editableY.value = r.y
     ElMessage.success(
-      `完成：${r.journal.completed}/${r.journal.total} 块` +
-        (r.resumed_indices.length ? `，复用收据 ${r.resumed_indices.length} 块` : ''),
+      `完成：${r.journal.completed}/${r.journal.total} 段` +
+        (r.resumed_indices.length ? `，复用旧结果 ${r.resumed_indices.length} 段` : ''),
     )
   } catch (e) {
     ElMessage.error(`运行失败：${(e as Error).message}`)
@@ -163,15 +228,19 @@ async function doRun() {
   }
 }
 
+// ---------- 审稿 ----------
+const reviewing = ref(false)
+const review = ref<ChapterReview | null>(null)
+
 async function doReview() {
-  if (!result.value?.y) {
-    ElMessage.warning('先运行生成正文再审稿')
+  if (!editableY.value) {
+    ElMessage.warning('先运行生成内容再审稿')
     return
   }
   reviewing.value = true
   review.value = null
   try {
-    review.value = await reviewApi.chapter(xLines.value, result.value.y)
+    review.value = await reviewApi.chapter(xLines.value, editableY.value)
     if (review.value.verdict === 'blocked') {
       ElMessage.warning(`审稿不通过：${review.value.unstable_count} 项不稳，不能交稿`)
     } else {
@@ -199,8 +268,15 @@ async function unstableToMarkers() {
   }
 }
 
+// ---------- 结果三出口 ----------
+const NEXT_STEPS: Record<string, { text: string; tab: string; label: string }> = {
+  intro: { text: '简介已入库。下一步：去创作向导的选题站把它采进向导，继续脑洞站', tab: 'wizard', label: '去创作向导' },
+  outline: { text: '大纲已入库。章节已就绪——可以去今日章台开写第 1 章', tab: 'desk', label: '去今日章台' },
+  chapter: { text: '正文已入库。下一步：去今日章台走审稿和定稿', tab: 'desk', label: '去今日章台' },
+}
+
 async function adoptToProject() {
-  if (!result.value?.y) return
+  if (!result.value || !editableY.value.trim()) return
   if (!currentProjectId.value) {
     ElMessage.warning('先在顶部选择或新建小说项目')
     return
@@ -210,10 +286,11 @@ async function adoptToProject() {
     await projectsApi.adopt(
       currentProjectId.value,
       layer.value,
-      result.value.y,
+      editableY.value,
       result.value.pairs,
       adoptNote.value || `运行 ${result.value.run_id.slice(0, 8)}`,
     )
+    adopted.value = true
     ElMessage.success(`已采纳到项目「${LAYER_LABELS[layer.value]}」层，新版本入库`)
   } catch (e) {
     ElMessage.error(`采纳失败：${(e as Error).message}`)
@@ -221,203 +298,292 @@ async function adoptToProject() {
     adopting.value = false
   }
 }
+
+async function copyY() {
+  try {
+    await navigator.clipboard.writeText(editableY.value)
+    ElMessage.success('已复制全文')
+  } catch {
+    ElMessage.error('复制失败，请手动选择文本复制')
+  }
+}
+
+const nextStep = computed(() => NEXT_STEPS[layer.value] ?? null)
 </script>
 
 <template>
-  <el-row :gutter="16">
-    <el-col :span="9">
-      <el-card shadow="never">
-        <template #header>运行配置</template>
-        <el-form label-width="90px" label-position="left">
-          <el-form-item label="层">
-            <el-select v-model="layer" @change="syncDefaults">
-              <el-option v-for="l in LAYERS" :key="l" :value="l" :label="`${LAYER_LABELS[l]} (${l})`" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="x 块">
-            <el-input
-              v-model="xLines"
-              type="textarea"
-              :rows="8"
-              placeholder="每行一个块，例如正文层每行一段剧情；大纲层每行「第1章」"
-            />
-          </el-form-item>
-          <el-form-item label="块长度">
-            <el-input-number v-model="xChunkLength" :min="0" :step="500" placeholder="默认用层规格" style="width: 100%" />
-          </el-form-item>
-          <el-form-item label="章号">
-            <el-input-number v-model="chapterNo" :min="1" placeholder="选填" style="width: 100%" />
-            <div style="font-size: 12px; color: #888">填写后自动注入该章待兑现必现标记</div>
-          </el-form-item>
-          <el-form-item label="作者指令">
-            <el-input v-model="userDirective" type="textarea" :rows="2" placeholder="本节附加指令（可空）" />
-          </el-form-item>
-          <el-form-item label="写作模块">
-            <el-select v-model="selectedModules" multiple clearable style="width: 100%" placeholder="空 = 用层默认集">
-              <el-option v-for="m in modules" :key="m.name" :value="m.name" :label="`${m.name} — ${m.title}`" />
-            </el-select>
-          </el-form-item>
-        </el-form>
+  <div>
+    <el-alert type="info" :closable="false" show-icon style="margin-bottom: 14px">
+      这里是自由组合的高级工作台。<b>日常写作请走「创作向导」和「今日章台」</b>——
+      同样的内容重复生成不会重复花钱（同输入自动复用上一次结果）。
+    </el-alert>
 
-        <el-divider>范文注入（参考资料）</el-divider>
-        <el-form inline>
-          <el-form-item>
-            <el-select v-model="corpusType" clearable filterable placeholder="类型" style="width: 150px">
-              <el-option v-for="t in allExcerptTypes" :key="t.type" :value="t.type" :label="`${t.type} (${t.count})`" />
-            </el-select>
-          </el-form-item>
-          <el-form-item>
-            <el-input v-model="corpusTag" placeholder="标签" style="width: 120px" clearable />
-          </el-form-item>
-          <el-form-item>
-            <el-input v-model="corpusKeyword" placeholder="关键词" style="width: 120px" clearable />
-          </el-form-item>
-          <el-form-item>
-            <el-button @click="previewCorpus">检索预览</el-button>
-          </el-form-item>
-        </el-form>
-        <div v-if="corpusHits.length" style="max-height: 220px; overflow: auto">
-          <el-checkbox-group v-model="injectedExcerpts">
-            <div v-for="h in corpusHits" :key="h.excerpt_id" style="margin-bottom: 6px">
-              <el-checkbox :value="h">
-                <span style="font-size: 12px">[{{ h.excerpt_type }}]《{{ h.title }}》</span>
-              </el-checkbox>
-              <div style="font-size: 12px; color: #888; margin-left: 24px; white-space: pre-wrap">{{ h.text.slice(0, 80) }}…</div>
+    <el-row :gutter="16">
+      <el-col :span="9">
+        <!-- 第一步：选任务 -->
+        <el-card shadow="never" style="margin-bottom: 14px">
+          <template #header>第一步 · 我要做什么</template>
+          <div
+            v-for="t in TASKS"
+            :key="t.key"
+            class="task-card"
+            :class="{ active: task.key === t.key }"
+            @click="pickTask(t)"
+          >
+            <div class="task-title">
+              {{ t.title }}
+              <el-tag v-if="t.key === 'advanced'" size="small" type="info">老手</el-tag>
             </div>
-          </el-checkbox-group>
-        </div>
-
-        <el-button type="primary" :loading="running" style="width: 100%; margin-top: 12px" @click="doRun">
-          运行 {{ LAYER_LABELS[layer] }} 层
-        </el-button>
-        <el-button :loading="running" style="width: 100%; margin-top: 8px" @click="doRun">
-          幂等重试（只补失败块）
-        </el-button>
-        <div v-if="result?.markers_injected?.length" style="margin-top: 10px">
-          <el-alert type="warning" :closable="false" show-icon>
-            <template #title>本章必现标记已注入（{{ result.markers_injected.length }} 条）</template>
-            <div v-for="m in result.markers_injected" :key="m.id" style="font-size: 12px">
-              · {{ m.content }}
-            </div>
-          </el-alert>
-        </div>
-      </el-card>
-    </el-col>
-
-    <el-col :span="15">
-      <el-card v-if="running || liveText || liveThinking" shadow="never" style="margin-bottom: 14px">
-        <template #header>
-          <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
-            <span>实时生成</span>
-            <el-tag v-if="running" size="small" type="primary">块 {{ liveIndex + 1 }} 生成中…</el-tag>
-            <el-tag v-for="i in doneBlocks" :key="`d${i}`" size="small" type="success">块 {{ i + 1 }} 完成</el-tag>
-            <el-tag v-for="i in resumedBlocks" :key="`r${i}`" size="small" type="info">块 {{ i + 1 }} 收据复用</el-tag>
-            <span v-for="(n, i) in notices" :key="i" style="font-size: 12px; color: #e6a23c">{{ n }}</span>
+            <div class="task-desc">{{ t.desc }}</div>
           </div>
-        </template>
-        <el-collapse v-if="liveThinking" style="margin-bottom: 10px">
-          <el-collapse-item title="思考过程" name="think">
-            <pre class="thinking-pane">{{ liveThinking }}</pre>
-          </el-collapse-item>
-        </el-collapse>
-        <div ref="livePane" class="live-pane">
-          <pre style="white-space: pre-wrap; font-family: inherit; line-height: 1.9; margin: 0">{{ liveText }}<span v-if="running" class="typing-cursor">▍</span></pre>
-        </div>
-      </el-card>
+        </el-card>
 
-      <el-card v-if="result" shadow="never">
-        <template #header>
-          <div style="display: flex; gap: 12px; align-items: center">
-            <span>运行结果 {{ result.run_id.slice(0, 8) }}</span>
-            <el-tag size="small">块 {{ result.journal.completed }}/{{ result.journal.total }}</el-tag>
-            <el-tag v-if="result.journal.failed" type="danger" size="small">失败 {{ result.journal.failed }}</el-tag>
-            <el-tag v-if="result.resumed_indices.length" type="success" size="small">
-              复用收据 {{ result.resumed_indices.length }}
-            </el-tag>
-            <el-tag v-for="s in result.skills_injected" :key="s" type="warning" size="small">{{ s }}</el-tag>
-          </div>
-        </template>
-        <div style="margin-bottom: 10px; display: flex; gap: 8px; align-items: center">
-          <el-input
-            v-model="adoptNote"
-            placeholder="版本备注（可空，如：调整了第3章节奏）"
-            size="small"
-            style="width: 280px"
-          />
-          <el-button type="success" :loading="adopting" @click="adoptToProject">
-            采纳到当前项目
-          </el-button>
-          <span v-if="!currentProjectId" style="font-size: 12px; color: #c00">
-            未选择项目，顶部新建/选择后可入库
-          </span>
-        </div>
-        <el-tabs>
-          <el-tab-pane label="成文">
-            <pre style="white-space: pre-wrap; font-family: inherit; line-height: 1.9">{{ result.y }}</pre>
-          </el-tab-pane>
-          <el-tab-pane :label="`分块 (${result.pairs.length})`">
-            <el-collapse>
-              <el-collapse-item v-for="(p, i) in result.pairs" :key="i" :title="`块 ${i + 1}（${p[1].length} 字）`">
-                <div style="color: #888; font-size: 12px; margin-bottom: 6px">x: {{ p[0].slice(0, 120) }}…</div>
-                <pre style="white-space: pre-wrap; font-family: inherit">{{ p[1] }}</pre>
+        <!-- 第二步：填输入 -->
+        <el-card shadow="never">
+          <template #header>第二步 · 给我原料</template>
+          <el-form label-width="86px" label-position="left">
+            <el-form-item :label="isAdvanced ? '输入块' : '要点'">
+              <div style="width: 100%">
+                <el-input
+                  v-model="xLines"
+                  type="textarea"
+                  :rows="8"
+                  :placeholder="task.inputHint"
+                />
+                <div style="font-size: 12px; color: #999; margin-top: 4px">{{ task.example }}</div>
+              </div>
+            </el-form-item>
+
+            <el-form-item v-if="task.key === 'chapter' || isAdvanced" label="章号">
+              <el-input-number v-model="chapterNo" :min="1" placeholder="选填" style="width: 100%" />
+              <div style="font-size: 12px; color: #888">写正文时填写：自动注入该章待兑现的必现情节标记</div>
+            </el-form-item>
+
+            <el-form-item label="附加要求">
+              <el-input v-model="userDirective" type="textarea" :rows="2" placeholder="例：多写对话、结尾留悬念（可空）" />
+            </el-form-item>
+
+            <el-form-item v-if="isAdvanced" label="运行目标">
+              <el-select v-model="task.layer" @change="syncDefaults">
+                <el-option v-for="l in LAYERS" :key="l" :value="l" :label="LAYER_LABELS[l]" />
+              </el-select>
+            </el-form-item>
+
+            <el-collapse v-model="showAdvancedOpts">
+              <el-collapse-item title="高级选项：每段字数上限 / 写作模块 / 范文注入" name="adv">
+                <el-form-item label="字数上限">
+                  <el-input-number v-model="xChunkLength" :min="0" :step="500" placeholder="默认按运行目标规格" style="width: 100%" />
+                </el-form-item>
+                <el-form-item label="写作模块">
+                  <el-select v-model="selectedModules" multiple clearable style="width: 100%" placeholder="空 = 用默认集">
+                    <el-option v-for="m in modules" :key="m.name" :value="m.name" :label="`${m.name} — ${m.title}`" />
+                  </el-select>
+                </el-form-item>
+                <el-divider style="margin: 12px 0">范文注入（参考资料）</el-divider>
+                <el-form inline>
+                  <el-form-item>
+                    <el-select v-model="corpusType" clearable filterable placeholder="类型" style="width: 150px">
+                      <el-option v-for="t in allExcerptTypes" :key="t.type" :value="t.type" :label="`${t.type} (${t.count})`" />
+                    </el-select>
+                  </el-form-item>
+                  <el-form-item>
+                    <el-input v-model="corpusTag" placeholder="标签" style="width: 110px" clearable />
+                  </el-form-item>
+                  <el-form-item>
+                    <el-input v-model="corpusKeyword" placeholder="关键词" style="width: 110px" clearable />
+                  </el-form-item>
+                  <el-form-item>
+                    <el-button @click="previewCorpus">检索</el-button>
+                  </el-form-item>
+                </el-form>
+                <div v-if="corpusHits.length" style="max-height: 200px; overflow: auto">
+                  <el-checkbox-group v-model="injectedExcerpts">
+                    <div v-for="h in corpusHits" :key="h.excerpt_id" style="margin-bottom: 6px">
+                      <el-checkbox :value="h">
+                        <span style="font-size: 12px">[{{ h.excerpt_type }}]《{{ h.title }}》</span>
+                      </el-checkbox>
+                      <div style="font-size: 12px; color: #888; margin-left: 24px; white-space: pre-wrap">{{ h.text.slice(0, 80) }}…</div>
+                    </div>
+                  </el-checkbox-group>
+                </div>
               </el-collapse-item>
             </el-collapse>
-          </el-tab-pane>
-          <el-tab-pane :label="`收据 (${result.journal.receipts.length})`">
-            <el-table :data="result.journal.receipts" size="small">
-              <el-table-column prop="index" label="#" width="50" />
-              <el-table-column prop="status" label="状态" width="90">
-                <template #default="{ row }">
-                  <el-tag :type="row.status === 'completed' ? 'success' : 'danger'" size="small">{{ row.status }}</el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column prop="completion_status" label="完成态" width="110" />
-              <el-table-column prop="attempts" label="尝试" width="60" />
-              <el-table-column prop="x_hash" label="x_hash" width="130" />
-              <el-table-column prop="error" label="错误" show-overflow-tooltip />
-            </el-table>
-          </el-tab-pane>
-          <el-tab-pane label="审稿">
-            <div style="margin-bottom: 10px">
-              <el-button type="primary" plain :loading="reviewing" @click="doReview">
-                六项一致性审稿
-              </el-button>
-              <el-button v-if="review && review.unstable_count > 0" type="warning" @click="unstableToMarkers">
-                不稳项转下章必现修复
-              </el-button>
+          </el-form>
+
+          <el-button type="primary" :loading="running" style="width: 100%; margin-top: 12px" @click="doRun">
+            {{ running ? '生成中…' : hasFailed ? '继续生成（只补失败部分）' : '开始生成' }}
+          </el-button>
+          <div style="font-size: 12px; color: #999; text-align: center; margin-top: 6px">
+            中断没关系：同输入重跑只补缺的部分，已写好的不重复花钱
+          </div>
+          <div v-if="result?.markers_injected?.length" style="margin-top: 10px">
+            <el-alert type="warning" :closable="false" show-icon>
+              <template #title>本章必现情节已注入（{{ result.markers_injected.length }} 条）</template>
+              <div v-for="m in result.markers_injected" :key="m.id" style="font-size: 12px">
+                · {{ m.content }}
+              </div>
+            </el-alert>
+          </div>
+        </el-card>
+      </el-col>
+
+      <el-col :span="15">
+        <el-card v-if="running || liveText || liveThinking" shadow="never" style="margin-bottom: 14px">
+          <template #header>
+            <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
+              <span>实时生成</span>
+              <el-tag v-if="running" size="small" type="primary">第 {{ liveIndex + 1 }} 段生成中…</el-tag>
+              <el-tag v-for="i in doneBlocks" :key="`d${i}`" size="small" type="success">第 {{ i + 1 }} 段完成</el-tag>
+              <el-tag v-for="i in resumedBlocks" :key="`r${i}`" size="small" type="info">第 {{ i + 1 }} 段复用旧结果</el-tag>
+              <span v-for="(n, i) in notices" :key="i" style="font-size: 12px; color: #e6a23c">{{ n }}</span>
             </div>
-            <template v-if="review">
-              <el-alert
-                :type="review.verdict === 'pass' ? 'success' : 'error'"
-                :closable="false"
-                show-icon
-                style="margin-bottom: 10px"
-              >
-                <template #title>
-                  {{ review.verdict === 'pass' ? '审稿通过，可交稿' : `审稿不通过：${review.unstable_count} 项不稳，不能交稿` }}
-                </template>
-                {{ review.summary }}
-              </el-alert>
-              <el-table :data="review.items" size="small">
-                <el-table-column prop="name" label="检查项" width="110" />
-                <el-table-column prop="status" label="结论" width="80">
+          </template>
+          <el-collapse v-if="liveThinking" style="margin-bottom: 10px">
+            <el-collapse-item title="思考过程" name="think">
+              <pre class="thinking-pane">{{ liveThinking }}</pre>
+            </el-collapse-item>
+          </el-collapse>
+          <div ref="livePane" class="live-pane">
+            <pre style="white-space: pre-wrap; font-family: inherit; line-height: 1.9; margin: 0">{{ liveText }}<span v-if="running" class="typing-cursor">▍</span></pre>
+          </div>
+        </el-card>
+
+        <el-card v-if="result" shadow="never">
+          <template #header>
+            <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap">
+              <span>结果</span>
+              <el-tag size="small">{{ result.journal.completed }}/{{ result.journal.total }} 段</el-tag>
+              <el-tag v-if="result.journal.failed" type="danger" size="small">失败 {{ result.journal.failed }}</el-tag>
+              <el-tag v-if="result.resumed_indices.length" type="success" size="small">
+                复用旧结果 {{ result.resumed_indices.length }} 段
+              </el-tag>
+              <el-tag v-for="s in result.skills_injected" :key="s" type="warning" size="small">{{ s }}</el-tag>
+            </div>
+          </template>
+
+          <!-- 三出口：采纳 / 改后采纳 / 复制 -->
+          <div v-if="adopted && nextStep" style="margin-bottom: 12px">
+            <el-alert type="success" :closable="false" show-icon>
+              <template #title>{{ nextStep.text }}</template>
+              <el-button size="small" type="primary" plain @click="activeTab = nextStep.tab">{{ nextStep.label }}</el-button>
+            </el-alert>
+          </div>
+          <div style="margin-bottom: 10px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
+            <el-input
+              v-model="adoptNote"
+              placeholder="版本备注（可空，如：调整了第3章节奏）"
+              size="small"
+              style="width: 240px"
+            />
+            <el-button type="success" :loading="adopting" @click="adoptToProject">采纳到项目</el-button>
+            <el-button @click="copyY">复制全文</el-button>
+            <span v-if="!currentProjectId" style="font-size: 12px; color: #c00">
+              未选项目——顶部新建/选择后才能入库
+            </span>
+            <span v-else style="font-size: 12px; color: #999">下面内容可以直接改，改完再点采纳，存的是你的版本</span>
+          </div>
+
+          <el-tabs>
+            <el-tab-pane label="成文（可改）">
+              <el-input
+                v-model="editableY"
+                type="textarea"
+                :autosize="{ minRows: 10, maxRows: 26 }"
+                style="margin-bottom: 4px"
+              />
+            </el-tab-pane>
+            <el-tab-pane :label="`分段 (${result.pairs.length})`">
+              <el-collapse>
+                <el-collapse-item v-for="(p, i) in result.pairs" :key="i" :title="`第 ${i + 1} 段（${p[1].length} 字）`">
+                  <div style="color: #888; font-size: 12px; margin-bottom: 6px">要点：{{ p[0].slice(0, 120) }}…</div>
+                  <pre style="white-space: pre-wrap; font-family: inherit">{{ p[1] }}</pre>
+                </el-collapse-item>
+              </el-collapse>
+            </el-tab-pane>
+            <el-tab-pane label="生成明细">
+              <el-table :data="result.journal.receipts" size="small">
+                <el-table-column prop="index" label="#" width="50" />
+                <el-table-column prop="status" label="状态" width="90">
                   <template #default="{ row }">
-                    <el-tag :type="row.status === '稳' ? 'success' : 'danger'" size="small">{{ row.status }}</el-tag>
+                    <el-tag :type="row.status === 'completed' ? 'success' : 'danger'" size="small">
+                      {{ row.status === 'completed' ? '完成' : '失败' }}
+                    </el-tag>
                   </template>
                 </el-table-column>
-                <el-table-column prop="problem" label="问题与证据" show-overflow-tooltip />
+                <el-table-column prop="completion_status" label="完成态" width="110" />
+                <el-table-column prop="attempts" label="尝试" width="60" />
+                <el-table-column prop="x_hash" label="指纹" width="130" />
+                <el-table-column prop="error" label="错误" show-overflow-tooltip />
               </el-table>
-            </template>
-            <el-empty v-else description="点击「六项一致性审稿」对当前成文做逐项审查（不稳 ≥2 不交稿）" />
-          </el-tab-pane>
-        </el-tabs>
-      </el-card>
-      <el-empty v-else description="配置左侧参数后运行；同输入重跑会命中断点收据，不重复调用 LLM" />
-    </el-col>
-  </el-row>
+            </el-tab-pane>
+            <el-tab-pane label="审稿">
+              <div style="margin-bottom: 10px">
+                <el-button type="primary" plain :loading="reviewing" @click="doReview">
+                  六项一致性审稿
+                </el-button>
+                <el-button v-if="review && review.unstable_count > 0" type="warning" @click="unstableToMarkers">
+                  不稳项转下章必现修复
+                </el-button>
+              </div>
+              <template v-if="review">
+                <el-alert
+                  :type="review.verdict === 'pass' ? 'success' : 'error'"
+                  :closable="false"
+                  show-icon
+                  style="margin-bottom: 10px"
+                >
+                  <template #title>
+                    {{ review.verdict === 'pass' ? '审稿通过，可交稿' : `审稿不通过：${review.unstable_count} 项不稳，不能交稿` }}
+                  </template>
+                  {{ review.summary }}
+                </el-alert>
+                <el-table :data="review.items" size="small">
+                  <el-table-column prop="name" label="检查项" width="110" />
+                  <el-table-column prop="status" label="结论" width="80">
+                    <template #default="{ row }">
+                      <el-tag :type="row.status === '稳' ? 'success' : 'danger'" size="small">{{ row.status }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="problem" label="问题与证据" show-overflow-tooltip />
+                </el-table>
+              </template>
+              <el-empty v-else description="点「六项一致性审稿」逐项检查当前成文（不稳 ≥2 项不能交稿）" />
+            </el-tab-pane>
+          </el-tabs>
+        </el-card>
+        <el-empty v-else-if="!running" description="左边选一个任务，填几行要点，点「开始生成」——结果出来后可直接修改再采纳" />
+      </el-col>
+    </el-row>
+  </div>
 </template>
 
 <style scoped>
+.task-card {
+  border: 1px solid #dcdfe6;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+}
+.task-card:hover {
+  border-color: var(--el-color-primary-light-5);
+}
+.task-card.active {
+  border-color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+}
+.task-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.task-desc {
+  font-size: 12px;
+  color: #888;
+}
 .thinking-pane {
   white-space: pre-wrap;
   font-family: inherit;
