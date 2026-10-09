@@ -42,6 +42,16 @@ const filtered = computed(() =>
   }),
 )
 
+// 分页：过滤结果按 20/页切，翻筛条件自动回第 1 页
+const entityPage = ref(1)
+const entityPageSize = 20
+const paged = computed(() =>
+  filtered.value.slice((entityPage.value - 1) * entityPageSize, entityPage.value * entityPageSize),
+)
+watch([typeFilter, keyword], () => {
+  entityPage.value = 1
+})
+
 async function refresh() {
   if (!currentProjectId.value) {
     all.value = []
@@ -191,7 +201,7 @@ watch(currentProjectId, () => {
         />
       </div>
 
-      <el-table :data="filtered" v-loading="loading" size="small">
+      <el-table :data="paged" v-loading="loading" size="small">
         <el-table-column label="类型" width="90">
           <template #default="{ row }">
             <el-tag size="small" :type="row.type === 'foreshadow' ? 'warning' : 'info'">
@@ -226,6 +236,15 @@ watch(currentProjectId, () => {
           </template>
         </el-table-column>
       </el-table>
+      <div v-if="filtered.length > entityPageSize" style="margin-top: 14px; display: flex; justify-content: center">
+        <el-pagination
+          layout="total, prev, pager, next"
+          :total="filtered.length"
+          :page-size="entityPageSize"
+          :current-page="entityPage"
+          @current-change="(p: number) => (entityPage = p)"
+        />
+      </div>
 
       <div style="margin-top: 12px; font-size: 12px; color: #aaa">
         实体按项目隔离；「从正文抽取」用个人成本通道，抽取结果合并进库（同名只补空字段与章节，不覆盖人工内容）。

@@ -1,12 +1,19 @@
 <script setup lang="ts">
 // 必现标记管理：【第N章必现】提取/手动添加/状态流转/正文兑现校验
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { markersApi, type MarkerInfo } from '../api'
 import { currentProjectId } from '../state'
 
 const markers = ref<MarkerInfo[]>([])
 const pendingCount = ref(0)
+
+// 分页：标记清单按 20/页切
+const markerPage = ref(1)
+const markerPageSize = 20
+const paged = computed(() =>
+  markers.value.slice((markerPage.value - 1) * markerPageSize, markerPage.value * markerPageSize),
+)
 const addChapter = ref<number>(1)
 const addContent = ref('')
 const extractText = ref('')
@@ -24,7 +31,10 @@ async function refresh() {
   }
 }
 onMounted(refresh)
-watch(currentProjectId, () => refresh())
+watch(currentProjectId, () => {
+  markerPage.value = 1
+  refresh()
+})
 
 async function add() {
   if (!addContent.value.trim()) {
@@ -144,7 +154,7 @@ const SOURCE_LABEL: Record<string, string> = {
       <el-card shadow="never">
         <template #header>标记清单（{{ markers.length }}）</template>
         <el-empty v-if="!markers.length" description="还没有标记；在写作层填章号运行时，待兑现标记会自动注入生成上下文" />
-        <el-table v-else :data="markers" size="small">
+        <el-table v-else :data="paged" size="small">
           <el-table-column prop="target_chapter" label="章" width="60" />
           <el-table-column prop="content" label="必现内容" show-overflow-tooltip />
           <el-table-column prop="status" label="状态" width="90">
@@ -165,6 +175,15 @@ const SOURCE_LABEL: Record<string, string> = {
             </template>
           </el-table-column>
         </el-table>
+        <el-pagination
+          v-if="markers.length > markerPageSize"
+          v-model:current-page="markerPage"
+          :page-size="markerPageSize"
+          :total="markers.length"
+          layout="prev, pager, next, total"
+          size="small"
+          style="margin-top: 8px; justify-content: flex-end"
+        />
       </el-card>
     </el-col>
   </el-row>

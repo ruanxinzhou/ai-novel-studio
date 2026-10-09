@@ -26,6 +26,24 @@ const percent = computed(() =>
     : 0,
 )
 
+// 分页：拆解进度和切分预览各按 20/页切（数据全量持有，拆解扫描不受影响）
+const statusPage = ref(1)
+const previewPage = ref(1)
+const tablePageSize = 20
+const pagedStatusChapters = computed(() =>
+  status.value
+    ? status.value.chapters.slice(
+        (statusPage.value - 1) * tablePageSize,
+        statusPage.value * tablePageSize,
+      )
+    : [],
+)
+const pagedPreview = computed(() =>
+  preview.value
+    ? preview.value.slice((previewPage.value - 1) * tablePageSize, previewPage.value * tablePageSize)
+    : [],
+)
+
 async function refreshStatus() {
   if (!currentProjectId.value) return
   try {
@@ -136,6 +154,8 @@ watch(currentProjectId, () => {
   preview.value = null
   importedVersion.value = null
   analyzeLog.value = []
+  statusPage.value = 1
+  previewPage.value = 1
   refreshStatus()
 })
 </script>
@@ -208,7 +228,7 @@ watch(currentProjectId, () => {
               汇总采纳大纲
             </el-button>
           </div>
-          <el-table v-if="status?.chapters?.length" :data="status.chapters" size="small" max-height="360">
+          <el-table v-if="status?.chapters?.length" :data="pagedStatusChapters" size="small" max-height="360">
             <el-table-column prop="no" label="章" width="60" />
             <el-table-column prop="title" label="章名" width="140" show-overflow-tooltip />
             <el-table-column prop="chars" label="字数" width="80" />
@@ -229,6 +249,15 @@ watch(currentProjectId, () => {
             <el-table-column prop="outline_preview" label="大纲预览" show-overflow-tooltip />
           </el-table>
           <el-empty v-else description="导入正文后这里显示拆解进度" :image-size="60" />
+          <el-pagination
+            v-if="status && status.chapters.length > tablePageSize"
+            v-model:current-page="statusPage"
+            :page-size="tablePageSize"
+            :total="status.chapters.length"
+            layout="prev, pager, next"
+            size="small"
+            style="margin-top: 8px; justify-content: center"
+          />
           <div v-if="analyzeLog.length" style="margin-top: 8px; max-height: 120px; overflow: auto; font-size: 12px; color: #888">
             <div v-for="(line, i) in analyzeLog" :key="i">{{ line }}</div>
           </div>
@@ -239,7 +268,7 @@ watch(currentProjectId, () => {
       <template #header>
         <span style="font-weight: 600">切分预览（{{ preview.length }} 章）</span>
       </template>
-      <el-table :data="preview" size="small" max-height="260">
+      <el-table :data="pagedPreview" size="small" max-height="260">
         <el-table-column prop="no" label="章号" width="90">
           <template #default="{ row }">
             <span v-if="row.no === 0" style="color: #d90">前言/全文</span>
@@ -249,6 +278,15 @@ watch(currentProjectId, () => {
         <el-table-column prop="title" label="章名" />
         <el-table-column prop="chars" label="字数" width="120" />
       </el-table>
+      <el-pagination
+        v-if="preview && preview.length > tablePageSize"
+        v-model:current-page="previewPage"
+        :page-size="tablePageSize"
+        :total="preview.length"
+        layout="prev, pager, next, total"
+        size="small"
+        style="margin-top: 8px; justify-content: flex-end"
+      />
     </el-card>
     </template>
   </div>

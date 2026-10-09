@@ -38,7 +38,10 @@ export interface DryRunResult {
 
 export const api = {
   promptsList: () => req<{ layers: PromptSummary[] }>('/api/prompts'),
-  promptsDetail: (layer: string) => req<PromptDetail>(`/api/prompts/${layer}`),
+  promptsDetail: (layer: string, page?: number, pageSize?: number) =>
+    req<PromptDetail & PageMeta>(
+      `/api/prompts/${layer}${page != null ? `?page=${page}&page_size=${pageSize ?? 10}` : ''}`,
+    ),
   promptsEdit: (layer: string, text: string, note: string) =>
     req<{ layer: string; effective: string }>(`/api/prompts/${layer}`, {
       method: 'PUT',
@@ -160,9 +163,23 @@ export const refineApi = {
     }).then((r) => consumeSSE<{ y: string }>(r, h)),
 }
 
+export interface PageMeta {
+  total?: number
+  page?: number
+  page_size?: number
+}
+
 export const markersApi = {
-  list: (project?: string) =>
-    req<MarkersSummary>(`/api/markers${project ? `?project=${encodeURIComponent(project)}` : ''}`),
+  list: (project?: string, page?: number, pageSize?: number) => {
+    const q = new URLSearchParams()
+    if (project) q.set('project', project)
+    if (page != null) {
+      q.set('page', String(page))
+      q.set('page_size', String(pageSize ?? 20))
+    }
+    const qs = q.toString()
+    return req<MarkersSummary & PageMeta>(`/api/markers${qs ? `?${qs}` : ''}`)
+  },
   add: (target_chapter: number, content: string, project?: string) =>
     req<MarkersSummary>(
       `/api/markers${project ? `?project=${encodeURIComponent(project)}` : ''}`,
@@ -199,12 +216,20 @@ export const skillsApi = {
 export const corpusApi = {
   types: () => req<{ types: { type: string; count: number }[] }>('/api/corpus/types'),
   tags: () => req<{ tags: { tag: string; count: number }[] }>('/api/corpus/tags'),
-  search: (q: { excerpt_type?: string; tag?: string; keyword?: string; limit?: number }) => {
+  search: (
+    q: { excerpt_type?: string; tag?: string; keyword?: string; limit?: number },
+    page?: number,
+    pageSize?: number,
+  ) => {
     const p = new URLSearchParams()
     Object.entries(q).forEach(([k, v]) => {
       if (v) p.set(k, String(v))
     })
-    return req<{ total: number; excerpts: Excerpt[] }>(`/api/corpus/search?${p}`)
+    if (page != null) {
+      p.set('page', String(page))
+      p.set('page_size', String(pageSize ?? 20))
+    }
+    return req<{ total: number; excerpts: Excerpt[] } & PageMeta>(`/api/corpus/search?${p}`)
   },
 }
 
@@ -308,7 +333,10 @@ export interface LayerVersionFull {
 }
 
 export const projectsApi = {
-  list: () => req<{ projects: ProjectMeta[] }>('/api/projects'),
+  list: (page?: number, pageSize?: number) =>
+    req<{ projects: ProjectMeta[] } & PageMeta>(
+      `/api/projects${page != null ? `?page=${page}&page_size=${pageSize ?? 20}` : ''}`,
+    ),
   create: (title: string, intro: string) =>
     req<ProjectMeta>('/api/projects', { method: 'POST', body: JSON.stringify({ title, intro }) }),
   detail: (pid: string) => req<ProjectDetail>(`/api/projects/${pid}`),
@@ -316,10 +344,18 @@ export const projectsApi = {
     req<ProjectMeta>(`/api/projects/${pid}`, { method: 'PUT', body: JSON.stringify({ title, intro }) }),
   remove: (pid: string) =>
     req<{ deleted: string }>(`/api/projects/${pid}`, { method: 'DELETE' }),
-  layer: (pid: string, layer: string, seq?: number) =>
-    req<{ version: LayerVersionFull | null; history: ProjectLayerSummary[] }>(
-      `/api/projects/${pid}/layers/${layer}${seq ? `?seq=${seq}` : ''}`,
-    ),
+  layer: (pid: string, layer: string, seq?: number, page?: number, pageSize?: number) => {
+    const q = new URLSearchParams()
+    if (seq) q.set('seq', String(seq))
+    if (page != null) {
+      q.set('page', String(page))
+      q.set('page_size', String(pageSize ?? 20))
+    }
+    const qs = q.toString()
+    return req<{ version: LayerVersionFull | null; history: ProjectLayerSummary[] } & PageMeta>(
+      `/api/projects/${pid}/layers/${layer}${qs ? `?${qs}` : ''}`,
+    )
+  },
   adopt: (pid: string, layer: string, y: string, xPairs: [string, string][], note: string) =>
     req<LayerVersionFull>(`/api/projects/${pid}/layers/${layer}`, {
       method: 'POST',
@@ -392,13 +428,22 @@ export interface VaultExportResult {
 }
 
 export const entitiesApi = {
-  list: (pid: string, q: { type?: string; status?: string; keyword?: string } = {}) => {
+  list: (
+    pid: string,
+    q: { type?: string; status?: string; keyword?: string } = {},
+    page?: number,
+    pageSize?: number,
+  ) => {
     const p = new URLSearchParams()
     Object.entries(q).forEach(([k, v]) => {
       if (v) p.set(k, String(v))
     })
+    if (page != null) {
+      p.set('page', String(page))
+      p.set('page_size', String(pageSize ?? 20))
+    }
     const qs = p.toString()
-    return req<EntitiesSummary>(`/api/projects/${pid}/entities${qs ? `?${qs}` : ''}`)
+    return req<EntitiesSummary & PageMeta>(`/api/projects/${pid}/entities${qs ? `?${qs}` : ''}`)
   },
   add: (pid: string, body: { type: string; name: string; summary?: string; details?: string; status?: string; chapter?: number }) =>
     req<EntityInfo>(`/api/projects/${pid}/entities`, { method: 'POST', body: JSON.stringify(body) }),
@@ -469,7 +514,10 @@ export const importApi = {
       method: 'POST',
       body: JSON.stringify({ chapter, text: opts.text || null, force: opts.force || false }),
     }),
-  status: (pid: string) => req<ImportStatus>(`/api/projects/${pid}/import/status`),
+  status: (pid: string, page?: number, pageSize?: number) =>
+    req<ImportStatus & PageMeta>(
+      `/api/projects/${pid}/import/status${page != null ? `?page=${page}&page_size=${pageSize ?? 50}` : ''}`,
+    ),
   adoptOutline: (pid: string) =>
     req<{ seq: number; chapters: number }>(`/api/projects/${pid}/import/adopt_outline`, {
       method: 'POST',
@@ -605,7 +653,10 @@ export interface FinalizeResult {
 }
 
 export const deskApi = {
-  detail: (pid: string) => req<DeskDetail>(`/api/projects/${pid}/desk`),
+  detail: (pid: string, page?: number, pageSize?: number) =>
+    req<DeskDetail & PageMeta>(
+      `/api/projects/${pid}/desk${page != null ? `?page=${page}&page_size=${pageSize ?? 50}` : ''}`,
+    ),
   chapter: (pid: string, chapter: number) =>
     req<DeskChapterDetail>(`/api/projects/${pid}/desk/${chapter}`),
   run: (pid: string, chapter: number, stage: string, opts: { directive?: string; force?: boolean } = {}) =>

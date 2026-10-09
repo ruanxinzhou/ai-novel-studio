@@ -73,22 +73,42 @@ def list_tags() -> list[tuple[str, int]]:
     return sorted(counts.items(), key=lambda kv: -kv[1])
 
 
+def _matches(e: Excerpt, excerpt_type: str | None, tag: str | None, keyword: str | None) -> bool:
+    if excerpt_type and excerpt_type not in e.excerpt_type:
+        return False
+    if tag and tag not in e.tags:
+        return False
+    if keyword and keyword not in e.title and keyword not in e.text:
+        return False
+    return True
+
+
 def search(
     excerpt_type: str | None = None,
     tag: str | None = None,
     keyword: str | None = None,
     limit: int = 5,
+    offset: int = 0,
 ) -> list[Excerpt]:
-    """组合过滤：类型 + 标签 + 关键词（标题/正文子串），按条数截断。"""
+    """组合过滤：类型 + 标签 + 关键词（标题/正文子串），offset 跳过前 N 条后按条数截断。"""
     hits: list[Excerpt] = []
+    skipped = 0
     for e in _load_all():
-        if excerpt_type and excerpt_type not in e.excerpt_type:
+        if not _matches(e, excerpt_type, tag, keyword):
             continue
-        if tag and tag not in e.tags:
-            continue
-        if keyword and keyword not in e.title and keyword not in e.text:
+        if skipped < offset:
+            skipped += 1
             continue
         hits.append(e)
         if len(hits) >= limit:
             break
     return hits
+
+
+def count(
+    excerpt_type: str | None = None,
+    tag: str | None = None,
+    keyword: str | None = None,
+) -> int:
+    """组合过滤后的总条数（分页 total 用）。"""
+    return sum(1 for e in _load_all() if _matches(e, excerpt_type, tag, keyword))

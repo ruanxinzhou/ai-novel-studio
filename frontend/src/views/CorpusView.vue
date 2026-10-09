@@ -12,6 +12,8 @@ const qKeyword = ref('')
 const hits = ref<Excerpt[]>([])
 const total = ref(0)
 const searching = ref(false)
+const page = ref(1)
+const pageSize = 10
 
 onMounted(async () => {
   try {
@@ -24,17 +26,21 @@ onMounted(async () => {
   }
 })
 
-async function doSearch() {
+async function doSearch(p = 1) {
   searching.value = true
   try {
-    const r = await corpusApi.search({
-      excerpt_type: qType.value || undefined,
-      tag: qTag.value || undefined,
-      keyword: qKeyword.value || undefined,
-      limit: 10,
-    })
+    const r = await corpusApi.search(
+      {
+        excerpt_type: qType.value || undefined,
+        tag: qTag.value || undefined,
+        keyword: qKeyword.value || undefined,
+      },
+      p,
+      pageSize,
+    )
     hits.value = r.excerpts
-    total.value = r.total
+    total.value = r.total ?? r.excerpts.length
+    page.value = r.page ?? p
   } catch (e) {
     ElMessage.error(`检索失败：${(e as Error).message}`)
   } finally {
@@ -57,16 +63,16 @@ async function doSearch() {
         </el-select>
       </el-form-item>
       <el-form-item label="关键词">
-        <el-input v-model="qKeyword" clearable placeholder="标题/正文子串" style="width: 180px" @keyup.enter="doSearch" />
+        <el-input v-model="qKeyword" clearable placeholder="标题/正文子串" style="width: 180px" @keyup.enter="doSearch()" />
       </el-form-item>
       <el-form-item>
-        <el-button type="primary" :loading="searching" @click="doSearch">检索</el-button>
+        <el-button type="primary" :loading="searching" @click="doSearch()">检索</el-button>
       </el-form-item>
     </el-form>
 
     <el-divider />
     <div style="color: #888; font-size: 13px; margin-bottom: 12px">
-      命中 {{ total }} 条（显示前 {{ hits.length }} 条）——运行台可勾选注入作为参考资料
+      命中 {{ total }} 条，第 {{ page }}/{{ Math.max(1, Math.ceil(total / pageSize)) }} 页——运行台可勾选注入作为参考资料
     </div>
     <el-empty v-if="!hits.length" description="无命中" />
     <el-collapse v-else>
@@ -79,5 +85,14 @@ async function doSearch() {
         <pre style="white-space: pre-wrap; font-family: inherit; line-height: 1.9">{{ h.text }}</pre>
       </el-collapse-item>
     </el-collapse>
+    <div v-if="total > pageSize" style="margin-top: 14px; display: flex; justify-content: center">
+      <el-pagination
+        layout="prev, pager, next, jumper"
+        :total="total"
+        :page-size="pageSize"
+        :current-page="page"
+        @current-change="(p: number) => doSearch(p)"
+      />
+    </div>
   </el-card>
 </template>

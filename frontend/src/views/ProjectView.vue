@@ -24,6 +24,11 @@ const busy = ref(false)
 const exporting = ref(false)
 const lastExportDir = ref('')
 
+// 版本历史服务端分页：切层回第 1 页
+const historyPage = ref(1)
+const historyPageSize = 10
+const historyTotal = ref(0)
+
 async function exportVault() {
   if (!currentProjectId.value) return
   exporting.value = true
@@ -56,14 +61,16 @@ async function refresh() {
 }
 
 async function showLayer(layer: string, seq?: number) {
+  if (layer !== activeLayer.value) historyPage.value = 1
   activeLayer.value = layer
   viewingSeq.value = seq ?? null
   editing.value = false
   if (!currentProjectId.value) return
   try {
-    const r = await projectsApi.layer(currentProjectId.value, layer, seq)
+    const r = await projectsApi.layer(currentProjectId.value, layer, seq, historyPage.value, historyPageSize)
     version.value = r.version
     history.value = r.history
+    historyTotal.value = r.total ?? r.history.length
   } catch (e) {
     ElMessage.error(`加载失败：${(e as Error).message}`)
   }
@@ -116,7 +123,15 @@ async function rollback(seq: number) {
 }
 
 onMounted(refresh)
-watch(currentProjectId, () => refresh())
+watch(currentProjectId, () => {
+  historyPage.value = 1
+  refresh()
+})
+
+function historyPageChange(p: number) {
+  historyPage.value = p
+  showLayer(activeLayer.value, viewingSeq.value ?? undefined)
+}
 </script>
 
 <template>
@@ -197,7 +212,7 @@ watch(currentProjectId, () => refresh())
         <el-empty v-else description="该层还没有采纳版本；去「运行台」生成后点「采纳到项目」" />
 
         <template v-if="history.length">
-          <el-divider>版本历史（{{ history.length }}）</el-divider>
+          <el-divider>版本历史（{{ historyTotal }}）</el-divider>
           <el-table :data="history" size="small" @row-click="(row: any) => showLayer(activeLayer, row.seq)">
             <el-table-column prop="seq" label="#" width="60" />
             <el-table-column prop="note" label="备注" show-overflow-tooltip />
@@ -211,6 +226,16 @@ watch(currentProjectId, () => refresh())
               </template>
             </el-table-column>
           </el-table>
+          <el-pagination
+            v-if="historyTotal > historyPageSize"
+            v-model:current-page="historyPage"
+            :page-size="historyPageSize"
+            :total="historyTotal"
+            layout="prev, pager, next, total"
+            size="small"
+            style="margin-top: 8px; justify-content: flex-end"
+            @current-change="historyPageChange"
+          />
         </template>
       </el-card>
     </el-col>

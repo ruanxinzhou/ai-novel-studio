@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from ..config import REPO
 from ..context import Material, MaterialFamily
+from ..corpus import count as corpus_count
 from ..corpus import list_tags, list_types, search as corpus_search
 from ..entities import ENTITY_TYPES, TYPE_LABELS, EntityStore, extract_entities
 from ..entities.vault import export_vault
@@ -142,6 +143,16 @@ def json_dumps(obj) -> str:
     return json.dumps(obj, ensure_ascii=False)
 
 
+def _paginate(items: list, page: int | None, page_size: int) -> tuple[list, dict]:
+    """列表分页：page 缺省不分页（响应保持旧形状，兼容旧调用方）；
+    给出 page 时返回切片并附 total/page/page_size 元信息。"""
+    if page is None:
+        return items, {}
+    size = max(1, min(page_size, 200))
+    start = (max(1, page) - 1) * size
+    return items[start:start + size], {"total": len(items), "page": page, "page_size": size}
+
+
 # ---- Prompt 工坊（M1-T5）----
 
 class PromptEditIn(BaseModel):
@@ -172,12 +183,15 @@ def prompts_list() -> dict:
 
 
 @app.get("/api/prompts/{layer}")
-def prompts_detail(layer: str) -> dict:
+def prompts_detail(layer: str, page: int | None = None, page_size: int = 20) -> dict:
     try:
         summary = _prompt_summary(layer)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    summary["history"] = [v.as_dict() for v in _prompt_store.history(layer)]
+    history = [v.as_dict() for v in _prompt_store.history(layer)]
+    history, page_meta = _paginate(history, page, page_size)
+    summary["history"] = history
+    summary.update(page_meta)
     return summary
 
 
@@ -500,7 +514,15 @@ def corpus_tags() -> dict:
 
 @app.get("/api/corpus/search")
 def corpus_query(excerpt_type: str | None = None, tag: str | None = None,
-                 keyword: str | None = None, limit: int = 5) -> dict:
+                 keyword: str | None = None, limit: int = 5,
+                 page: int | None = None, page_size: int = 20) -> dict:
+    if page is not None:
+        size = max(1, min(page_size, 50))
+        hits = corpus_search(excerpt_type=excerpt_type, tag=tag, keyword=keyword,
+                             limit=size, offset=(max(1, page) - 1) * size)
+        total = corpus_count(excerpt_type=excerpt_type, tag=tag, keyword=keyword)
+        return {"total": total, "page": page, "page_size": size,
+                "excerpts": [e.as_dict() for e in hits]}
     hits = corpus_search(excerpt_type=excerpt_type, tag=tag, keyword=keyword,
                          limit=max(1, min(limit, 20)))
     return {"total": len(hits), "excerpts": [e.as_dict() for e in hits]}
@@ -571,8 +593,12 @@ def _marker_summary(project: str | None) -> dict:
 
 
 @app.get("/api/markers")
-def markers_list(project: str | None = None) -> dict:
-    return _marker_summary(project)
+def markers_list(project: str | None = None, page: int | None = None, page_size: int = 20) -> dict:
+    summary = _marker_summary(project)
+    markers, page_meta = _paginate(summary["markers"], page, page_size)
+    summary["markers"] = markers
+    summary.update(page_meta)
+    return summary
 
 
 @app.post("/api/markers")
@@ -637,12 +663,13 @@ class RollbackIn(BaseModel):
 
 
 @app.get("/api/projects")
-def projects_list() -> dict:
+def projects_list(page: int | None = None, page_size: int = 20) -> dict:
     out = []
     for meta in _project_store.list():
         meta["wizard_summary"] = _wizard_summary(meta["id"])
         out.append(meta)
-    return {"projects": out}
+    out, page_meta = _paginate(out, page, page_size)
+    return {"projects": out, **page_meta}
 
 
 @app.post("/api/projects")
@@ -685,15 +712,19 @@ def projects_delete(pid: str) -> dict:
 
 
 @app.get("/api/projects/{pid}/layers/{layer}")
-def project_layer(pid: str, layer: str, seq: int | None = None) -> dict:
-    """层详情：seq 缺省看当前版本，否则看指定历史版本。"""
+def project_layer(pid: str, layer: str, seq: int | None = None,
+                  page: int | None = None, page_size: int = 20) -> dict:
+    """层详情：seq 缺省看当前版本，否则看指定历史版本。history 支持 page 分页。"""
     _require_project(pid)
     if layer not in ("intro", "outline", "plot", "draft", "polish"):
         raise HTTPException(status_code=404, detail=f"未知层：{layer}")
     v = _project_store.version(pid, layer, seq) if seq else _project_store.current(pid, layer)
+    history, page_meta = _paginate(
+        [x.as_summary() for x in _project_store.history(pid, layer)], page, page_size)
     return {
         "version": v.as_dict() if v else None,
-        "history": [x.as_summary() for x in _project_store.history(pid, layer)],
+        "history": history,
+        **page_meta,
     }
 
 
@@ -756,18 +787,22 @@ def _entity_summary(pid: str) -> dict:
 
 @app.get("/api/projects/{pid}/entities")
 def entities_list(pid: str, type: str | None = None, status: str | None = None,
-                  keyword: str | None = None) -> dict:
+                  keyword: str | None = None,
+                  page: int | None = None, page_size: int = 20) -> dict:
     _require_project(pid)
     if type and type not in ENTITY_TYPES:
         raise HTTPException(status_code=422, detail=f"未知实体类型：{type}")
     store = _entities_for(pid)
     found = store.list(type=type, status=status, keyword=keyword)
+    items, page_meta = _paginate([e.as_dict() for e in found], page, page_size)
     return {
         "project": pid,
-        "entities": [e.as_dict() for e in found],
+        "entities": items,
         "counts": {t: sum(1 for e in store.entities if e.type == t)
                    for t in ENTITY_TYPES},
         "total": len(store.entities),
+        "matched": len(found),
+        **page_meta,
     }
 
 
@@ -937,8 +972,8 @@ def import_analyze_chapter(pid: str, body: ImportAnalyzeIn) -> dict:
 
 
 @app.get("/api/projects/{pid}/import/status")
-def import_status(pid: str) -> dict:
-    """逐章拆解进度：正文切分 ∪ 已有收据。"""
+def import_status(pid: str, page: int | None = None, page_size: int = 50) -> dict:
+    """逐章拆解进度：正文切分 ∪ 已有收据。chapters 支持 page 分页。"""
     _require_project(pid)
     journal = _import_journal_for(pid)
     v = _project_store.current(pid, "draft")
@@ -963,7 +998,9 @@ def import_status(pid: str) -> dict:
         out.append(info)
     done = sum(1 for c in out if c["entities_status"] == "completed"
                and c["outline_status"] == "completed")
-    return {"project": pid, "chapters": out, "total": len(out), "done": done}
+    total = len(out)
+    out, page_meta = _paginate(out, page, page_size)
+    return {"project": pid, "chapters": out, "total": total, "done": done, **page_meta}
 
 
 @app.post("/api/projects/{pid}/import/adopt_outline")
@@ -1123,9 +1160,13 @@ class DeskFinalizeIn(BaseModel):
 
 
 @app.get("/api/projects/{pid}/desk")
-def desk_detail(pid: str) -> dict:
+def desk_detail(pid: str, page: int | None = None, page_size: int = 50) -> dict:
     _require_project(pid)
-    return _desk_summary(pid)
+    summary = _desk_summary(pid)
+    chapters, page_meta = _paginate(summary["chapters"], page, page_size)
+    summary["chapters"] = chapters
+    summary.update(page_meta)
+    return summary
 
 
 @app.get("/api/projects/{pid}/desk/{chapter}")

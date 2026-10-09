@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 项目管理页：所有小说项目的卡片总览——进入/切换、新建、编辑、删除
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   LAYER_LABELS,
@@ -13,6 +13,13 @@ import { activeTab, currentProjectId } from '../state'
 
 const projects = ref<ProjectMeta[]>([])
 const loading = ref(false)
+
+// 分页：项目卡片按 9 本/页切
+const projectPage = ref(1)
+const projectPageSize = 9
+const paged = computed(() =>
+  projects.value.slice((projectPage.value - 1) * projectPageSize, projectPage.value * projectPageSize),
+)
 
 const createVisible = ref(false)
 const createForm = ref({ title: '', intro: '' })
@@ -126,7 +133,7 @@ onMounted(refresh)
       </div>
 
       <el-row v-else :gutter="12">
-        <el-col v-for="p in projects" :key="p.id" :xs="24" :sm="12" :md="8" style="margin-bottom: 12px">
+        <el-col v-for="p in paged" :key="p.id" :xs="24" :sm="12" :md="8" style="margin-bottom: 12px">
           <el-card
             shadow="hover"
             :body-style="{ padding: '14px' }"
@@ -187,6 +194,16 @@ onMounted(refresh)
           </el-card>
         </el-col>
       </el-row>
+
+      <el-pagination
+        v-if="projects.length > projectPageSize"
+        v-model:current-page="projectPage"
+        :page-size="projectPageSize"
+        :total="projects.length"
+        layout="prev, pager, next, total"
+        size="small"
+        style="margin-top: 4px; justify-content: flex-end"
+      />
 
       <div style="font-size: 12px; color: #aaa; margin-top: 8px">
         推荐流程：新建项目 → 「创作导航」里逐层生成并采纳（简介→大纲→剧情→正文→润色）→

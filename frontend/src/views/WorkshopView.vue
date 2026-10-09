@@ -21,6 +21,11 @@ const dryResult = ref<Awaited<ReturnType<typeof api.promptsDryRun>> | null>(null
 const saving = ref(false)
 const drying = ref(false)
 
+// 修改历史服务端分页
+const historyPage = ref(1)
+const historyPageSize = 10
+const historyTotal = ref(0)
+
 onMounted(refresh)
 
 async function refresh() {
@@ -33,11 +38,22 @@ async function refresh() {
   }
 }
 
+async function loadDetail(layer: string, page: number) {
+  const r = await api.promptsDetail(layer, page, historyPageSize)
+  detail.value = r
+  historyTotal.value = r.total ?? r.history.length
+  historyPage.value = page
+}
+
 async function select(layer: string) {
   active.value = layer
   editing.value = false
   dryResult.value = null
-  detail.value = await api.promptsDetail(layer)
+  await loadDetail(layer, 1)
+}
+
+function historyPageChange(p: number) {
+  if (detail.value) loadDetail(detail.value.layer, p).catch((e) => ElMessage.error(`加载失败：${(e as Error).message}`))
 }
 
 function startEdit() {
@@ -151,7 +167,7 @@ async function dryRun() {
         </el-card>
 
         <el-card v-if="detail.history.length" shadow="never">
-          <template #header>修改历史（{{ detail.history.length }}）</template>
+          <template #header>修改历史（{{ historyTotal }}）</template>
           <el-timeline>
             <el-timeline-item
               v-for="(h, i) in [...detail.history].reverse()"
@@ -164,6 +180,16 @@ async function dryRun() {
               <pre style="white-space: pre-wrap; font-family: inherit; color: #555; margin: 4px 0 0">{{ h.text.slice(0, 200) }}{{ h.text.length > 200 ? '…' : '' }}</pre>
             </el-timeline-item>
           </el-timeline>
+          <el-pagination
+            v-if="historyTotal > historyPageSize"
+            v-model:current-page="historyPage"
+            :page-size="historyPageSize"
+            :total="historyTotal"
+            layout="prev, pager, next, total"
+            size="small"
+            style="margin-top: 8px; justify-content: flex-end"
+            @current-change="historyPageChange"
+          />
         </el-card>
       </template>
     </el-col>

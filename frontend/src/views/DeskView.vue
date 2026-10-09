@@ -48,6 +48,15 @@ const todayNo = computed(
   () => overview.value?.chapters.find((c) => !c.finalized_at)?.no ?? 0,
 )
 
+// 分页：章节列表按 30/页切，全量拉取保证「今日应写」跨页计算正确
+const deskPage = ref(1)
+const deskPageSize = 30
+const pagedChapters = computed(() =>
+  overview.value
+    ? overview.value.chapters.slice((deskPage.value - 1) * deskPageSize, deskPage.value * deskPageSize)
+    : [],
+)
+
 async function loadOverview(keepSelection = true) {
   if (!currentProjectId.value) {
     overview.value = null
@@ -250,6 +259,7 @@ watch(currentProjectId, () => {
   currentNo.value = 0
   detail.value = null
   overview.value = null
+  deskPage.value = 1
   loadOverview(false)
 })
 </script>
@@ -291,7 +301,7 @@ watch(currentProjectId, () => {
         </div>
         <el-scrollbar max-height="560px">
           <div
-            v-for="c in overview!.chapters"
+            v-for="c in pagedChapters"
             :key="c.no"
             class="chapter-item"
             :class="{ active: c.no === currentNo, today: c.no === todayNo }"
@@ -320,6 +330,15 @@ watch(currentProjectId, () => {
             </div>
           </div>
         </el-scrollbar>
+        <el-pagination
+          v-if="totalCount > deskPageSize"
+          v-model:current-page="deskPage"
+          :page-size="deskPageSize"
+          :total="totalCount"
+          layout="prev, pager, next"
+          size="small"
+          style="margin-top: 8px; justify-content: center"
+        />
       </el-card>
     </el-col>
 
