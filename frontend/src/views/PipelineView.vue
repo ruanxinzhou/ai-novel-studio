@@ -118,7 +118,7 @@ async function loadOutlineToX() {
   }
   xLines.value = projectOutline.value.y
   loadedOutlineIntoX.value = true
-  ElMessage.success('已载入当前大纲——微调请用「继续调整」；点「开始生成」会重新分段生成全书')
+  ElMessage.success('已载入当前大纲——在下方输入要求点「按要求调整」原地微调；点「开始生成」才会重新生成全书')
 }
 
 async function loadIntroToX() {
@@ -350,7 +350,7 @@ async function doRun() {
       try {
         await ElMessageBox.confirm(
           '要点框是项目当前大纲。点「开始生成」会重新分段生成全书大纲——每段独立产出，跨段剧情与成长事件可能重复、不连贯。' +
-            '只想按指令调整细节的话，请先生成一次再用结果区的「继续调整」（原样保留，只改要求部分）。仍要重新生成？',
+            '只想按指令调整细节的话，请取消后用要点框下方的「按要求调整」（原样保留，只改要求部分）。仍要重新生成？',
           '重新生成确认',
           { type: 'warning', confirmButtonText: '仍要重新生成', cancelButtonText: '取消' },
         )
@@ -522,6 +522,72 @@ async function doRefine() {
 }
 
 const nextStep = computed(() => NEXT_STEPS[layer.value] ?? null)
+
+// ---------- 要点框直接微调：载入的大纲/简介不用先生成，输入要求原地调整 ----------
+const xAdjustReq = ref('')
+const xAdjusting = ref(false)
+const savingX = ref(false)
+
+async function doAdjustX() {
+  if (!xLines.value.trim()) {
+    ElMessage.warning('要点框是空的，先载入或填写内容')
+    return
+  }
+  if (!xAdjustReq.value.trim()) {
+    ElMessage.warning('写一句调整要求，例：限制角色获得技能的频率为每10章一次')
+    return
+  }
+  xAdjusting.value = true
+  const original = xLines.value
+  resetLive()
+  try {
+    const r = await refineApi.stream(original, xAdjustReq.value.trim(), {
+      onThinking: (t) => {
+        liveThinking.value += t
+      },
+      onDelta: (t) => {
+        liveText.value += t
+      },
+      onNotice: (n) => {
+        notices.value.push(n)
+      },
+    })
+    xLines.value = r.y
+    ElMessage.success(`已按你的要求调整（${r.y.length} 字），可继续调整、手动微改，满意后采纳或生成`)
+  } catch (e) {
+    xLines.value = original
+    ElMessage.error(`调整失败，已还原原文：${(e as Error).message}`)
+  } finally {
+    xAdjusting.value = false
+  }
+}
+
+// 微调后的要点框内容不经生成直接入库（仅简介/大纲整文本层）
+async function saveXToProject() {
+  if (!currentProjectId.value) {
+    ElMessage.warning('先在顶部选择或新建小说项目')
+    return
+  }
+  if (!xLines.value.trim()) {
+    ElMessage.warning('要点框是空的，没有可存入的内容')
+    return
+  }
+  savingX.value = true
+  try {
+    const pairs: [string, string][] = xLines.value
+      .split(/\n+/)
+      .filter(Boolean)
+      .map((l) => [l, ''])
+    await projectsApi.adopt(currentProjectId.value, task.value.layer, xLines.value, pairs, adoptNote.value || '运行台微调存入')
+    adopted.value = true
+    await loadProjectLayers()
+    ElMessage.success(`已存入项目「${LAYER_LABELS[task.value.layer]}」层新版本`)
+  } catch (e) {
+    ElMessage.error(`存入失败：${(e as Error).message}`)
+  } finally {
+    savingX.value = false
+  }
+}
 </script>
 
 <template>
@@ -566,7 +632,7 @@ const nextStep = computed(() => NEXT_STEPS[layer.value] ?? null)
                   续写新章
                 </el-button>
                 <div style="font-size: 12px; color: #999; margin-top: 4px">
-                  载入后可直接修改，或生成后用「继续调整」按新要求迭代
+                  载入后可直接手改，或用下方「按要求调整」原地微调；改好的内容用结果区「采纳到项目」存入
                 </div>
               </div>
             </el-form-item>
@@ -610,6 +676,26 @@ const nextStep = computed(() => NEXT_STEPS[layer.value] ?? null)
                   :rows="8"
                   :placeholder="task.inputHint"
                 />
+                <div style="display: flex; gap: 8px; margin-top: 8px; align-items: flex-start">
+                  <el-input
+                    v-model="xAdjustReq"
+                    size="small"
+                    placeholder="不重新生成、直接按要求调整上面内容：例「限制角色获得技能的频率为每10章一次」「第5章冲突太弱，加强转折」"
+                    @keyup.enter="doAdjustX"
+                  />
+                  <el-button size="small" type="warning" plain :loading="xAdjusting" @click="doAdjustX">
+                    按要求调整
+                  </el-button>
+                  <el-button
+                    v-if="task.key === 'outline' || task.key === 'intro'"
+                    size="small"
+                    plain
+                    :loading="savingX"
+                    @click="saveXToProject"
+                  >
+                    存入项目
+                  </el-button>
+                </div>
                 <div style="font-size: 12px; color: #999; margin-top: 4px">{{ task.example }}</div>
                 <div v-if="!isAdvanced" style="font-size: 12px; color: #b0b0b0; margin-top: 2px">
                   相邻要点会按长度合并成更少的生成段（省时省钱）；想一行一段，去高级选项把「每段字数上限」调小
