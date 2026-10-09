@@ -58,7 +58,7 @@ class TestPromptStore:
 
     def test_unknown_layer_rejected(self, store):
         with pytest.raises(ValueError, match="未知流水线层"):
-            store.effective("review")
+            store.effective("nonexistent_layer")
 
     def test_persistence_roundtrip(self, tmp_path):
         path = tmp_path / "prompts.json"
@@ -191,5 +191,5 @@ class TestPromptApi:
         assert data["est_prompt_tokens"] > 0
 
     def test_unknown_layer_404(self, api_client):
-        assert api_client.get("/api/prompts/review").status_code == 404
-        assert api_client.post("/api/prompts/review/dry_run", json={}).status_code == 404
+        assert api_client.get("/api/prompts/nonexistent_layer").status_code == 404
+        assert api_client.post("/api/prompts/nonexistent_layer/dry_run", json={}).status_code == 404

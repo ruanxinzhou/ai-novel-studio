@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import CorpusView from './views/CorpusView.vue'
+import MarkersView from './views/MarkersView.vue'
 import PipelineView from './views/PipelineView.vue'
 import SkillsView from './views/SkillsView.vue'
 import WorkshopView from './views/WorkshopView.vue'
@@ -17,6 +18,7 @@ const tab = ref('pipeline')
       </div>
       <el-tabs v-model="tab" style="margin-top: 8px">
         <el-tab-pane label="运行台" name="pipeline" />
+        <el-tab-pane label="审稿与标记" name="markers" />
         <el-tab-pane label="Prompt 工坊" name="workshop" />
         <el-tab-pane label="写作模块" name="skills" />
         <el-tab-pane label="范文语料" name="corpus" />
@@ -24,6 +26,7 @@ const tab = ref('pipeline')
     </el-header>
     <el-main style="padding: 0">
       <PipelineView v-show="tab === 'pipeline'" />
+      <MarkersView v-show="tab === 'markers'" />
       <WorkshopView v-show="tab === 'workshop'" />
       <SkillsView v-show="tab === 'skills'" />
       <CorpusView v-show="tab === 'corpus'" />

@@ -81,11 +81,16 @@ class ContextSnapshot:
                 continue
             if family is MaterialFamily.REQUIRED:
                 rules = [m for m in items if m.source_id.startswith("skill:")]
-                plain = [m for m in items if not m.source_id.startswith("skill:")]
+                marks = [m for m in items if m.source_id.startswith("markers:")]
+                plain = [m for m in items
+                         if not m.source_id.startswith("skill:")
+                         and not m.source_id.startswith("markers:")]
                 if rules:
                     sections["写作模块"] = "\n\n".join(
                         f"【{m.title or m.source_id}】\n{m.content}" for m in rules
                     )
+                if marks:
+                    sections["必现标记"] = "\n\n".join(m.content for m in marks)
                 items = plain
                 if not items:
                     continue

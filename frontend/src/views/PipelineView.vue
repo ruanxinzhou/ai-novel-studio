@@ -6,8 +6,11 @@ import {
   LAYER_LABELS,
   LAYERS,
   corpusApi,
+  markersApi,
+  reviewApi,
   runsApi,
   skillsApi,
+  type ChapterReview,
   type Excerpt,
   type LayerRunResult,
   type SkillModule,
@@ -17,8 +20,11 @@ const layer = ref<string>('draft')
 const userDirective = ref('')
 const xLines = ref('') // 每行一个 x 块
 const xChunkLength = ref<number | null>(null)
+const chapterNo = ref<number | null>(null) // 提供时注入该章必现标记
 const running = ref(false)
 const result = ref<LayerRunResult | null>(null)
+const reviewing = ref(false)
+const review = ref<ChapterReview | null>(null)
 
 const modules = ref<SkillModule[]>([])
 const selectedModules = ref<string[]>([])
@@ -83,6 +89,7 @@ const body = () => ({
         limit: Math.max(1, injectedExcerpts.value.length),
       }
     : undefined,
+  chapter_no: chapterNo.value || undefined,
 })
 
 async function doRun(kind: 'run' | 'retry') {
@@ -93,6 +100,7 @@ async function doRun(kind: 'run' | 'retry') {
   }
   running.value = true
   result.value = null
+  review.value = null
   try {
     result.value = kind === 'run' ? await runsApi.run(layer.value, body()) : await runsApi.retry(layer.value, body())
     ElMessage.success(
@@ -105,6 +113,42 @@ async function doRun(kind: 'run' | 'retry') {
     ElMessage.error(`运行失败：${(e as Error).message}`)
   } finally {
     running.value = false
+  }
+}
+
+async function doReview() {
+  if (!result.value?.y) {
+    ElMessage.warning('先运行生成正文再审稿')
+    return
+  }
+  reviewing.value = true
+  review.value = null
+  try {
+    review.value = await reviewApi.chapter(xLines.value, result.value.y)
+    if (review.value.verdict === 'blocked') {
+      ElMessage.warning(`审稿不通过：${review.value.unstable_count} 项不稳，不能交稿`)
+    } else {
+      ElMessage.success('审稿通过')
+    }
+  } catch (e) {
+    ElMessage.error(`审稿失败：${(e as Error).message}`)
+  } finally {
+    reviewing.value = false
+  }
+}
+
+async function unstableToMarkers() {
+  if (!review.value) return
+  const problems = review.value.items
+    .filter((i) => i.status === '不稳')
+    .map((i) => `${i.name}：${i.problem || '未说明'}`)
+  if (!problems.length) return
+  try {
+    const next = (chapterNo.value || 1) + 1
+    await markersApi.fromReview(problems, next)
+    ElMessage.success(`已把 ${problems.length} 项不稳转成第 ${next} 章必现修复标记`)
+  } catch (e) {
+    ElMessage.error(`落位失败：${(e as Error).message}`)
   }
 }
 </script>
@@ -130,6 +174,10 @@ async function doRun(kind: 'run' | 'retry') {
           </el-form-item>
           <el-form-item label="块长度">
             <el-input-number v-model="xChunkLength" :min="0" :step="500" placeholder="默认用层规格" style="width: 100%" />
+          </el-form-item>
+          <el-form-item label="章号">
+            <el-input-number v-model="chapterNo" :min="1" placeholder="选填" style="width: 100%" />
+            <div style="font-size: 12px; color: #888">填写后自动注入该章待兑现必现标记</div>
           </el-form-item>
           <el-form-item label="作者指令">
             <el-input v-model="userDirective" type="textarea" :rows="2" placeholder="本节附加指令（可空）" />
@@ -175,6 +223,14 @@ async function doRun(kind: 'run' | 'retry') {
         <el-button :loading="running" style="width: 100%; margin-top: 8px" @click="doRun('retry')">
           幂等重试（只补失败块）
         </el-button>
+        <div v-if="result?.markers_injected?.length" style="margin-top: 10px">
+          <el-alert type="warning" :closable="false" show-icon>
+            <template #title>本章必现标记已注入（{{ result.markers_injected.length }} 条）</template>
+            <div v-for="m in result.markers_injected" :key="m.id" style="font-size: 12px">
+              · {{ m.content }}
+            </div>
+          </el-alert>
+        </div>
       </el-card>
     </el-col>
 
@@ -216,6 +272,39 @@ async function doRun(kind: 'run' | 'retry') {
               <el-table-column prop="x_hash" label="x_hash" width="130" />
               <el-table-column prop="error" label="错误" show-overflow-tooltip />
             </el-table>
+          </el-tab-pane>
+          <el-tab-pane label="审稿">
+            <div style="margin-bottom: 10px">
+              <el-button type="primary" plain :loading="reviewing" @click="doReview">
+                六项一致性审稿
+              </el-button>
+              <el-button v-if="review && review.unstable_count > 0" type="warning" @click="unstableToMarkers">
+                不稳项转下章必现修复
+              </el-button>
+            </div>
+            <template v-if="review">
+              <el-alert
+                :type="review.verdict === 'pass' ? 'success' : 'error'"
+                :closable="false"
+                show-icon
+                style="margin-bottom: 10px"
+              >
+                <template #title>
+                  {{ review.verdict === 'pass' ? '审稿通过，可交稿' : `审稿不通过：${review.unstable_count} 项不稳，不能交稿` }}
+                </template>
+                {{ review.summary }}
+              </el-alert>
+              <el-table :data="review.items" size="small">
+                <el-table-column prop="name" label="检查项" width="110" />
+                <el-table-column prop="status" label="结论" width="80">
+                  <template #default="{ row }">
+                    <el-tag :type="row.status === '稳' ? 'success' : 'danger'" size="small">{{ row.status }}</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="problem" label="问题与证据" show-overflow-tooltip />
+              </el-table>
+            </template>
+            <el-empty v-else description="点击「六项一致性审稿」对当前成文做逐项审查（不稳 ≥2 不交稿）" />
           </el-tab-pane>
         </el-tabs>
       </el-card>

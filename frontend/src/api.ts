@@ -99,6 +99,7 @@ export interface LayerRunResult {
   resumed_indices: number[]
   skills_injected: string[]
   corpus_injected: string[]
+  markers_injected: MarkerInfo[]
   calls: { completion_status: string; attempts: number }[]
   journal: {
     layer: string
@@ -108,6 +109,72 @@ export interface LayerRunResult {
     failed: number
     receipts: Receipt[]
   }
+}
+
+// ---- 审稿（M2）----
+export interface ReviewItem {
+  name: string
+  status: string // 稳 | 不稳
+  problem: string
+}
+export interface ChapterReview {
+  items: ReviewItem[]
+  verdict: string // pass | blocked
+  summary: string
+  unstable_count: number
+  attempts: number
+}
+
+// ---- 必现标记（M2）----
+export interface MarkerInfo {
+  id: string
+  target_chapter: number
+  content: string
+  status: string // pending | done | dropped
+  source: string // manual | extracted | review
+  created_at: string
+}
+export interface MarkersSummary {
+  markers: MarkerInfo[]
+  pending_count: number
+  added?: MarkerInfo[]
+}
+
+export const reviewApi = {
+  chapter: (outline: string, prose: string) =>
+    req<ChapterReview>('/api/review/chapter', {
+      method: 'POST',
+      body: JSON.stringify({ outline, prose }),
+    }),
+}
+
+export const markersApi = {
+  list: () => req<MarkersSummary>('/api/markers'),
+  add: (target_chapter: number, content: string) =>
+    req<MarkersSummary>('/api/markers', {
+      method: 'POST',
+      body: JSON.stringify({ target_chapter, content }),
+    }),
+  extract: (text: string) =>
+    req<MarkersSummary>('/api/markers/extract', {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    }),
+  setStatus: (id: string, status: string) =>
+    req<MarkersSummary>(`/api/markers/${encodeURIComponent(id)}/status`, {
+      method: 'PUT',
+      body: JSON.stringify({ status }),
+    }),
+  verify: (prose: string, chapter_no?: number) =>
+    req<{ results: { marker: MarkerInfo; hit: boolean }[] }>('/api/markers/verify', {
+      method: 'POST',
+      body: JSON.stringify({ prose, chapter_no }),
+    }),
+  fromReview: (problems: string[], next_chapter: number) =>
+    req<MarkersSummary>('/api/markers/from_review', {
+      method: 'POST',
+      body: JSON.stringify({ problems, next_chapter }),
+    }),
 }
 
 export const skillsApi = {

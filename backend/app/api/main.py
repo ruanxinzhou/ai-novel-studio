@@ -23,11 +23,14 @@ from ..pipeline import (
     render_generation_messages,
 )
 from ..providers import Router, get_router
+from ..review import STATUS_PENDING, MarkerStore, review_chapter
+from ..review.markers import markers_material
 from ..skills import MODULES, available_modules, module_rules, skill_materials
 
-app = FastAPI(title="Novel Studio API", version="0.2.0")
+app = FastAPI(title="Novel Studio API", version="0.3.0")
 
 _prompt_store = PromptStore(persist_path=REPO / "backend" / "data" / "prompt_store.json")
+_marker_store = MarkerStore(REPO / "backend" / "data" / "markers.json")
 
 
 class GenerateIn(BaseModel):
@@ -192,6 +195,7 @@ class LayerRunIn(BaseModel):
     x_chunk_length: int | None = None
     modules: list[str] | None = None      # 写作模块；缺省用层默认集
     corpus_query: CorpusQueryIn | None = None
+    chapter_no: int | None = None         # 提供时自动注入该章 pending 必现标记
 
 
 _FAMILIES = {"required": MaterialFamily.REQUIRED, "finalized": MaterialFamily.FINALIZED,
@@ -241,7 +245,10 @@ def _run_layer(layer: str, body: LayerRunIn) -> dict:
                 title=hit.to_material_dict()["title"],
                 keywords=hit.tags,
             ))
-    all_mats = injected_skills + mats + corpus_mats
+    marker_mat = None
+    if body.chapter_no is not None:
+        marker_mat = markers_material(_marker_store.pending_for(body.chapter_no), body.chapter_no)
+    all_mats = ([marker_mat] if marker_mat else []) + injected_skills + mats + corpus_mats
     x_list = [x for x, _ in body.x_pairs]
     run_key = compute_run_key(layer, x_list,
                               [(m.source_id, m.family.value, m.content) for m in all_mats],
@@ -262,6 +269,8 @@ def _run_layer(layer: str, body: LayerRunIn) -> dict:
         "resumed_indices": result.resumed_indices,
         "skills_injected": [m.source_id for m in injected_skills],
         "corpus_injected": [m.source_id for m in corpus_mats],
+        "markers_injected": [m.as_dict() for m in _marker_store.pending_for(body.chapter_no or 0)]
+        if body.chapter_no is not None else [],
         "calls": [{"completion_status": c.completion_status, "attempts": c.attempts}
                   for c in result.calls],
         "journal": journal.summary(),
@@ -322,3 +331,106 @@ def corpus_query(excerpt_type: str | None = None, tag: str | None = None,
     hits = corpus_search(excerpt_type=excerpt_type, tag=tag, keyword=keyword,
                          limit=max(1, min(limit, 20)))
     return {"total": len(hits), "excerpts": [e.as_dict() for e in hits]}
+
+
+# ---- 逐项目标审稿（M2）----
+
+class ChapterReviewIn(BaseModel):
+    outline: str = ""
+    prose: str
+    model: str | None = None
+
+
+@app.post("/api/review/chapter")
+def review_chapter_api(body: ChapterReviewIn) -> dict:
+    """六项一致性逐项审查；不稳 >= 2 判 blocked（不交稿）。"""
+    router: Router = get_router()
+
+    class _Adapter:
+        name = "router:review"
+        default_model = None
+
+        @staticmethod
+        def chat(messages, model=None, max_tokens=None, extra=None):
+            return router.chat("review", messages, model, max_tokens)
+
+    try:
+        review = review_chapter(_Adapter(), _prompt_store, body.outline, body.prose,
+                                model=body.model)
+    except ValueError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return review.as_dict()
+
+
+# ---- 必现标记（M2）----
+
+class MarkerIn(BaseModel):
+    target_chapter: int
+    content: str
+
+
+class MarkerExtractIn(BaseModel):
+    text: str
+
+
+class MarkerStatusIn(BaseModel):
+    status: Literal["pending", "done", "dropped"]
+
+
+class MarkerVerifyIn(BaseModel):
+    chapter_no: int | None = None
+    prose: str
+
+
+class MarkersFromReviewIn(BaseModel):
+    """审稿不稳项 → 下一章必现标记（修复要求落位）。"""
+    problems: list[str]
+    next_chapter: int
+
+
+def _marker_summary() -> dict:
+    return {
+        "markers": [m.as_dict() for m in _marker_store.markers],
+        "pending_count": sum(1 for m in _marker_store.markers if m.status == STATUS_PENDING),
+    }
+
+
+@app.get("/api/markers")
+def markers_list() -> dict:
+    return _marker_summary()
+
+
+@app.post("/api/markers")
+def markers_add(body: MarkerIn) -> dict:
+    if not body.content.strip():
+        raise HTTPException(status_code=422, detail="标记内容不能为空")
+    _marker_store.add(body.target_chapter, body.content)
+    return _marker_summary()
+
+
+@app.post("/api/markers/extract")
+def markers_extract(body: MarkerExtractIn) -> dict:
+    added = _marker_store.extract_and_add(body.text)
+    return {**_marker_summary(), "added": [m.as_dict() for m in added]}
+
+
+@app.put("/api/markers/{marker_id}/status")
+def markers_status(marker_id: str, body: MarkerStatusIn) -> dict:
+    try:
+        _marker_store.set_status(marker_id, body.status)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return _marker_summary()
+
+
+@app.post("/api/markers/verify")
+def markers_verify(body: MarkerVerifyIn) -> dict:
+    return {"results": _marker_store.verify(body.prose, body.chapter_no)}
+
+
+@app.post("/api/markers/from_review")
+def markers_from_review(body: MarkersFromReviewIn) -> dict:
+    for p in body.problems:
+        if p.strip():
+            _marker_store.add(body.next_chapter, f"必须修复：{p.strip()}", source="review")
+    return _marker_summary()
