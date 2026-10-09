@@ -28,6 +28,7 @@ from ..pipeline import (
     compute_run_key,
     render_generation_messages,
 )
+from ..pipeline.prompts import OUTPUT_CONTRACT, SYSTEM_CONTRACT
 from ..projects import ProjectStore
 from ..providers import Router, get_router
 from ..review import STATUS_PENDING, MarkerStore, review_chapter
@@ -396,6 +397,57 @@ def runs_stream(layer: str, body: LayerRunIn) -> StreamingResponse:
                 q.put(("result", _layer_response(prep, result)))
             except Exception as e:
                 q.put(("fail", {"detail": f"生成失败（已完成块已留收据）：{e}"}))
+            finally:
+                q.put((END, None))
+
+        threading.Thread(target=work, daemon=True).start()
+        while True:
+            kind, payload = q.get()
+            if kind is END:
+                break
+            yield sse(kind, payload)
+        yield "event: done\ndata: {}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+class RefineIn(BaseModel):
+    text: str
+    directive: str
+    project: str | None = None
+
+
+@app.post("/api/refine/stream")
+def refine_stream(body: RefineIn) -> StreamingResponse:
+    """迭代润色：在【原文】基础上按【要求】调整，SSE 实时透出 thinking/delta，
+    结束发 result（y 为调整后全文）。走 refine 路由（提示词可在工坊改）。"""
+    def sse(event: str, data) -> str:
+        return f"event: {event}\ndata: {json_dumps(data)}\n\n"
+
+    def gen() -> Iterator[str]:
+        q: Queue = Queue()
+        END = object()
+
+        def work():
+            parts: list[str] = []
+            try:
+                instruction = _prompt_store.effective("refine")
+                user = (f"{instruction}\n\n【原文】\n{body.text}\n\n【要求】\n{body.directive}\n{OUTPUT_CONTRACT}")
+                messages = [
+                    {"role": "system", "content": SYSTEM_CONTRACT},
+                    {"role": "user", "content": user},
+                ]
+                for ev in get_router().chat_stream("refine", messages):
+                    if ev.kind == "delta":
+                        parts.append(ev.text)
+                        q.put(("delta", {"text": ev.text}))
+                    elif ev.kind == "thinking":
+                        q.put(("thinking", {"text": ev.text}))
+                    elif ev.kind == "error":
+                        q.put(("notice", {"text": ev.text}))
+                q.put(("result", {"y": "".join(parts)}))
+            except Exception as e:
+                q.put(("fail", {"detail": f"调整失败：{e}"}))
             finally:
                 q.put((END, None))
 

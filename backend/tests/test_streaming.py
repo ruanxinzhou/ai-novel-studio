@@ -183,9 +183,43 @@ def test_routing_yaml_all_minimax_primary():
     from app.config import load_config
 
     routing = load_config().routing
-    for step in ["intro", "outline", "plot", "draft", "polish", "review", "debug", "chore"]:
+    for step in ["intro", "outline", "plot", "draft", "polish", "review", "debug", "chore", "refine"]:
         assert routing[step]["primary"] == "minimax", f"{step} 主路应为 minimax"
         assert routing[step]["fallback"] == "trae_exec"
+
+
+class TestRefineStreamApi:
+    def test_sse_emits_thinking_delta_result(self, sse_client, monkeypatch):
+        monkeypatch.setattr("app.api.main.get_router", lambda: FakeStreamRouter("调整后的全文"))
+        with sse_client.stream("POST", "/api/refine/stream",
+                               json={"text": "原始文本", "directive": "开头改成悬念"}) as r:
+            assert r.status_code == 200
+            body = "".join(c for c in r.iter_text())
+        assert "event: thinking" in body and "内心推演" in body
+        assert "event: delta" in body and "调整后的全文" in body
+        assert "event: result" in body
+        for frame in body.split("\n\n"):
+            if frame.startswith("event: result"):
+                assert json.loads(frame.split("data: ", 1)[1]) == {"y": "调整后的全文"}
+                break
+        else:
+            pytest.fail("未找到 result 事件")
+
+    def test_prompt_override_applies(self, sse_client, monkeypatch):
+        # 工坊覆盖的 refine 提示词应进入 user 消息（FakeStreamRouter 会记录 messages）
+        captured = {}
+
+        class CaptureRouter(FakeStreamRouter):
+            def chat_stream(self, step, messages, model=None, max_tokens=None):
+                captured["messages"] = messages
+                yield from super().chat_stream(step, messages, model, max_tokens)
+
+        monkeypatch.setattr("app.api.main.get_router", lambda: CaptureRouter("x"))
+        with sse_client.stream("POST", "/api/refine/stream",
+                               json={"text": "原文", "directive": "要求"}) as r:
+            "".join(c for c in r.iter_text())
+        user_msg = captured["messages"][1]["content"]
+        assert "【原文】" in user_msg and "【要求】" in user_msg
 
 
 class TestDeskRunStreamApi:

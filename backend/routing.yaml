@@ -12,3 +12,4 @@ routing:
   review:       { primary: minimax,    fallback: trae_exec }
   debug:        { primary: minimax,    fallback: trae_exec }
   chore:        { primary: minimax,    fallback: trae_exec }
+  refine:       { primary: minimax,    fallback: trae_exec }

@@ -4,6 +4,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   deskApi,
+  refineApi,
   type ChapterReview,
   type DeskChapterDetail,
   type DeskDetail,
@@ -98,6 +99,48 @@ function setStagePane(key: StageKey) {
   return (el: unknown) => {
     const comp = el as { $el?: HTMLElement } | null
     stagePanes[key] = comp?.$el?.querySelector('textarea') ?? null
+  }
+}
+
+const refiningStage = ref<StageKey | ''>('')
+
+// 迭代润色：在当前文本基础上按附加指令调整——原文被替换但未保存，不满意可直接改回或重新生成
+async function refineStage(stage: StageKey) {
+  if (busy.value) return
+  if (!text[stage].trim()) {
+    ElMessage.warning('当前没有内容可调整')
+    return
+  }
+  if (!directive[stage].trim()) {
+    ElMessage.warning('先在指令框写调整要求，例：开头放慢、对话再口语化、加强结尾悬念')
+    return
+  }
+  busy.value = stage
+  refiningStage.value = stage
+  thinking[stage] = ''
+  stageNotes[stage] = ['正在按要求调整当前文本——改完还没保存，不满意可手动改回']
+  const original = text[stage]
+  text[stage] = ''
+  try {
+    const r = await refineApi.stream(original, directive[stage].trim(), {
+      onThinking: (t) => {
+        thinking[stage] += t
+      },
+      onDelta: (t) => {
+        text[stage] += t
+      },
+      onNotice: (n) => {
+        stageNotes[stage].push(n)
+      },
+    })
+    text[stage] = r.y
+    ElMessage.success(`已按要求调整（${r.y.length} 字）。满意点「保存修改」，不满意可继续调整或手动改`)
+  } catch (e) {
+    text[stage] = original // 失败还回原稿，绝不丢作者内容
+    ElMessage.error(`调整失败：${(e as Error).message}`)
+  } finally {
+    busy.value = ''
+    refiningStage.value = ''
   }
 }
 
@@ -307,6 +350,16 @@ watch(currentProjectId, () => {
               <el-button size="small" type="primary" :loading="busy === s.key" @click="runStage(s.key)">
                 {{ text[s.key] ? '重新生成' : `生成${s.label}` }}
               </el-button>
+              <el-button
+                size="small"
+                type="warning"
+                plain
+                :loading="busy === s.key && refiningStage === s.key"
+                :disabled="!text[s.key] || !!busy"
+                @click="refineStage(s.key)"
+              >
+                按要求调整
+              </el-button>
               <el-button size="small" :disabled="!text[s.key] || busy === s.key" @click="saveStage(s.key)">
                 保存修改
               </el-button>
@@ -315,7 +368,7 @@ watch(currentProjectId, () => {
           <el-input
             v-model="directive[s.key]"
             size="small"
-            :placeholder="`可选：给这一段的附加指令（如「加强悬念」「多写对话」）`"
+            :placeholder="`指令（生成用，或配合「按要求调整」改当前文本）：如「加强悬念」「开头放慢」「对话再口语化」`"
             style="margin-bottom: 10px"
             :disabled="busy === s.key"
           />

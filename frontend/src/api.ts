@@ -150,6 +150,16 @@ export const reviewApi = {
     }),
 }
 
+export const refineApi = {
+  // 迭代润色：在 text 基础上按 directive 调整，SSE 实时回调，结束返回调整后全文
+  stream: (text: string, directive: string, h: SSEHandlers): Promise<{ y: string }> =>
+    fetch('/api/refine/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, directive }),
+    }).then((r) => consumeSSE<{ y: string }>(r, h)),
+}
+
 export const markersApi = {
   list: (project?: string) =>
     req<MarkersSummary>(`/api/markers${project ? `?project=${encodeURIComponent(project)}` : ''}`),

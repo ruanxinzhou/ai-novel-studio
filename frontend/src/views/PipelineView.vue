@@ -9,6 +9,7 @@ import {
   corpusApi,
   markersApi,
   projectsApi,
+  refineApi,
   reviewApi,
   runsApi,
   skillsApi,
@@ -308,6 +309,42 @@ async function copyY() {
   }
 }
 
+// ---------- 迭代润色：在当前成文基础上按新要求继续调整 ----------
+const refineReq = ref('')
+const refining = ref(false)
+
+async function doRefine() {
+  if (!editableY.value.trim()) {
+    ElMessage.warning('没有可调整的内容，先运行生成')
+    return
+  }
+  if (!refineReq.value.trim()) {
+    ElMessage.warning('写一句调整要求，例：开头节奏放慢、对话再口语化、加强结尾悬念')
+    return
+  }
+  refining.value = true
+  resetLive()
+  try {
+    const r = await refineApi.stream(editableY.value, refineReq.value.trim(), {
+      onThinking: (t) => {
+        liveThinking.value += t
+      },
+      onDelta: (t) => {
+        liveText.value += t
+      },
+      onNotice: (n) => {
+        notices.value.push(n)
+      },
+    })
+    editableY.value = r.y
+    ElMessage.success(`已按你的要求调整（${r.y.length} 字），不满意可继续调整或手动改`)
+  } catch (e) {
+    ElMessage.error(`调整失败：${(e as Error).message}`)
+  } finally {
+    refining.value = false
+  }
+}
+
 const nextStep = computed(() => NEXT_STEPS[layer.value] ?? null)
 </script>
 
@@ -484,6 +521,17 @@ const nextStep = computed(() => NEXT_STEPS[layer.value] ?? null)
               未选项目——顶部新建/选择后才能入库
             </span>
             <span v-else style="font-size: 12px; color: #999">下面内容可以直接改，改完再点采纳，存的是你的版本</span>
+          </div>
+
+          <!-- 迭代润色：在当前成文上按新要求继续调整 -->
+          <div style="display: flex; gap: 8px; margin-bottom: 12px">
+            <el-input
+              v-model="refineReq"
+              size="small"
+              placeholder="在此基础上继续调整：例「开头节奏放慢」「对话再口语化」「加强结尾悬念」——只改涉及部分，其余保留"
+              @keyup.enter="doRefine"
+            />
+            <el-button type="warning" plain :loading="refining" @click="doRefine">继续调整</el-button>
           </div>
 
           <el-tabs>
