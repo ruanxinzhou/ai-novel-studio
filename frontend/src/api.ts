@@ -351,3 +351,55 @@ export const vaultApi = {
       body: JSON.stringify({ out_dir: outDir || null }),
     }),
 }
+
+// ---- 导入拆解（M4）----
+export interface ImportPreviewChapter {
+  no: number
+  title: string
+  chars: number
+}
+export interface ImportTextResult {
+  chapters: ImportPreviewChapter[]
+  total: number
+  adopted: boolean
+  draft_version?: number
+}
+export interface AnalyzeChapterResult {
+  chapter: number
+  entities: { reused?: boolean; created?: string[]; updated?: string[]; dropped?: number }
+  outline: string
+  outline_reused: boolean
+}
+export interface ImportStatusChapter {
+  no: number
+  title: string
+  chars: number
+  entities_status: string | null
+  outline_status: string | null
+  outline_preview: string
+  error: string
+}
+export interface ImportStatus {
+  project: string
+  chapters: ImportStatusChapter[]
+  total: number
+  done: number
+}
+
+export const importApi = {
+  text: (pid: string, text: string, dryRun: boolean) =>
+    req<ImportTextResult>(`/api/projects/${pid}/import/text`, {
+      method: 'POST',
+      body: JSON.stringify({ text, dry_run: dryRun }),
+    }),
+  analyzeChapter: (pid: string, chapter: number, opts: { text?: string; force?: boolean } = {}) =>
+    req<AnalyzeChapterResult>(`/api/projects/${pid}/import/analyze_chapter`, {
+      method: 'POST',
+      body: JSON.stringify({ chapter, text: opts.text || null, force: opts.force || false }),
+    }),
+  status: (pid: string) => req<ImportStatus>(`/api/projects/${pid}/import/status`),
+  adoptOutline: (pid: string) =>
+    req<{ seq: number; chapters: number }>(`/api/projects/${pid}/import/adopt_outline`, {
+      method: 'POST',
+    }),
+}

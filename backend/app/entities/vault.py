@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 from app.entities.store import TYPE_LABELS, EntityStore
+from app.importer.slicing import split_import
 from app.projects.store import LAYERS, ProjectStore
 
 LAYER_TITLES = {
@@ -26,13 +27,16 @@ LAYER_TITLES = {
     "draft": "正文", "polish": "润色",
 }
 
-_CHAPTER_HEAD = re.compile(r"^\s*第\s*(\d+)\s*章[^\n]*", re.M)
-
 _UNSAFE_NAME = re.compile(r'[\\/:*?"<>|]')
 
 
 def _safe_name(name: str) -> str:
     return _UNSAFE_NAME.sub("_", name.strip())[:60] or "未命名"
+
+
+def split_chapters(text: str) -> list[tuple[int, str]]:
+    """按「第N章」切分（兼容中文数字）；无标签整体一份 [(0, text)]。"""
+    return [(c["no"], c["body"]) for c in split_import(text)]
 
 
 @dataclass
@@ -43,20 +47,6 @@ class VaultExport:
     entities: int = 0
     layers_exported: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-
-
-def split_chapters(text: str) -> list[tuple[int, str]]:
-    """按「第N章」行切分；无标签时整体作为一份返回 [(0, text)]。"""
-    heads = list(_CHAPTER_HEAD.finditer(text))
-    if not heads:
-        return [(0, text.strip())] if text.strip() else []
-    out: list[tuple[int, str]] = []
-    if heads[0].start() > 0 and text[: heads[0].start()].strip():
-        out.append((0, text[: heads[0].start()].strip()))
-    for i, m in enumerate(heads):
-        end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
-        out.append((int(m.group(1)), text[m.start():end].strip()))
-    return out
 
 
 def linkify(text: str, names: list[str]) -> str:

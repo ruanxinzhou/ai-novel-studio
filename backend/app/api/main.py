@@ -17,6 +17,7 @@ from ..context import Material, MaterialFamily
 from ..corpus import list_tags, list_types, search as corpus_search
 from ..entities import ENTITY_TYPES, TYPE_LABELS, EntityStore, extract_entities
 from ..entities.vault import export_vault
+from ..importer import ImportJournal, analyze_chapter, split_import
 from ..pipeline import (
     SPECS,
     PipelineRunner,
@@ -670,18 +671,8 @@ def entities_delete(pid: str, eid: str) -> dict:
 def entities_extract(pid: str, body: EntityExtractIn) -> dict:
     """LLM 从文本抽取实体并合并入库（同类型同名只补空与章节）。"""
     _require_project(pid)
-    router: Router = get_router()
-
-    class _Adapter:
-        name = "router:chore"
-        default_model = None
-
-        @staticmethod
-        def chat(messages, model=None, max_tokens=None, extra=None):
-            return router.chat("chore", messages, model, max_tokens)
-
     try:
-        result = extract_entities(_Adapter(), _entities_for(pid), _prompt_store,
+        result = extract_entities(_chore_provider(), _entities_for(pid), _prompt_store,
                                   body.text, chapter=body.chapter, model=body.model)
     except ValueError as ex:
         raise HTTPException(status_code=502, detail=str(ex))
@@ -715,3 +706,139 @@ def projects_export_vault(pid: str, body: VaultExportIn | None = None) -> dict:
         "layers_exported": result.layers_exported,
         "warnings": result.warnings,
     }
+
+
+# ---- 导入拆解（M4）----
+
+_import_journals: dict[str, ImportJournal] = {}
+
+
+def _import_journal_for(pid: str) -> ImportJournal:
+    if pid not in _import_journals:
+        _import_journals[pid] = ImportJournal(
+            REPO / "backend" / "data" / "projects" / pid / "import_journal.json"
+        )
+    return _import_journals[pid]
+
+
+class ImportTextIn(BaseModel):
+    text: str
+    dry_run: bool = True   # true 只预览切分；false 采纳为当前 draft 新版本
+
+
+@app.post("/api/projects/{pid}/import/text")
+def import_text(pid: str, body: ImportTextIn) -> dict:
+    _require_project(pid)
+    if not body.text.strip():
+        raise HTTPException(status_code=422, detail="导入文本不能为空")
+    chapters = split_import(body.text)
+    if not chapters:
+        raise HTTPException(status_code=422, detail="未能从文本中识别出任何内容")
+    resp: dict = {
+        "chapters": [{k: c[k] for k in ("no", "title", "chars")} for c in chapters],
+        "total": len(chapters),
+    }
+    if body.dry_run:
+        resp["adopted"] = False
+        return resp
+    v = _project_store.adopt(
+        pid, "draft",
+        x_pairs=[(f"第{c['no']}章", "") for c in chapters],
+        y=body.text.strip(),
+        note=f"导入原文（{len(chapters)} 章）",
+    )
+    resp["adopted"] = True
+    resp["draft_version"] = v.seq
+    return resp
+
+
+def _chore_provider():
+    router: Router = get_router()
+
+    class _Adapter:
+        name = "router:chore"
+        default_model = None
+
+        @staticmethod
+        def chat(messages, model=None, max_tokens=None, extra=None):
+            return router.chat("chore", messages, model, max_tokens)
+
+    return _Adapter()
+
+
+class ImportAnalyzeIn(BaseModel):
+    chapter: int
+    text: str | None = None   # 缺省从当前 draft 版本按章号取
+    force: bool = False       # true 忽略已完成的收据重拆
+    model: str | None = None
+
+
+def _chapter_text_from_draft(pid: str, chapter: int) -> str:
+    v = _project_store.current(pid, "draft")
+    if v is None:
+        raise HTTPException(status_code=422, detail="项目尚无正文层，请先导入或生成正文")
+    for c in split_import(v.y):
+        if c["no"] == chapter:
+            return c["body"]
+    raise HTTPException(status_code=404, detail=f"正文中未找到第 {chapter} 章")
+
+
+@app.post("/api/projects/{pid}/import/analyze_chapter")
+def import_analyze_chapter(pid: str, body: ImportAnalyzeIn) -> dict:
+    """拆一章（实体抽取 + 反向大纲）；已完成的步骤幂等复用，force 重拆。"""
+    _require_project(pid)
+    text = body.text.strip() if body.text and body.text.strip() \
+        else _chapter_text_from_draft(pid, body.chapter)
+    if body.force:
+        _import_journal_for(pid).reset_chapter(body.chapter)
+    try:
+        result = analyze_chapter(
+            _chore_provider(), _entities_for(pid), _prompt_store,
+            _import_journal_for(pid), body.chapter, text, model=body.model,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return result
+
+
+@app.get("/api/projects/{pid}/import/status")
+def import_status(pid: str) -> dict:
+    """逐章拆解进度：正文切分 ∪ 已有收据。"""
+    _require_project(pid)
+    journal = _import_journal_for(pid)
+    v = _project_store.current(pid, "draft")
+    chapters: dict[int, dict] = {}
+    if v is not None:
+        for c in split_import(v.y):
+            chapters[c["no"]] = {"no": c["no"], "title": c["title"], "chars": c["chars"]}
+    for r in journal.receipts.values():
+        chapters.setdefault(r.chapter, {"no": r.chapter, "title": "", "chars": 0})
+    out = []
+    for no in sorted(chapters):
+        info = chapters[no]
+        ent = journal.get(no, "entities")
+        ol = journal.get(no, "outline")
+        info.update({
+            "entities_status": ent.status if ent else None,
+            "outline_status": ol.status if ol else None,
+            "outline_preview": (ol.result[:80] if ol and ol.status == "completed" else ""),
+            "error": (ent.error if ent and ent.status == "failed" else "")
+            or (ol.error if ol and ol.status == "failed" else ""),
+        })
+        out.append(info)
+    done = sum(1 for c in out if c["entities_status"] == "completed"
+               and c["outline_status"] == "completed")
+    return {"project": pid, "chapters": out, "total": len(out), "done": done}
+
+
+@app.post("/api/projects/{pid}/import/adopt_outline")
+def import_adopt_outline(pid: str) -> dict:
+    """把已拆解完成的章大纲汇总采纳为 outline 层新版本。"""
+    _require_project(pid)
+    outlines = _import_journal_for(pid).completed_outlines()
+    if not outlines:
+        raise HTTPException(status_code=422, detail="尚无已完成的章大纲，请先拆解")
+    y = "\n\n".join(f"第{no}章\n{outline}" for no, outline in outlines)
+    v = _project_store.adopt(pid, "outline", x_pairs=[], y=y,
+                             note=f"导入拆解汇总（{len(outlines)} 章）")
+    return {"seq": v.seq, "chapters": len(outlines)}

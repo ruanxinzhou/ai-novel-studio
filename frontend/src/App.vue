@@ -107,6 +107,7 @@ async function removeProject() {
       <el-tabs v-model="tab" style="margin-top: 8px">
         <el-tab-pane label="项目" name="project" />
         <el-tab-pane label="实体库" name="entities" />
+        <el-tab-pane label="导入拆解" name="import" />
         <el-tab-pane label="运行台" name="pipeline" />
         <el-tab-pane label="审稿与标记" name="markers" />
         <el-tab-pane label="Prompt 工坊" name="workshop" />
@@ -117,6 +118,7 @@ async function removeProject() {
     <el-main style="padding: 0">
       <ProjectView v-show="tab === 'project'" />
       <EntitiesView v-show="tab === 'entities'" />
+      <ImportView v-show="tab === 'import'" />
       <PipelineView v-show="tab === 'pipeline'" />
       <MarkersView v-show="tab === 'markers'" />
       <WorkshopView v-show="tab === 'workshop'" />
