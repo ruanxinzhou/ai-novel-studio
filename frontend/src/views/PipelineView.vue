@@ -2,7 +2,7 @@
 // 运行台：任务制高级工作台——选任务 → 填要点 → 生成 → 三出口（采纳/改后采纳/复制）
 // 面向想越过向导直接控制单层的作者；日常写作请走创作向导与今日章台
 import { computed, onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   LAYER_LABELS,
   LAYERS,
@@ -16,6 +16,7 @@ import {
   type ChapterReview,
   type Excerpt,
   type LayerRunResult,
+  type LayerVersionFull,
   type SkillModule,
 } from '../api'
 import { activeTab, currentProjectId } from '../state'
@@ -69,6 +70,87 @@ const task = ref<TaskCard>(TASKS[0])
 const layer = computed(() => task.value.layer)
 const isAdvanced = computed(() => task.value.key === 'advanced')
 
+// ---------- 项目当前层内容：微调与续写的基础 ----------
+const projectOutline = ref<LayerVersionFull | null>(null)
+const projectIntro = ref<LayerVersionFull | null>(null)
+const loadingLayers = ref(false)
+
+async function loadProjectLayers() {
+  if (!currentProjectId.value) {
+    projectOutline.value = null
+    projectIntro.value = null
+    return
+  }
+  loadingLayers.value = true
+  try {
+    const [o, i] = await Promise.all([
+      projectsApi.layer(currentProjectId.value, 'outline'),
+      projectsApi.layer(currentProjectId.value, 'intro'),
+    ])
+    projectOutline.value = o.version
+    projectIntro.value = i.version
+  } catch {
+    // 静默失败：提示条不出现，点载入按钮时单独报错
+  } finally {
+    loadingLayers.value = false
+  }
+}
+
+const outlineMaxChapter = computed(() => {
+  let max = 0
+  for (const m of (projectOutline.value?.y ?? '').matchAll(/^第\s*(\d+)\s*章/gm)) {
+    max = Math.max(max, Number(m[1]))
+  }
+  return max
+})
+
+async function loadOutlineToX() {
+  if (!projectOutline.value) return
+  if (xLines.value.trim()) {
+    try {
+      await ElMessageBox.confirm('要点框已有内容，载入会覆盖——继续？', '覆盖确认', { type: 'warning' })
+    } catch {
+      return
+    }
+  }
+  xLines.value = projectOutline.value.y
+  ElMessage.success('已载入当前大纲——直接改，或用「继续调整」按新要求迭代后采纳')
+}
+
+async function loadIntroToX() {
+  if (!projectIntro.value) return
+  if (xLines.value.trim()) {
+    try {
+      await ElMessageBox.confirm('要点框已有内容，载入会覆盖——继续？', '覆盖确认', { type: 'warning' })
+    } catch {
+      return
+    }
+  }
+  xLines.value = projectIntro.value.y
+  ElMessage.success('已载入当前简介——直接改，或用「继续调整」按新要求迭代后采纳')
+}
+
+// ---------- 大纲续写模式：已有 N 章，从第 N+1 章接着排 ----------
+const outlineMode = ref<'fresh' | 'continue'>('fresh')
+const contStart = ref<number>(1)
+const contCount = ref<number>(30)
+const contVolume = ref('')
+const isContinueRun = computed(() => task.value.key === 'outline' && outlineMode.value === 'continue')
+
+watch(outlineMaxChapter, (v) => {
+  // 载入大纲/切项目后，起点默认落在已有最后一章的下一章
+  if (v > 0 && contStart.value <= v) contStart.value = v + 1
+})
+
+// 拼接：旧大纲 + 新卷名（可选）+ 新章，采纳后大纲层整体入新版本
+function joinOutline(newY: string) {
+  const parts = [projectOutline.value!.y.trimEnd()]
+  const vol = contVolume.value.trim()
+  if (vol) parts.push(vol)
+  parts.push(newY.trimStart())
+  return parts.join('\n\n')
+}
+
 const userDirective = ref('')
 const xLines = ref('') // 每行一个要点
 const xChunkLength = ref<number | null>(null)
@@ -120,6 +202,26 @@ const defaultsForLayer = computed(() =>
   modules.value.filter((m) => m.default_for.includes(layer.value)).map((m) => m.name),
 )
 
+// 与章台联动：章台「续写/补新章」入口（DeskView 置位后本页清零）
+const pipelineContinue =
+  (window as unknown as { __pipelineContinue?: { value: boolean } }).__pipelineContinue ?? { value: false }
+;(window as unknown as { __pipelineContinue?: { value: boolean } }).__pipelineContinue = pipelineContinue
+
+function enterContinueMode() {
+  const t = TASKS.find((t) => t.key === 'outline')!
+  task.value = t
+  result.value = null
+  adopted.value = false
+  syncDefaults()
+  if (projectOutline.value) {
+    outlineMode.value = 'continue'
+    contStart.value = outlineMaxChapter.value + 1
+  } else {
+    outlineMode.value = 'fresh'
+    ElMessage.info('当前项目还没有大纲——先从头生成一次，之后就能在这里续写')
+  }
+}
+
 onMounted(async () => {
   try {
     const [mods, types] = await Promise.all([skillsApi.list(), corpusApi.types()])
@@ -128,6 +230,24 @@ onMounted(async () => {
     syncDefaults()
   } catch (e) {
     ElMessage.error(`加载失败：${(e as Error).message}`)
+  }
+  await loadProjectLayers()
+  if (pipelineContinue.value) {
+    pipelineContinue.value = false
+    enterContinueMode()
+  }
+})
+
+watch(currentProjectId, () => {
+  outlineMode.value = 'fresh'
+  contVolume.value = ''
+  loadProjectLayers()
+})
+
+watch(activeTab, (t) => {
+  if (t === 'pipeline' && pipelineContinue.value) {
+    pipelineContinue.value = false
+    enterContinueMode()
   }
 })
 
@@ -182,22 +302,59 @@ const body = () => ({
 })
 
 async function doRun() {
-  const pairs = buildXPairs()
-  if (!pairs.length) {
-    ElMessage.warning('请至少输入一行要点')
-    return
+  // 续写分支：x 用新章号骨架，已有大纲作为定稿材料注入，结果与旧大纲拼接
+  let pairs: [string, string][]
+  let extraMaterials: { source_id: string; family: string; content: string; title: string }[] | undefined
+  let directive: string | undefined
+  let chunkLength: number | undefined
+
+  if (isContinueRun.value) {
+    if (!projectOutline.value) {
+      ElMessage.warning('当前项目还没有大纲——先「从头生成」一次，之后才能续写')
+      return
+    }
+    if (!contStart.value || contStart.value < 1 || !contCount.value || contCount.value < 1) {
+      ElMessage.warning('请填续写的起始章号和新增章数')
+      return
+    }
+    const end = contStart.value + contCount.value - 1
+    pairs = Array.from({ length: contCount.value }, (_, i) => [`第${contStart.value + i}章\n`, ''] as [string, string])
+    extraMaterials = [{
+      source_id: 'outline:current',
+      family: 'finalized',
+      content: projectOutline.value.y,
+      title: `已有大纲（前 ${outlineMaxChapter.value} 章，续写衔接）`,
+    }]
+    directive =
+      `已有大纲 ${outlineMaxChapter.value} 章见材料。本次从第 ${contStart.value} 章续写到第 ${end} 章，共 ${contCount.value} 章` +
+      (contVolume.value.trim() ? `，新卷首行写「${contVolume.value.trim()}」` : '') +
+      '。衔接已有剧情、伏笔与文风，不得改动已有章节。'
+    chunkLength = 40
+  } else {
+    pairs = buildXPairs()
+    if (!pairs.length) {
+      ElMessage.warning('请至少输入一行要点')
+      return
+    }
+    if (task.value.key === 'chapter' && !chapterNo.value) {
+      ElMessage.warning('写正文请先填章号——会自动带上该章待兑现的必现情节标记')
+      return
+    }
   }
-  if (task.value.key === 'chapter' && !chapterNo.value) {
-    ElMessage.warning('写正文请先填章号——会自动带上该章待兑现的必现情节标记')
-    return
-  }
+
   running.value = true
   result.value = null
   adopted.value = false
   resetLive()
   try {
     // 流式运行：思考与正文实时上屏；已完成块自动命中收据秒回，失败块只补失败
-    const r = await runsApi.stream(layer.value, body(), {
+    const r = await runsApi.stream(layer.value, {
+      ...body(),
+      x_pairs: pairs,
+      materials: extraMaterials,
+      user_directive: directive ?? (userDirective.value || undefined),
+      x_chunk_length: chunkLength ?? (xChunkLength.value || undefined),
+    }, {
       onThinking: (text, index) => {
         liveIndex.value = index
         liveThinking.value += text
@@ -217,10 +374,11 @@ async function doRun() {
       },
     })
     result.value = r
-    editableY.value = r.y
+    editableY.value = isContinueRun.value ? joinOutline(r.y) : r.y
     ElMessage.success(
       `完成：${r.journal.completed}/${r.journal.total} 段` +
-        (r.resumed_indices.length ? `，复用旧结果 ${r.resumed_indices.length} 段` : ''),
+        (r.resumed_indices.length ? `，复用旧结果 ${r.resumed_indices.length} 段` : '') +
+        (isContinueRun.value ? '，已与旧大纲拼接——确认后采纳' : ''),
     )
   } catch (e) {
     ElMessage.error(`运行失败：${(e as Error).message}`)
@@ -379,7 +537,54 @@ const nextStep = computed(() => NEXT_STEPS[layer.value] ?? null)
         <el-card shadow="never">
           <template #header>第二步 · 给我原料</template>
           <el-form label-width="86px" label-position="left">
-            <el-form-item :label="isAdvanced ? '输入块' : '要点'">
+            <!-- 项目已有内容：一键载入微调 / 续写 -->
+            <el-form-item v-if="task.key === 'outline' && projectOutline" label="当前大纲">
+              <div style="width: 100%">
+                <div style="font-size: 12px; color: #666; margin-bottom: 6px">
+                  项目已有大纲 v{{ projectOutline.seq }}（{{ outlineMaxChapter }} 章）
+                </div>
+                <el-button size="small" plain @click="loadOutlineToX">载入微调</el-button>
+                <el-button size="small" type="primary" plain @click="outlineMode = 'continue'; contStart = outlineMaxChapter + 1">
+                  续写新章
+                </el-button>
+                <div style="font-size: 12px; color: #999; margin-top: 4px">
+                  载入后可直接修改，或生成后用「继续调整」按新要求迭代
+                </div>
+              </div>
+            </el-form-item>
+            <el-form-item v-if="task.key === 'intro' && projectIntro" label="当前简介">
+              <div style="width: 100%">
+                <div style="font-size: 12px; color: #666; margin-bottom: 6px">项目已有简介 v{{ projectIntro.seq }}（{{ projectIntro.y.length }} 字）</div>
+                <el-button size="small" plain @click="loadIntroToX">载入微调</el-button>
+              </div>
+            </el-form-item>
+
+            <el-form-item v-if="task.key === 'outline'" label="生成方式">
+              <el-radio-group v-model="outlineMode">
+                <el-radio-button value="fresh">从头生成</el-radio-button>
+                <el-radio-button value="continue">续写新章</el-radio-button>
+              </el-radio-group>
+            </el-form-item>
+
+            <template v-if="isContinueRun">
+              <el-form-item label="续写范围">
+                <div style="width: 100%; display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
+                  <span style="font-size: 13px">从第</span>
+                  <el-input-number v-model="contStart" :min="1" style="width: 110px" />
+                  <span style="font-size: 13px">章续写</span>
+                  <el-input-number v-model="contCount" :min="1" :max="300" style="width: 110px" />
+                  <span style="font-size: 13px">章（到第 {{ contStart + contCount - 1 }} 章）</span>
+                </div>
+                <div style="font-size: 12px; color: #888; margin-top: 4px">
+                  已有 {{ outlineMaxChapter }} 章自动作为上下文注入，只生成新章，结果与旧大纲拼接后一并采纳
+                </div>
+              </el-form-item>
+              <el-form-item label="新卷名">
+                <el-input v-model="contVolume" placeholder="可空。如：第二卷 风起云涌（会写在新章开头）" />
+              </el-form-item>
+            </template>
+
+            <el-form-item v-if="!isContinueRun" :label="isAdvanced ? '输入块' : '要点'">
               <div style="width: 100%">
                 <el-input
                   v-model="xLines"
@@ -451,7 +656,7 @@ const nextStep = computed(() => NEXT_STEPS[layer.value] ?? null)
           </el-form>
 
           <el-button type="primary" :loading="running" style="width: 100%; margin-top: 12px" @click="doRun">
-            {{ running ? '生成中…' : hasFailed ? '继续生成（只补失败部分）' : '开始生成' }}
+            {{ running ? '生成中…' : hasFailed ? '继续生成（只补失败部分）' : isContinueRun ? `续写第 ${contStart}–${contStart + contCount - 1} 章` : '开始生成' }}
           </el-button>
           <div style="font-size: 12px; color: #999; text-align: center; margin-top: 6px">
             中断没关系：同输入重跑只补缺的部分，已写好的不重复花钱

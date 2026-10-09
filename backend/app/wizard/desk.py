@@ -23,16 +23,28 @@ from app.providers.base import Provider
 from app.wizard.store import STAGES, DeskStore, WizardStore
 
 _CHAPTER_HEAD = re.compile(r"^第\s*(\d+)\s*章", re.MULTILINE)
+_VOLUME_HEAD = re.compile(r"^第\s*[0-9一二三四五六七八九十百千]+\s*卷[^\n]*$", re.MULTILINE)
 
 
 def chapter_outlines(outline_text: str) -> dict[int, str]:
-    """outline 文本按「第N章」段头拆章：{no: 该章大纲正文（不含章号头）}。"""
+    """outline 文本按「第N章」段头拆章：{no: 该章大纲正文（不含章号头）}。
+    卷头行（如「第二卷 风起云涌」）不黏在上一章尾部，归入本卷第一章的开头。"""
     text = outline_text or ""
     matches = list(_CHAPTER_HEAD.finditer(text))
+    pre = text[: matches[0].start()] if matches else ""
+    vol_pre = _VOLUME_HEAD.search(pre)
+    carry = pre[vol_pre.start() :].strip() if vol_pre else ""
     out: dict[int, str] = {}
     for i, m in enumerate(matches):
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        out[int(m.group(1))] = text[m.end():end].strip()
+        chunk = text[m.end() : end].strip()
+        vol = _VOLUME_HEAD.search(chunk)
+        carry_next = ""
+        if vol:
+            carry_next = chunk[vol.start() :].strip()
+            chunk = chunk[: vol.start()].strip()
+        out[int(m.group(1))] = "\n".join(x for x in (carry, chunk) if x).strip()
+        carry = carry_next
     return out
 
 

@@ -262,6 +262,14 @@ watch(currentProjectId, () => {
   deskPage.value = 1
   loadOverview(false)
 })
+
+// 跳运行台续写大纲：置位标志，PipelineView 读取后进入续写模式并清零
+function goContinueOutline() {
+  const w = window as unknown as { __pipelineContinue?: { value: boolean } }
+  if (w.__pipelineContinue) w.__pipelineContinue.value = true
+  else (window as unknown as { __pipelineContinue: { value: boolean } }).__pipelineContinue = { value: true }
+  activeTab.value = 'pipeline'
+}
 </script>
 
 <template>
@@ -295,6 +303,15 @@ watch(currentProjectId, () => {
         </template>
         <div v-if="todayNo" style="margin-bottom: 10px; font-size: 13px; color: #666">
           今天写到第 <b style="color: var(--el-color-primary)">{{ todayNo }}</b> 章
+          <el-button
+            size="small"
+            type="primary"
+            plain
+            style="margin-left: 10px"
+            @click="goContinueOutline"
+          >
+            续写 / 补新章
+          </el-button>
         </div>
         <div v-if="overview && overview.outline_chapters < overview.total" style="margin-bottom: 10px; font-size: 12px; color: #e6a23c">
           有 {{ overview.total - overview.outline_chapters }} 章还没有大纲，做完也能写，但建议回向导补

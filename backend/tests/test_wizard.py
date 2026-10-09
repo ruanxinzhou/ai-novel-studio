@@ -162,6 +162,14 @@ class TestChapterOutlines:
         assert chapter_outlines("") == {}
         assert chapter_outlines("没有章号的大纲") == {}
 
+    def test_volume_head_joins_next_chapter(self):
+        text = "第一卷 入门\n第1章\n试炼。\n第2章\n变故。\n第二卷 风起\n第3章\n新篇。\n"
+        o = chapter_outlines(text)
+        assert set(o) == {1, 2, 3}
+        assert o[1].startswith("第一卷")
+        assert o[2] == "变故。"
+        assert o[3].startswith("第二卷")
+
 
 class TestDeskStore:
     def test_record_stages_and_refinalize(self, tmp_path):
