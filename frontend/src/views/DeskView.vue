@@ -181,7 +181,13 @@ watch(currentProjectId, () => {
     </el-empty>
   </div>
 
-  <div v-else-if="overview && !overview.chapters.length">
+  <div v-else-if="!overview">
+    <el-empty :description="loading ? '章台加载中…' : '章台加载失败'">
+      <el-button v-if="!loading" @click="loadOverview(false)">重试</el-button>
+    </el-empty>
+  </div>
+
+  <div v-else-if="!overview.chapters.length">
     <el-empty description="还没有章节可写——先在创作向导的「故事架构」站生成大纲，章台才有章可做">
       <el-button type="primary" @click="activeTab = 'wizard'">去创作向导</el-button>
     </el-empty>
