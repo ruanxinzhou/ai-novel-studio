@@ -1,8 +1,9 @@
 <script setup lang="ts">
 // 必现标记管理：【第N章必现】提取/手动添加/状态流转/正文兑现校验
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { markersApi, type MarkerInfo } from '../api'
+import { currentProjectId } from '../state'
 
 const markers = ref<MarkerInfo[]>([])
 const pendingCount = ref(0)
@@ -15,7 +16,7 @@ const busy = ref(false)
 
 async function refresh() {
   try {
-    const r = await markersApi.list()
+    const r = await markersApi.list(currentProjectId.value || undefined)
     markers.value = r.markers
     pendingCount.value = r.pending_count
   } catch (e) {
@@ -23,6 +24,7 @@ async function refresh() {
   }
 }
 onMounted(refresh)
+watch(currentProjectId, () => refresh())
 
 async function add() {
   if (!addContent.value.trim()) {
@@ -31,7 +33,7 @@ async function add() {
   }
   busy.value = true
   try {
-    await markersApi.add(addChapter.value, addContent.value)
+    await markersApi.add(addChapter.value, addContent.value, currentProjectId.value || undefined)
     addContent.value = ''
     ElMessage.success('已添加')
     await refresh()
@@ -76,7 +78,7 @@ async function verify() {
   }
   busy.value = true
   try {
-    const r = await markersApi.verify(verifyProse.value)
+    const r = await markersApi.verify(verifyProse.value, undefined, currentProjectId.value || undefined)
     verifyResults.value = r.results
     const hits = r.results.filter((x) => x.hit).length
     ElMessage.info(`校验完成：${hits}/${r.results.length} 条命中`)

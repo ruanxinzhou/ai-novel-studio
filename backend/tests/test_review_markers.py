@@ -154,7 +154,7 @@ def test_marker_verify_substring(tmp_path):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr("app.api.main._journal_path", lambda rid: tmp_path / f"{rid}.json")
+    monkeypatch.setattr("app.api.main._journal_path", lambda rid, project=None: tmp_path / f"{rid}.json")
     monkeypatch.setattr("app.api.main._marker_store", MarkerStore(tmp_path / "markers.json"))
     from app.api.main import app
     return TestClient(app)

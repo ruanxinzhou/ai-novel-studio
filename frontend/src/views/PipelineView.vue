@@ -7,6 +7,7 @@ import {
   LAYERS,
   corpusApi,
   markersApi,
+  projectsApi,
   reviewApi,
   runsApi,
   skillsApi,
@@ -15,6 +16,7 @@ import {
   type LayerRunResult,
   type SkillModule,
 } from '../api'
+import { currentProjectId } from '../state'
 
 const layer = ref<string>('draft')
 const userDirective = ref('')
@@ -25,6 +27,8 @@ const running = ref(false)
 const result = ref<LayerRunResult | null>(null)
 const reviewing = ref(false)
 const review = ref<ChapterReview | null>(null)
+const adoptNote = ref('')
+const adopting = ref(false)
 
 const modules = ref<SkillModule[]>([])
 const selectedModules = ref<string[]>([])
@@ -90,6 +94,7 @@ const body = () => ({
       }
     : undefined,
   chapter_no: chapterNo.value || undefined,
+  project: currentProjectId.value || undefined,
 })
 
 async function doRun(kind: 'run' | 'retry') {
@@ -145,10 +150,33 @@ async function unstableToMarkers() {
   if (!problems.length) return
   try {
     const next = (chapterNo.value || 1) + 1
-    await markersApi.fromReview(problems, next)
+    await markersApi.fromReview(problems, next, currentProjectId.value || undefined)
     ElMessage.success(`已把 ${problems.length} 项不稳转成第 ${next} 章必现修复标记`)
   } catch (e) {
     ElMessage.error(`落位失败：${(e as Error).message}`)
+  }
+}
+
+async function adoptToProject() {
+  if (!result.value?.y) return
+  if (!currentProjectId.value) {
+    ElMessage.warning('先在顶部选择或新建小说项目')
+    return
+  }
+  adopting.value = true
+  try {
+    await projectsApi.adopt(
+      currentProjectId.value,
+      layer.value,
+      result.value.y,
+      result.value.pairs,
+      adoptNote.value || `运行 ${result.value.run_id.slice(0, 8)}`,
+    )
+    ElMessage.success(`已采纳到项目「${LAYER_LABELS[layer.value]}」层，新版本入库`)
+  } catch (e) {
+    ElMessage.error(`采纳失败：${(e as Error).message}`)
+  } finally {
+    adopting.value = false
   }
 }
 </script>
@@ -247,6 +275,20 @@ async function unstableToMarkers() {
             <el-tag v-for="s in result.skills_injected" :key="s" type="warning" size="small">{{ s }}</el-tag>
           </div>
         </template>
+        <div style="margin-bottom: 10px; display: flex; gap: 8px; align-items: center">
+          <el-input
+            v-model="adoptNote"
+            placeholder="版本备注（可空，如：调整了第3章节奏）"
+            size="small"
+            style="width: 280px"
+          />
+          <el-button type="success" :loading="adopting" @click="adoptToProject">
+            采纳到当前项目
+          </el-button>
+          <span v-if="!currentProjectId" style="font-size: 12px; color: #c00">
+            未选择项目，顶部新建/选择后可入库
+          </span>
+        </div>
         <el-tabs>
           <el-tab-pane label="成文">
             <pre style="white-space: pre-wrap; font-family: inherit; line-height: 1.9">{{ result.y }}</pre>

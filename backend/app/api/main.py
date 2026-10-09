@@ -5,6 +5,7 @@ M1-T5：Prompt 工坊（查看/编辑/重置/干跑）。
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Iterator, Literal
 
 from fastapi import FastAPI, HTTPException
@@ -14,6 +15,8 @@ from pydantic import BaseModel
 from ..config import REPO
 from ..context import Material, MaterialFamily
 from ..corpus import list_tags, list_types, search as corpus_search
+from ..entities import ENTITY_TYPES, TYPE_LABELS, EntityStore, extract_entities
+from ..entities.vault import export_vault
 from ..pipeline import (
     SPECS,
     PipelineRunner,
@@ -22,15 +25,47 @@ from ..pipeline import (
     compute_run_key,
     render_generation_messages,
 )
+from ..projects import ProjectStore
 from ..providers import Router, get_router
 from ..review import STATUS_PENDING, MarkerStore, review_chapter
 from ..review.markers import markers_material
 from ..skills import MODULES, available_modules, module_rules, skill_materials
 
-app = FastAPI(title="Novel Studio API", version="0.3.0")
+app = FastAPI(title="Novel Studio API", version="0.4.0")
 
 _prompt_store = PromptStore(persist_path=REPO / "backend" / "data" / "prompt_store.json")
 _marker_store = MarkerStore(REPO / "backend" / "data" / "markers.json")
+_project_store = ProjectStore(REPO / "backend" / "data" / "projects")
+
+_project_marker_stores: dict[str, MarkerStore] = {}
+_project_entity_stores: dict[str, EntityStore] = {}
+
+
+def _markers_for(project: str | None) -> MarkerStore:
+    """项目维度标记：project=None 用全局默认（兼容单书流程）。"""
+    if project is None:
+        return _marker_store
+    if project not in _project_marker_stores:
+        _project_marker_stores[project] = MarkerStore(
+            REPO / "backend" / "data" / "projects" / project / "markers.json"
+        )
+    return _project_marker_stores[project]
+
+
+def _require_project(pid: str):
+    try:
+        return _project_store.get(pid)
+    except (FileNotFoundError, json.JSONDecodeError):
+        raise HTTPException(status_code=404, detail=f"项目不存在：{pid}")
+
+
+def _entities_for(pid: str) -> EntityStore:
+    """实体库按项目隔离；缓存实例避免重复读盘。"""
+    if pid not in _project_entity_stores:
+        _project_entity_stores[pid] = EntityStore(
+            REPO / "backend" / "data" / "projects" / pid / "entities.json"
+        )
+    return _project_entity_stores[pid]
 
 
 class GenerateIn(BaseModel):
@@ -196,13 +231,16 @@ class LayerRunIn(BaseModel):
     modules: list[str] | None = None      # 写作模块；缺省用层默认集
     corpus_query: CorpusQueryIn | None = None
     chapter_no: int | None = None         # 提供时自动注入该章 pending 必现标记
+    project: str | None = None            # 提供时收据与标记按项目隔离
 
 
 _FAMILIES = {"required": MaterialFamily.REQUIRED, "finalized": MaterialFamily.FINALIZED,
              "candidate": MaterialFamily.CANDIDATE, "reference": MaterialFamily.REFERENCE}
 
 
-def _journal_path(run_id: str):
+def _journal_path(run_id: str, project: str | None = None):
+    if project:
+        return REPO / "backend" / "data" / "projects" / project / "runs" / f"{run_id}.json"
     return REPO / "backend" / "data" / "runs" / f"{run_id}.json"
 
 
@@ -246,14 +284,17 @@ def _run_layer(layer: str, body: LayerRunIn) -> dict:
                 keywords=hit.tags,
             ))
     marker_mat = None
+    if body.project:
+        _require_project(body.project)
     if body.chapter_no is not None:
-        marker_mat = markers_material(_marker_store.pending_for(body.chapter_no), body.chapter_no)
+        marker_mat = markers_material(
+            _markers_for(body.project).pending_for(body.chapter_no), body.chapter_no)
     all_mats = ([marker_mat] if marker_mat else []) + injected_skills + mats + corpus_mats
     x_list = [x for x, _ in body.x_pairs]
     run_key = compute_run_key(layer, x_list,
                               [(m.source_id, m.family.value, m.content) for m in all_mats],
                               body.user_directive)
-    journal = RunJournal(_journal_path(run_key), layer, run_key)
+    journal = RunJournal(_journal_path(run_key, body.project), layer, run_key)
     runner = PipelineRunner(_router_provider(layer), prompt_store=_prompt_store)
     try:
         result = runner.run_layer(spec, body.x_pairs, materials=all_mats,
@@ -269,7 +310,7 @@ def _run_layer(layer: str, body: LayerRunIn) -> dict:
         "resumed_indices": result.resumed_indices,
         "skills_injected": [m.source_id for m in injected_skills],
         "corpus_injected": [m.source_id for m in corpus_mats],
-        "markers_injected": [m.as_dict() for m in _marker_store.pending_for(body.chapter_no or 0)]
+        "markers_injected": [m.as_dict() for m in _markers_for(body.project).pending_for(body.chapter_no or 0)]
         if body.chapter_no is not None else [],
         "calls": [{"completion_status": c.completion_status, "attempts": c.attempts}
                   for c in result.calls],
@@ -388,49 +429,289 @@ class MarkersFromReviewIn(BaseModel):
     next_chapter: int
 
 
-def _marker_summary() -> dict:
+def _marker_summary(project: str | None) -> dict:
+    store = _markers_for(project)
     return {
-        "markers": [m.as_dict() for m in _marker_store.markers],
-        "pending_count": sum(1 for m in _marker_store.markers if m.status == STATUS_PENDING),
+        "project": project,
+        "markers": [m.as_dict() for m in store.markers],
+        "pending_count": sum(1 for m in store.markers if m.status == STATUS_PENDING),
     }
 
 
 @app.get("/api/markers")
-def markers_list() -> dict:
-    return _marker_summary()
+def markers_list(project: str | None = None) -> dict:
+    return _marker_summary(project)
 
 
 @app.post("/api/markers")
-def markers_add(body: MarkerIn) -> dict:
+def markers_add(body: MarkerIn, project: str | None = None) -> dict:
     if not body.content.strip():
         raise HTTPException(status_code=422, detail="标记内容不能为空")
-    _marker_store.add(body.target_chapter, body.content)
-    return _marker_summary()
+    if project:
+        _require_project(project)
+    _markers_for(project).add(body.target_chapter, body.content)
+    return _marker_summary(project)
 
 
 @app.post("/api/markers/extract")
-def markers_extract(body: MarkerExtractIn) -> dict:
-    added = _marker_store.extract_and_add(body.text)
-    return {**_marker_summary(), "added": [m.as_dict() for m in added]}
+def markers_extract(body: MarkerExtractIn, project: str | None = None) -> dict:
+    added = _markers_for(project).extract_and_add(body.text)
+    return {**_marker_summary(project), "added": [m.as_dict() for m in added]}
 
 
 @app.put("/api/markers/{marker_id}/status")
-def markers_status(marker_id: str, body: MarkerStatusIn) -> dict:
+def markers_status(marker_id: str, body: MarkerStatusIn, project: str | None = None) -> dict:
     try:
-        _marker_store.set_status(marker_id, body.status)
+        _markers_for(project).set_status(marker_id, body.status)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    return _marker_summary()
+    return _marker_summary(project)
 
 
 @app.post("/api/markers/verify")
-def markers_verify(body: MarkerVerifyIn) -> dict:
-    return {"results": _marker_store.verify(body.prose, body.chapter_no)}
+def markers_verify(body: MarkerVerifyIn, project: str | None = None) -> dict:
+    return {"results": _markers_for(project).verify(body.prose, body.chapter_no)}
 
 
 @app.post("/api/markers/from_review")
-def markers_from_review(body: MarkersFromReviewIn) -> dict:
+def markers_from_review(body: MarkersFromReviewIn, project: str | None = None) -> dict:
+    store = _markers_for(project)
     for p in body.problems:
         if p.strip():
-            _marker_store.add(body.next_chapter, f"必须修复：{p.strip()}", source="review")
-    return _marker_summary()
+            store.add(body.next_chapter, f"必须修复：{p.strip()}", source="review")
+    return _marker_summary(project)
+
+
+# ---- 小说项目（M3a）----
+
+class ProjectIn(BaseModel):
+    title: str
+    intro: str = ""
+
+
+class ProjectUpdateIn(BaseModel):
+    title: str | None = None
+    intro: str | None = None
+
+
+class AdoptIn(BaseModel):
+    x_pairs: list[tuple[str, str]] = []
+    y: str
+    note: str = ""
+
+
+class RollbackIn(BaseModel):
+    seq: int
+
+
+@app.get("/api/projects")
+def projects_list() -> dict:
+    return {"projects": _project_store.list()}
+
+
+@app.post("/api/projects")
+def projects_create(body: ProjectIn) -> dict:
+    try:
+        meta = _project_store.create(body.title, body.intro)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return meta.as_dict()
+
+
+@app.get("/api/projects/{pid}")
+def projects_detail(pid: str) -> dict:
+    _require_project(pid)
+    meta = _project_store.get(pid)
+    return {**meta.as_dict(), "layers": {
+        layer: {
+            "current": (_project_store.current(pid, layer).as_summary()
+                        if _project_store.current(pid, layer) else None),
+            "history": [v.as_summary() for v in _project_store.history(pid, layer)],
+        }
+        for layer in ("intro", "outline", "plot", "draft", "polish")
+    }}
+
+
+@app.put("/api/projects/{pid}")
+def projects_update(pid: str, body: ProjectUpdateIn) -> dict:
+    _require_project(pid)
+    try:
+        return _project_store.update(pid, body.title, body.intro).as_dict()
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.delete("/api/projects/{pid}")
+def projects_delete(pid: str) -> dict:
+    _require_project(pid)
+    _project_store.delete(pid)
+    return {"deleted": pid}
+
+
+@app.get("/api/projects/{pid}/layers/{layer}")
+def project_layer(pid: str, layer: str, seq: int | None = None) -> dict:
+    """层详情：seq 缺省看当前版本，否则看指定历史版本。"""
+    _require_project(pid)
+    if layer not in ("intro", "outline", "plot", "draft", "polish"):
+        raise HTTPException(status_code=404, detail=f"未知层：{layer}")
+    v = _project_store.version(pid, layer, seq) if seq else _project_store.current(pid, layer)
+    return {
+        "version": v.as_dict() if v else None,
+        "history": [x.as_summary() for x in _project_store.history(pid, layer)],
+    }
+
+
+@app.post("/api/projects/{pid}/layers/{layer}")
+def project_adopt(pid: str, layer: str, body: AdoptIn) -> dict:
+    """采纳一层产出（生成结果人工编辑后入库，版本留痕）。"""
+    _require_project(pid)
+    if not body.y.strip():
+        raise HTTPException(status_code=422, detail="采纳内容不能为空")
+    v = _project_store.adopt(pid, layer, body.x_pairs, body.y, body.note)
+    return v.as_dict()
+
+
+@app.post("/api/projects/{pid}/layers/{layer}/rollback")
+def project_rollback(pid: str, layer: str, body: RollbackIn) -> dict:
+    _require_project(pid)
+    try:
+        v = _project_store.rollback(pid, layer, body.seq)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return v.as_dict()
+
+
+# ---- 实体库（M3b）----
+
+class EntityIn(BaseModel):
+    type: Literal["character", "location", "item", "plotline", "foreshadow"]
+    name: str
+    summary: str = ""
+    details: str = ""
+    status: str | None = None
+    chapter: int | None = None
+
+
+class EntityUpdateIn(BaseModel):
+    name: str | None = None
+    summary: str | None = None
+    details: str | None = None
+    status: str | None = None
+
+
+class EntityExtractIn(BaseModel):
+    text: str
+    chapter: int | None = None
+    model: str | None = None
+
+
+def _entity_summary(pid: str) -> dict:
+    store = _entities_for(pid)
+    counts: dict[str, int] = {t: 0 for t in ENTITY_TYPES}
+    for e in store.entities:
+        counts[e.type] += 1
+    return {
+        "project": pid,
+        "entities": [e.as_dict() for e in store.entities],
+        "counts": counts,
+        "total": len(store.entities),
+    }
+
+
+@app.get("/api/projects/{pid}/entities")
+def entities_list(pid: str, type: str | None = None, status: str | None = None,
+                  keyword: str | None = None) -> dict:
+    _require_project(pid)
+    if type and type not in ENTITY_TYPES:
+        raise HTTPException(status_code=422, detail=f"未知实体类型：{type}")
+    store = _entities_for(pid)
+    found = store.list(type=type, status=status, keyword=keyword)
+    return {
+        "project": pid,
+        "entities": [e.as_dict() for e in found],
+        "counts": {t: sum(1 for e in store.entities if e.type == t)
+                   for t in ENTITY_TYPES},
+        "total": len(store.entities),
+    }
+
+
+@app.post("/api/projects/{pid}/entities")
+def entities_add(pid: str, body: EntityIn) -> dict:
+    _require_project(pid)
+    try:
+        e = _entities_for(pid).add(body.type, body.name, body.summary, body.details,
+                                   status=body.status, chapter=body.chapter)
+    except ValueError as ex:
+        raise HTTPException(status_code=422, detail=str(ex))
+    return e.as_dict()
+
+
+@app.put("/api/projects/{pid}/entities/{eid}")
+def entities_update(pid: str, eid: str, body: EntityUpdateIn) -> dict:
+    _require_project(pid)
+    try:
+        return _entities_for(pid).update(
+            eid, body.name, body.summary, body.details, body.status).as_dict()
+    except ValueError as ex:
+        raise HTTPException(status_code=404 if "不存在" in str(ex) else 422, detail=str(ex))
+
+
+@app.delete("/api/projects/{pid}/entities/{eid}")
+def entities_delete(pid: str, eid: str) -> dict:
+    _require_project(pid)
+    try:
+        _entities_for(pid).delete(eid)
+    except ValueError as ex:
+        raise HTTPException(status_code=404, detail=str(ex))
+    return {"deleted": eid}
+
+
+@app.post("/api/projects/{pid}/entities/extract")
+def entities_extract(pid: str, body: EntityExtractIn) -> dict:
+    """LLM 从文本抽取实体并合并入库（同类型同名只补空与章节）。"""
+    _require_project(pid)
+    router: Router = get_router()
+
+    class _Adapter:
+        name = "router:chore"
+        default_model = None
+
+        @staticmethod
+        def chat(messages, model=None, max_tokens=None, extra=None):
+            return router.chat("chore", messages, model, max_tokens)
+
+    try:
+        result = extract_entities(_Adapter(), _entities_for(pid), _prompt_store,
+                                  body.text, chapter=body.chapter, model=body.model)
+    except ValueError as ex:
+        raise HTTPException(status_code=502, detail=str(ex))
+    return {
+        "created": result.created,
+        "updated": result.updated,
+        "dropped": result.dropped,
+        "attempts": result.attempts,
+        **_entity_summary(pid),
+    }
+
+
+# ---- Obsidian Vault 导出（M3b）----
+
+class VaultExportIn(BaseModel):
+    out_dir: str | None = None   # 缺省导出到 backend/data/exports/{pid}
+
+
+@app.post("/api/projects/{pid}/export/vault")
+def projects_export_vault(pid: str, body: VaultExportIn | None = None) -> dict:
+    """导出 Obsidian Vault：MOC 首页 + 层级/章节/实体互链目录。"""
+    _require_project(pid)
+    out_root = Path((body.out_dir if body and body.out_dir else "")
+                    or (REPO / "backend" / "data" / "exports" / pid))
+    result = export_vault(_project_store, _entities_for(pid), pid, out_root)
+    return {
+        "out_dir": result.out_dir,
+        "files": result.files,
+        "chapters": result.chapters,
+        "entities": result.entities,
+        "layers_exported": result.layers_exported,
+        "warnings": result.warnings,
+    }

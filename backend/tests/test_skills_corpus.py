@@ -107,7 +107,7 @@ def test_module_rules_bloat_causes_explicit_capacity_error():
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr("app.api.main._journal_path", lambda rid: tmp_path / f"{rid}.json")
+    monkeypatch.setattr("app.api.main._journal_path", lambda rid, project=None: tmp_path / f"{rid}.json")
     from app.api.main import app
     return TestClient(app)
 
