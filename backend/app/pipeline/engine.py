@@ -18,7 +18,16 @@ from dataclasses import dataclass, field
 
 from app.chunking import XYWriter
 from app.context import Material, MaterialAssembler, MaterialFamily
-from app.generation import BudgetDecision, BudgetRequest, ModelLimits, complete_prose, plan_budget
+from app.generation import (
+    COMPLETE,
+    BudgetDecision,
+    BudgetRequest,
+    ModelLimits,
+    ProseCompletion,
+    complete_prose,
+    plan_budget,
+)
+from app.pipeline.journal import ChunkReceipt, RunJournal, x_fingerprint
 from app.pipeline.prompts import PromptStore, RenderedPrompt, render_generation_messages
 from app.providers.base import Provider
 
@@ -63,6 +72,7 @@ class LayerRunResult:
     pairs: list[tuple[str, str]]
     calls: list[CallLog] = field(default_factory=list)
     snapshots: list = field(default_factory=list)
+    resumed_indices: list[int] = field(default_factory=list)  # 从收据复用、未调 LLM 的块
 
     @property
     def y(self) -> str:
@@ -165,6 +175,7 @@ class PipelineRunner:
         initial_anchor: str = "",
         user_directive: str | None = None,
         x_chunk_length: int | None = None,
+        journal: RunJournal | None = None,
     ) -> LayerRunResult:
         writer = XYWriter(
             [(x, "") for x, _ in x_pairs],
@@ -177,23 +188,47 @@ class PipelineRunner:
         calls: list[CallLog] = []
         snapshots: list = []
         edited: list = []
+        resumed: list[int] = []
         anchor_text = initial_anchor
 
-        for chunk in chunks:
+        for i, chunk in enumerate(chunks):
             # 逐块准备：滚动锚点依赖上一块的生成结果，无法预渲染
             prep = self._prepare_one(spec, writer, chunk, base_materials, user_directive, anchor_text)
             chunk, rendered, decision, max_tokens = prep.chunk, prep.rendered, prep.decision, prep.max_tokens
             snapshots.append(rendered)
+            x_hash = x_fingerprint(chunk.x_chunk)
 
-            def generate(acc: str | None, _messages=rendered.messages, _max_tokens=max_tokens) -> tuple[str, str]:
-                msgs = list(_messages)
-                if acc:
-                    tail = acc[-CONTINUATION_TAIL_CHARS:]
-                    msgs.append({"role": "user", "content": f"从断点处续写，不要重复已写内容：\n{tail}"})
-                resp = self.provider.chat(msgs, self.model, max_tokens=_max_tokens)
-                return resp.text, proxy_finish_reason(resp.usage.output_tokens, _max_tokens)
+            receipt = journal.match(i, x_hash) if journal else None
+            if receipt is not None:
+                # 断点复用：输入一致且已完成，不再调用 LLM
+                completion = ProseCompletion(
+                    text=receipt.y, status=receipt.completion_status or COMPLETE,
+                    attempts=0, dedup_overlaps=0,
+                )
+                resumed.append(i)
+            else:
+                def generate(acc: str | None, _messages=rendered.messages, _max_tokens=max_tokens) -> tuple[str, str]:
+                    msgs = list(_messages)
+                    if acc:
+                        tail = acc[-CONTINUATION_TAIL_CHARS:]
+                        msgs.append({"role": "user", "content": f"从断点处续写，不要重复已写内容：\n{tail}"})
+                    resp = self.provider.chat(msgs, self.model, max_tokens=_max_tokens)
+                    return resp.text, proxy_finish_reason(resp.usage.output_tokens, _max_tokens)
 
-            completion = complete_prose(generate)
+                try:
+                    completion = complete_prose(generate)
+                except Exception as e:
+                    # 失败也落收据：重试时知道此块曾失败，completed 块不受影响
+                    if journal:
+                        journal.append(ChunkReceipt(index=i, x_hash=x_hash, y="",
+                                                    status="failed", error=str(e)[:300]))
+                    raise
+                if journal:
+                    journal.append(ChunkReceipt(
+                        index=i, x_hash=x_hash, y=completion.text, status="completed",
+                        completion_status=completion.status, attempts=completion.attempts,
+                    ))
+
             edited.append(chunk.edit(y_chunk=completion.text))
             if spec.anchor_enabled:
                 anchor_text = completion.text
@@ -203,7 +238,8 @@ class PipelineRunner:
             )
 
         writer.apply_chunks(chunks, edited)
-        return LayerRunResult(layer=spec.name, pairs=list(writer.xy_pairs), calls=calls, snapshots=snapshots)
+        return LayerRunResult(layer=spec.name, pairs=list(writer.xy_pairs), calls=calls,
+                              snapshots=snapshots, resumed_indices=resumed)
 
 
 def _finalized(source_id: str, content: str, title: str, keywords: tuple[str, ...] = ()) -> Material:

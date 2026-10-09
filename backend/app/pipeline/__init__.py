@@ -9,6 +9,14 @@ from app.pipeline.engine import (
     proxy_finish_reason,
     split_outline_into_chapters,
 )
+from app.pipeline.journal import (
+    COMPLETED,
+    FAILED,
+    ChunkReceipt,
+    RunJournal,
+    compute_run_key,
+    x_fingerprint,
+)
 from app.pipeline.prompts import (
     DEFAULT_INSTRUCTIONS,
     OUTPUT_CONTRACT,
@@ -24,13 +32,16 @@ from app.pipeline.prompts import (
 LAYER_INSTRUCTIONS = DEFAULT_INSTRUCTIONS
 
 __all__ = [
+    "COMPLETED",
     "DEFAULT_INSTRUCTIONS",
+    "FAILED",
     "LAYER_INSTRUCTIONS",
     "OUTPUT_CONTRACT",
     "SPECS",
     "SYSTEM_CONTRACT",
     "X_HEADERS",
     "CallLog",
+    "ChunkReceipt",
     "LayerRunResult",
     "PipelineRunner",
     "PipelineSpec",
@@ -38,8 +49,11 @@ __all__ = [
     "PromptStore",
     "PromptVersion",
     "RenderedPrompt",
+    "RunJournal",
     "build_novel",
+    "compute_run_key",
     "proxy_finish_reason",
     "render_generation_messages",
     "split_outline_into_chapters",
+    "x_fingerprint",
 ]

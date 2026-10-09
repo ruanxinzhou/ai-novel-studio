@@ -5,14 +5,22 @@ M1-T5：Prompt 工坊（查看/编辑/重置/干跑）。
 from __future__ import annotations
 
 import json
-from typing import Iterator
+from typing import Iterator, Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ..config import REPO
-from ..pipeline import PromptStore, render_generation_messages
+from ..context import Material, MaterialFamily
+from ..pipeline import (
+    SPECS,
+    PipelineRunner,
+    PromptStore,
+    RunJournal,
+    compute_run_key,
+    render_generation_messages,
+)
 from ..providers import Router, get_router
 
 app = FastAPI(title="Novel Studio API", version="0.2.0")
@@ -156,3 +164,95 @@ def prompts_dry_run(layer: str, body: DryRunIn) -> dict:
         "prompt_bytes": rendered.prompt_bytes,
         "est_prompt_tokens": rendered.est_prompt_tokens,
     }
+
+
+# ---- 批量运行 + 断点收据（M1-T9）----
+
+class MaterialIn(BaseModel):
+    source_id: str
+    family: Literal["required", "finalized", "candidate", "reference"] = "reference"
+    content: str
+    title: str = ""
+
+
+class LayerRunIn(BaseModel):
+    x_pairs: list[tuple[str, str]]
+    materials: list[MaterialIn] | None = None
+    user_directive: str | None = None
+    x_chunk_length: int | None = None
+
+
+_FAMILIES = {"required": MaterialFamily.REQUIRED, "finalized": MaterialFamily.FINALIZED,
+             "candidate": MaterialFamily.CANDIDATE, "reference": MaterialFamily.REFERENCE}
+
+
+def _journal_path(run_id: str):
+    return REPO / "backend" / "data" / "runs" / f"{run_id}.json"
+
+
+def _router_provider(step: str):
+    """把 Router（带 failover 的 step 路由）适配成 PipelineRunner 需要的 Provider。"""
+    router: Router = get_router()
+
+    class _Adapter:
+        name = f"router:{step}"
+        default_model = None
+
+        @staticmethod
+        def chat(messages, model=None, max_tokens=None, extra=None):
+            return router.chat(step, messages, model, max_tokens)
+
+    return _Adapter()
+
+
+def _run_layer(layer: str, body: LayerRunIn) -> dict:
+    if layer not in SPECS:
+        raise HTTPException(status_code=404, detail=f"未知层：{layer}")
+    spec = SPECS[layer]
+    mats = [
+        Material(source_id=m.source_id, family=_FAMILIES[m.family], content=m.content, title=m.title)
+        for m in (body.materials or [])
+    ]
+    x_list = [x for x, _ in body.x_pairs]
+    run_key = compute_run_key(layer, x_list, [(m.source_id, m.family, m.content) for m in mats],
+                              body.user_directive)
+    journal = RunJournal(_journal_path(run_key), layer, run_key)
+    runner = PipelineRunner(_router_provider(layer), prompt_store=_prompt_store)
+    try:
+        result = runner.run_layer(spec, body.x_pairs, materials=mats,
+                                  user_directive=body.user_directive,
+                                  x_chunk_length=body.x_chunk_length, journal=journal)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"生成失败（已完成块已留收据）：{e}")
+    return {
+        "run_id": run_key,
+        "layer": layer,
+        "y": result.y,
+        "pairs": result.pairs,
+        "resumed_indices": result.resumed_indices,
+        "calls": [{"completion_status": c.completion_status, "attempts": c.attempts}
+                  for c in result.calls],
+        "journal": journal.summary(),
+    }
+
+
+@app.post("/api/runs/{layer}")
+def runs_start(layer: str, body: LayerRunIn) -> dict:
+    """运行一层流水线；同输入重跑自动命中收据（幂等），失败块可重试。"""
+    return _run_layer(layer, body)
+
+
+@app.post("/api/runs/{layer}/retry")
+def runs_retry(layer: str, body: LayerRunIn) -> dict:
+    """幂等重试：语义同 runs_start，completed 块不重生成，只补失败/缺失块。"""
+    return _run_layer(layer, body)
+
+
+@app.get("/api/runs/{run_id}")
+def runs_status(run_id: str) -> dict:
+    path = _journal_path(run_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"运行不存在：{run_id}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    journal = RunJournal(path, data.get("layer", ""), data.get("run_key", ""))
+    return journal.summary()
