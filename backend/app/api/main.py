@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from ..config import REPO
 from ..context import Material, MaterialFamily
+from ..corpus import list_tags, list_types, search as corpus_search
 from ..pipeline import (
     SPECS,
     PipelineRunner,
@@ -22,6 +23,7 @@ from ..pipeline import (
     render_generation_messages,
 )
 from ..providers import Router, get_router
+from ..skills import MODULES, available_modules, module_rules, skill_materials
 
 app = FastAPI(title="Novel Studio API", version="0.2.0")
 
@@ -175,11 +177,21 @@ class MaterialIn(BaseModel):
     title: str = ""
 
 
+class CorpusQueryIn(BaseModel):
+    """运行时范文检索：命中片段作为参考资料注入（先借结构再动笔）。"""
+    excerpt_type: str | None = None
+    tag: str | None = None
+    keyword: str | None = None
+    limit: int = 3
+
+
 class LayerRunIn(BaseModel):
     x_pairs: list[tuple[str, str]]
     materials: list[MaterialIn] | None = None
     user_directive: str | None = None
     x_chunk_length: int | None = None
+    modules: list[str] | None = None      # 写作模块；缺省用层默认集
+    corpus_query: CorpusQueryIn | None = None
 
 
 _FAMILIES = {"required": MaterialFamily.REQUIRED, "finalized": MaterialFamily.FINALIZED,
@@ -213,13 +225,31 @@ def _run_layer(layer: str, body: LayerRunIn) -> dict:
         Material(source_id=m.source_id, family=_FAMILIES[m.family], content=m.content, title=m.title)
         for m in (body.materials or [])
     ]
+    try:
+        injected_skills = skill_materials(layer, body.modules)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    corpus_mats = []
+    if body.corpus_query:
+        for hit in corpus_search(excerpt_type=body.corpus_query.excerpt_type,
+                                 tag=body.corpus_query.tag, keyword=body.corpus_query.keyword,
+                                 limit=max(1, min(body.corpus_query.limit, 10))):
+            corpus_mats.append(Material(
+                source_id=hit.to_material_dict()["source_id"],
+                family=MaterialFamily.REFERENCE,
+                content=hit.text,
+                title=hit.to_material_dict()["title"],
+                keywords=hit.tags,
+            ))
+    all_mats = injected_skills + mats + corpus_mats
     x_list = [x for x, _ in body.x_pairs]
-    run_key = compute_run_key(layer, x_list, [(m.source_id, m.family, m.content) for m in mats],
+    run_key = compute_run_key(layer, x_list,
+                              [(m.source_id, m.family.value, m.content) for m in all_mats],
                               body.user_directive)
     journal = RunJournal(_journal_path(run_key), layer, run_key)
     runner = PipelineRunner(_router_provider(layer), prompt_store=_prompt_store)
     try:
-        result = runner.run_layer(spec, body.x_pairs, materials=mats,
+        result = runner.run_layer(spec, body.x_pairs, materials=all_mats,
                                   user_directive=body.user_directive,
                                   x_chunk_length=body.x_chunk_length, journal=journal)
     except Exception as e:
@@ -230,6 +260,8 @@ def _run_layer(layer: str, body: LayerRunIn) -> dict:
         "y": result.y,
         "pairs": result.pairs,
         "resumed_indices": result.resumed_indices,
+        "skills_injected": [m.source_id for m in injected_skills],
+        "corpus_injected": [m.source_id for m in corpus_mats],
         "calls": [{"completion_status": c.completion_status, "attempts": c.attempts}
                   for c in result.calls],
         "journal": journal.summary(),
@@ -256,3 +288,37 @@ def runs_status(run_id: str) -> dict:
     data = json.loads(path.read_text(encoding="utf-8"))
     journal = RunJournal(path, data.get("layer", ""), data.get("run_key", ""))
     return journal.summary()
+
+
+# ---- 写作模块库（M1-T10）----
+
+@app.get("/api/skills/modules")
+def skills_list() -> dict:
+    return {"modules": available_modules()}
+
+
+@app.get("/api/skills/modules/{name}")
+def skills_detail(name: str) -> dict:
+    if name not in MODULES:
+        raise HTTPException(status_code=404, detail=f"未知写作模块：{name}")
+    return {"name": name, "title": MODULES[name]["title"], "rules": module_rules(name)}
+
+
+# ---- 范文语料检索（M1-T10）----
+
+@app.get("/api/corpus/types")
+def corpus_types() -> dict:
+    return {"types": [{"type": t, "count": c} for t, c in list_types()]}
+
+
+@app.get("/api/corpus/tags")
+def corpus_tags() -> dict:
+    return {"tags": [{"tag": t, "count": c} for t, c in list_tags()]}
+
+
+@app.get("/api/corpus/search")
+def corpus_query(excerpt_type: str | None = None, tag: str | None = None,
+                 keyword: str | None = None, limit: int = 5) -> dict:
+    hits = corpus_search(excerpt_type=excerpt_type, tag=tag, keyword=keyword,
+                         limit=max(1, min(limit, 20)))
+    return {"total": len(hits), "excerpts": [e.as_dict() for e in hits]}

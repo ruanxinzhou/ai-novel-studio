@@ -67,22 +67,37 @@ class ContextSnapshot:
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def render_sections(self) -> dict[str, str]:
-        """按族渲染成 prompt 分区（系统合同在 T5 由 PromptRegistry 拼接）。"""
+        """按族渲染成 prompt 分区（系统合同在 T5 由 PromptRegistry 拼接）。
+
+        REQUIRED 中 source_id 以 skill: 开头的是写作模块规则，单独成
+        「写作模块」分区，与层指令里的引用对齐——规则与素材不混排。
+        """
         sections: dict[str, str] = {}
         if self.anchor:
             sections["锚点·上一章结尾"] = self.anchor
         for family in MaterialFamily:
             items = [m for m in self.included if m.family == family]
-            if items:
-                header = {
-                    MaterialFamily.REQUIRED: "必需材料",
-                    MaterialFamily.FINALIZED: "定稿摘录",
-                    MaterialFamily.CANDIDATE: "候选稿摘录",
-                    MaterialFamily.REFERENCE: "参考资料",
-                }[family]
-                sections[header] = "\n\n".join(
-                    f"【{m.title or m.source_id}】\n{m.content}" for m in items
-                )
+            if not items:
+                continue
+            if family is MaterialFamily.REQUIRED:
+                rules = [m for m in items if m.source_id.startswith("skill:")]
+                plain = [m for m in items if not m.source_id.startswith("skill:")]
+                if rules:
+                    sections["写作模块"] = "\n\n".join(
+                        f"【{m.title or m.source_id}】\n{m.content}" for m in rules
+                    )
+                items = plain
+                if not items:
+                    continue
+            header = {
+                MaterialFamily.REQUIRED: "必需材料",
+                MaterialFamily.FINALIZED: "定稿摘录",
+                MaterialFamily.CANDIDATE: "候选稿摘录",
+                MaterialFamily.REFERENCE: "参考资料",
+            }[family]
+            sections[header] = "\n\n".join(
+                f"【{m.title or m.source_id}】\n{m.content}" for m in items
+            )
         return sections
 
 

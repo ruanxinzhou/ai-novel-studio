@@ -22,3 +22,6 @@ Thumbs.db
 
 # 工坊编辑数据（本地覆盖+历史）
 backend/data/
+
+# 外部调研仓库（克隆件，资源已内置进 backend）
+research/
