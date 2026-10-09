@@ -10,6 +10,7 @@ export default defineConfig({
       '/health': 'http://127.0.0.1:8321',
       '/providers': 'http://127.0.0.1:8321',
       '/generate': 'http://127.0.0.1:8321',
+      '/api': 'http://127.0.0.1:8321',
     },
   },
 })
