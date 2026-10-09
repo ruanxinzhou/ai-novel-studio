@@ -1118,6 +1118,46 @@ def desk_run(pid: str, chapter: int, body: DeskRunIn) -> dict:
         raise HTTPException(status_code=502, detail=f"生成失败（已完成块已留收据）：{e}")
 
 
+@app.post("/api/projects/{pid}/desk/{chapter}/run/stream")
+def desk_run_stream(pid: str, chapter: int, body: DeskRunIn) -> StreamingResponse:
+    """章台流式生成：thinking/delta 实时透出，结束时发 result（与同步版同构）。"""
+    _require_project(pid)
+
+    def sse(event: str, data) -> str:
+        return f"event: {event}\ndata: {json_dumps(data)}\n\n"
+
+    def gen() -> Iterator[str]:
+        q: Queue = Queue()
+        END = object()
+
+        def work():
+            try:
+                def on_event(kind, payload):
+                    q.put((kind, payload))
+                result = run_chapter_stage(
+                    _router_provider(body.stage), _prompt_store, _project_store, pid,
+                    _markers_for(pid), _wizard_for(pid), _desk_for(pid),
+                    chapter, body.stage, directive=body.directive, force=body.force,
+                    journal_dir=_journal_dir(pid), on_event=on_event)
+                q.put(("result", result))
+            except ValueError as e:
+                q.put(("fail", {"detail": str(e)}))
+            except Exception as e:
+                q.put(("fail", {"detail": f"生成失败（已完成块已留收据）：{e}"}))
+            finally:
+                q.put((END, None))
+
+        threading.Thread(target=work, daemon=True).start()
+        while True:
+            kind, payload = q.get()
+            if kind is END:
+                break
+            yield sse(kind, payload)
+        yield "event: done\ndata: {}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
 @app.post("/api/projects/{pid}/desk/{chapter}/review")
 def desk_review(pid: str, chapter: int) -> dict:
     """单章六项一致性审稿，结果入章台记录。"""

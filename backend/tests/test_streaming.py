@@ -130,6 +130,11 @@ def sse_client(tmp_path, monkeypatch):
                         lambda project: MarkerStore(tmp_path / "mk" / f"{project or 'default'}.json"))
     monkeypatch.setattr("app.api.main._entities_for",
                         lambda pid: EntityStore(tmp_path / "ent" / f"{pid}.json"))
+    from app.wizard import DeskStore, WizardStore
+    monkeypatch.setattr("app.api.main._wizard_for",
+                        lambda pid: WizardStore(tmp_path / "wiz" / f"{pid}.json"))
+    monkeypatch.setattr("app.api.main._desk_for",
+                        lambda pid: DeskStore(tmp_path / "dsk" / f"{pid}.json"))
     return TestClient(__import__("app.api.main", fromlist=["app"]).app)
 
 
@@ -181,3 +186,44 @@ def test_routing_yaml_all_minimax_primary():
     for step in ["intro", "outline", "plot", "draft", "polish", "review", "debug", "chore"]:
         assert routing[step]["primary"] == "minimax", f"{step} 主路应为 minimax"
         assert routing[step]["fallback"] == "trae_exec"
+
+
+class TestDeskRunStreamApi:
+    def _setup_book(self, client) -> str:
+        pid = client.post("/api/projects", json={"title": "章台流式书"}).json()["id"]
+        client.post(f"/api/projects/{pid}/layers/intro", json={"y": "简介", "x_pairs": []})
+        client.post(f"/api/projects/{pid}/layers/outline",
+                    json={"y": "第1章\n入门试炼。", "x_pairs": []})
+        client.put(f"/api/projects/{pid}/wizard",
+                   json={"direction": "凡人流", "direction_source": "picked"})
+        return pid
+
+    def test_sse_emits_thinking_delta_result(self, sse_client, monkeypatch):
+        pid = self._setup_book(sse_client)
+        monkeypatch.setattr("app.api.main.get_router", lambda: FakeStreamRouter("剧情流式正文"))
+        with sse_client.stream("POST", f"/api/projects/{pid}/desk/1/run/stream",
+                               json={"stage": "plot"}) as r:
+            assert r.status_code == 200
+            body = "".join(chunk for chunk in r.iter_text())
+        assert "event: thinking" in body and "内心推演" in body
+        assert "event: delta" in body and "剧情流式正文" in body
+        assert "event: result" in body and "event: done" in body
+        for frame in body.split("\n\n"):
+            if frame.startswith("event: result"):
+                data = json.loads(frame.split("data: ", 1)[1])
+                assert data["y"] == "剧情流式正文"
+                assert data["chapter"] == 1 and data["stage"] == "plot"
+                break
+        else:
+            pytest.fail("未找到 result 事件")
+        # 生成已入章台记录
+        chapter = sse_client.get(f"/api/projects/{pid}/desk/1").json()["chapter"]
+        assert chapter["plot"]["text"] == "剧情流式正文"
+
+    def test_sse_missing_outline_fails_cleanly(self, sse_client, monkeypatch):
+        pid = sse_client.post("/api/projects", json={"title": "无纲书"}).json()["id"]
+        monkeypatch.setattr("app.api.main.get_router", lambda: FakeStreamRouter("x"))
+        with sse_client.stream("POST", f"/api/projects/{pid}/desk/1/run/stream",
+                               json={"stage": "plot"}) as r:
+            body = "".join(chunk for chunk in r.iter_text())
+        assert "event: fail" in body and "故事架构" in body

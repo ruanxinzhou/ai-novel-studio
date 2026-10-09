@@ -198,6 +198,53 @@ export const corpusApi = {
   },
 }
 
+// SSE 公共消费器：解析 thinking/delta/resumed/block_done/notice/result/fail 事件
+interface SSEHandlers {
+  onThinking?: (text: string, index: number) => void
+  onDelta?: (text: string, index: number) => void
+  onResumed?: (index: number) => void
+  onBlockDone?: (index: number, status: string, chars: number) => void
+  onNotice?: (text: string) => void
+}
+
+async function consumeSSE<T>(r: Response, h: SSEHandlers): Promise<T> {
+  if (!r.ok || !r.body) {
+    const d = await r.json().catch(() => ({}))
+    throw new Error(d.detail ?? `${r.status} ${r.statusText}`)
+  }
+  const reader = r.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  let result: T | null = null
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    let sep: number
+    while ((sep = buf.indexOf('\n\n')) >= 0) {
+      const frame = buf.slice(0, sep)
+      buf = buf.slice(sep + 2)
+      let event = 'message'
+      let data = ''
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('event:')) event = line.slice(6).trim()
+        else if (line.startsWith('data:')) data += line.slice(5).trim()
+      }
+      if (!data) continue
+      const p = JSON.parse(data)
+      if (event === 'thinking') h.onThinking?.(p.text, p.index ?? 0)
+      else if (event === 'delta') h.onDelta?.(p.text, p.index ?? 0)
+      else if (event === 'resumed') h.onResumed?.(p.index)
+      else if (event === 'block_done') h.onBlockDone?.(p.index, p.status, p.chars)
+      else if (event === 'notice') h.onNotice?.(p.text)
+      else if (event === 'result') result = p
+      else if (event === 'fail') throw new Error(p.detail)
+    }
+  }
+  if (result === null) throw new Error('流式运行未返回结果')
+  return result
+}
+
 export const runsApi = {
   run: (layer: string, body: LayerRunBody) =>
     req<LayerRunResult>(`/api/runs/${layer}`, { method: 'POST', body: JSON.stringify(body) }),
@@ -205,54 +252,12 @@ export const runsApi = {
     req<LayerRunResult>(`/api/runs/${layer}/retry`, { method: 'POST', body: JSON.stringify(body) }),
   status: (runId: string) => req<LayerRunResult['journal']>(`/api/runs/${runId}`),
   // SSE 流式运行：实时收思考/正文增量，结束返回完整结果（fail 时抛错）
-  stream: async (layer: string, body: LayerRunBody, h: {
-    onThinking?: (text: string, index: number) => void
-    onDelta?: (text: string, index: number) => void
-    onResumed?: (index: number) => void
-    onBlockDone?: (index: number, status: string, chars: number) => void
-    onNotice?: (text: string) => void
-  }): Promise<LayerRunResult> => {
-    const r = await fetch(`/api/runs/${layer}/stream`, {
+  stream: (layer: string, body: LayerRunBody, h: SSEHandlers): Promise<LayerRunResult> =>
+    fetch(`/api/runs/${layer}/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    })
-    if (!r.ok || !r.body) {
-      const d = await r.json().catch(() => ({}))
-      throw new Error(d.detail ?? `${r.status} ${r.statusText}`)
-    }
-    const reader = r.body.getReader()
-    const decoder = new TextDecoder()
-    let buf = ''
-    let result: LayerRunResult | null = null
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buf += decoder.decode(value, { stream: true })
-      let sep: number
-      while ((sep = buf.indexOf('\n\n')) >= 0) {
-        const frame = buf.slice(0, sep)
-        buf = buf.slice(sep + 2)
-        let event = 'message'
-        let data = ''
-        for (const line of frame.split('\n')) {
-          if (line.startsWith('event:')) event = line.slice(6).trim()
-          else if (line.startsWith('data:')) data += line.slice(5).trim()
-        }
-        if (!data) continue
-        const p = JSON.parse(data)
-        if (event === 'thinking') h.onThinking?.(p.text, p.index ?? 0)
-        else if (event === 'delta') h.onDelta?.(p.text, p.index ?? 0)
-        else if (event === 'resumed') h.onResumed?.(p.index)
-        else if (event === 'block_done') h.onBlockDone?.(p.index, p.status, p.chars)
-        else if (event === 'notice') h.onNotice?.(p.text)
-        else if (event === 'result') result = p
-        else if (event === 'fail') throw new Error(p.detail)
-      }
-    }
-    if (!result) throw new Error('流式运行未返回结果')
-    return result
-  },
+    }).then((r) => consumeSSE<LayerRunResult>(r, h)),
 }
 
 // ---- 小说项目（M3a）----
@@ -598,6 +603,19 @@ export const deskApi = {
       method: 'POST',
       body: JSON.stringify({ stage, directive: opts.directive || null, force: opts.force || false }),
     }),
+  // 流式生成：正文增量实时回调，结束返回完整运行结果
+  runStream: (
+    pid: string,
+    chapter: number,
+    stage: string,
+    opts: { directive?: string; force?: boolean } = {},
+    h: SSEHandlers,
+  ): Promise<DeskRunResult> =>
+    fetch(`/api/projects/${pid}/desk/${chapter}/run/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stage, directive: opts.directive || null, force: opts.force || false }),
+    }).then((r) => consumeSSE<DeskRunResult>(r, h)),
   saveText: (pid: string, chapter: number, stage: string, text: string) =>
     req<{ chapter: number; stage: string; chars: number }>(
       `/api/projects/${pid}/desk/${chapter}/${stage}`,

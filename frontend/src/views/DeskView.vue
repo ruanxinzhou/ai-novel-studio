@@ -26,9 +26,19 @@ type StageKey = (typeof STAGES)[number]['key']
 const text = reactive<Record<StageKey, string>>({ plot: '', draft: '', polish: '' })
 const directive = reactive<Record<StageKey, string>>({ plot: '', draft: '', polish: '' })
 const force = reactive<Record<StageKey, boolean>>({ plot: false, draft: false, polish: false })
+const thinking = reactive<Record<StageKey, string>>({ plot: '', draft: '', polish: '' })
+const stageNotes = reactive<Record<StageKey, string[]>>({ plot: [], draft: [], polish: [] })
 const busy = ref('')
 const review = ref<ChapterReview | null>(null)
 const lastFinalize = ref<FinalizeResult | null>(null)
+
+// 生成中的正文框自动滚到底
+const stagePanes = reactive<Record<StageKey, HTMLElement | null>>({ plot: null, draft: null, polish: null })
+watch(text, () => {
+  if (!busy.value) return
+  const el = stagePanes[busy.value as StageKey]
+  if (el) el.scrollTop = el.scrollHeight
+})
 
 const finalizedCount = computed(() => overview.value?.finalized ?? 0)
 const totalCount = computed(() => overview.value?.total ?? 0)
@@ -84,23 +94,50 @@ async function selectChapter(no: number) {
   }
 }
 
+function setStagePane(key: StageKey) {
+  return (el: unknown) => {
+    const comp = el as { $el?: HTMLElement } | null
+    stagePanes[key] = comp?.$el?.querySelector('textarea') ?? null
+  }
+}
+
 async function runStage(stage: StageKey) {
   if (busy.value) return
   busy.value = stage
+  // 流式生成：清空旧文，正文增量实时打进编辑框
+  text[stage] = ''
+  thinking[stage] = ''
+  stageNotes[stage] = []
   try {
-    const r = await deskApi.run(currentProjectId.value, currentNo.value, stage, {
-      directive: directive[stage].trim() || undefined,
-      force: force[stage],
-    })
-    text[stage] = r.y
+    const r = await deskApi.runStream(
+      currentProjectId.value,
+      currentNo.value,
+      stage,
+      { directive: directive[stage].trim() || undefined, force: force[stage] },
+      {
+        onThinking: (t) => {
+          thinking[stage] += t
+        },
+        onDelta: (t) => {
+          text[stage] += t
+        },
+        onResumed: () => {
+          stageNotes[stage].push('命中收据，秒回（未重调模型）')
+        },
+        onNotice: (n) => {
+          stageNotes[stage].push(n)
+        },
+      },
+    )
     ElMessage.success(
       `${STAGES.find((s) => s.key === stage)!.label}已生成 ${r.y.length} 字` +
-        (r.resumed_indices.length ? '（命中收据，秒回）' : ''),
+        (r.resumed_indices.length ? '（命中收据）' : ''),
     )
+    busy.value = '' // 先解锁再刷新，selectChapter 有 busy 守卫
     await loadOverview()
+    if (currentNo.value) await selectChapter(currentNo.value)
   } catch (e) {
     ElMessage.error(`生成失败：${(e as Error).message}`)
-  } finally {
     busy.value = ''
   }
 }
@@ -282,11 +319,21 @@ watch(currentProjectId, () => {
             style="margin-bottom: 10px"
             :disabled="busy === s.key"
           />
+          <div v-if="thinking[s.key]" class="thinking-pane">
+            <div style="font-size: 12px; color: #909399; margin-bottom: 4px">
+              思考过程{{ busy === s.key ? '（生成中，实时）' : '' }}
+            </div>
+            <pre style="margin: 0; white-space: pre-wrap; font-family: inherit; line-height: 1.7">{{ thinking[s.key] }}</pre>
+          </div>
+          <div v-for="(n, i) in stageNotes[s.key]" :key="i" style="font-size: 12px; color: #e6a23c; margin-bottom: 6px">
+            {{ n }}
+          </div>
           <el-input
             v-model="text[s.key]"
             type="textarea"
             :autosize="{ minRows: 4, maxRows: 16 }"
             :placeholder="`尚未生成${s.label}。可直接粘贴你自己的内容后点「保存修改」——手写和机器生成同等地位。`"
+            :ref="setStagePane(s.key)"
           />
           <div v-if="detail!.chapter[s.key]?.updated_at" style="margin-top: 6px; font-size: 12px; color: #999">
             最近更新 {{ detail!.chapter[s.key]!.updated_at.slice(0, 16).replace('T', ' ') }}
@@ -393,5 +440,15 @@ watch(currentProjectId, () => {
   font-size: 13px;
   color: #555;
   line-height: 1.8;
+}
+.thinking-pane {
+  background: #f7f8fa;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  max-height: 200px;
+  overflow: auto;
+  font-size: 12px;
+  color: #909399;
 }
 </style>

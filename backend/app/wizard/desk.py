@@ -84,6 +84,7 @@ def run_chapter_stage(
     directive: str | None = None,
     force: bool = False,
     journal_dir: Path | str | None = None,
+    on_event=None,
 ) -> dict:
     """单章单层生成：plot/draft/polish；同输入幂等回收据，force 绕过。"""
     if stage not in STAGES:
@@ -137,7 +138,7 @@ def run_chapter_stage(
     runner = PipelineRunner(provider, prompt_store=prompt_store)
     result = runner.run_layer(spec, [(x, "")], materials=materials,
                               initial_anchor=anchor, user_directive=directive,
-                              journal=journal)
+                              journal=journal, on_event=on_event)
     desk.record(chapter, stage, result.y, run_key, title=chapter_title_of(o_map.get(chapter, "")))
     return {
         "chapter": chapter, "stage": stage, "y": result.y, "run_id": run_key,
