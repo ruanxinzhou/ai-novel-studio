@@ -19,3 +19,6 @@ dist/
 *.log
 .DS_Store
 Thumbs.db
+
+# 工坊编辑数据（本地覆盖+历史）
+backend/data/
