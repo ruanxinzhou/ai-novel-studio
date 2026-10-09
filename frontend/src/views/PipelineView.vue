@@ -351,6 +351,9 @@ const nextStep = computed(() => NEXT_STEPS[layer.value] ?? null)
                   :placeholder="task.inputHint"
                 />
                 <div style="font-size: 12px; color: #999; margin-top: 4px">{{ task.example }}</div>
+                <div v-if="!isAdvanced" style="font-size: 12px; color: #b0b0b0; margin-top: 2px">
+                  相邻要点会按长度合并成更少的生成段（省时省钱）；想一行一段，去高级选项把「每段字数上限」调小
+                </div>
               </div>
             </el-form-item>
 

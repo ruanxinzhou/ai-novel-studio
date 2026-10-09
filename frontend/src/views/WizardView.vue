@@ -42,6 +42,11 @@ const nChapters = ref(12)
 const outlineDraft = ref('')
 const outlineRunning = ref(false)
 const outlineAdopting = ref(false)
+// 架构站流式状态：思考 / 正文增量 / 已完成章 / 提示
+const outlineLiveThinking = ref('')
+const outlineLiveText = ref('')
+const outlineDone = ref<number[]>([])
+const outlineNotices = ref<string[]>([])
 
 const currentIntro = ref<LayerVersionFull | null>(null)
 const currentOutline = ref<LayerVersionFull | null>(null)
@@ -230,6 +235,10 @@ async function generateOutline() {
     return
   }
   outlineRunning.value = true
+  outlineLiveThinking.value = ''
+  outlineLiveText.value = ''
+  outlineDone.value = []
+  outlineNotices.value = []
   try {
     await wizardApi.update(currentProjectId.value, { n_chapters: nChapters.value })
     const materials: { source_id: string; family: string; content: string; title: string }[] = []
@@ -240,12 +249,26 @@ async function generateOutline() {
     if (d?.wizard.direction) {
       materials.push({ source_id: 'wizard:direction', family: 'reference', content: d.wizard.direction, title: '故事方向（作者已签收）' })
     }
-    const r = await runsApi.run('outline', {
+    // 流式生成：每章一块，逐章实时上屏（大纲慢在章数×单次调用，实时可见不焦虑）
+    const r = await runsApi.stream('outline', {
       x_pairs: Array.from({ length: nChapters.value }, (_, i) => [`第${i + 1}章\n`, ''] as [string, string]),
       materials,
       x_chunk_length: 40,
       user_directive: `共 ${nChapters.value} 章。`,
       project: currentProjectId.value,
+    }, {
+      onThinking: (t) => {
+        outlineLiveThinking.value += t
+      },
+      onDelta: (t) => {
+        outlineLiveText.value += t
+      },
+      onBlockDone: (i) => {
+        outlineDone.value.push(i)
+      },
+      onNotice: (n) => {
+        outlineNotices.value.push(n)
+      },
     })
     outlineDraft.value = r.y
     ElMessage.success('大纲已生成（机器提议，可改可自写）')
@@ -400,6 +423,21 @@ watch(station, async (s) => {
           <el-button plain @click="toggleSkip('architecture')">跳过本站</el-button>
           <span style="color: #aaa; font-size: 12px">简介与已签收方向会自动带入；长篇可先只立 20-50 章的主线，后续加卷。</span>
         </div>
+        <div v-if="outlineRunning || outlineLiveText || outlineLiveThinking" class="outline-live">
+          <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px">
+            <b style="font-size: 13px">实时生成</b>
+            <el-tag size="small" type="primary">第 {{ (outlineDone.at(-1) ?? 0) + 1 }} 章生成中…</el-tag>
+            <el-tag v-for="i in outlineDone" :key="`od${i}`" size="small" type="success">第 {{ i + 1 }} 章完成</el-tag>
+            <span v-for="(n, i) in outlineNotices" :key="i" style="font-size: 12px; color: #e6a23c">{{ n }}</span>
+            <span style="font-size: 12px; color: #999">章数越多越久，每章一次调用；中断重跑只补缺的章</span>
+          </div>
+          <el-collapse v-if="outlineLiveThinking" style="margin-bottom: 8px">
+            <el-collapse-item title="思考过程" name="think">
+              <pre class="outline-thinking">{{ outlineLiveThinking }}</pre>
+            </el-collapse-item>
+          </el-collapse>
+          <pre v-if="outlineLiveText" style="margin: 0; white-space: pre-wrap; font-family: inherit; line-height: 1.8; font-size: 13px">{{ outlineLiveText }}</pre>
+        </div>
         <template v-if="outlineDraft">
           <div style="margin-bottom: 6px; color: #909399; font-size: 13px">机器提议（每段以「第N章」开头，可改）：</div>
           <el-input v-model="outlineDraft" type="textarea" :rows="14" />
@@ -451,5 +489,27 @@ watch(station, async (s) => {
 }
 .clickable :deep(.el-step__title) {
   cursor: pointer;
+}
+.outline-live {
+  border: 1px solid var(--el-color-primary-light-7);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+  max-height: 380px;
+  overflow: auto;
+  background: #fafcff;
+}
+.outline-thinking {
+  white-space: pre-wrap;
+  font-family: inherit;
+  font-size: 12px;
+  color: #909399;
+  background: #f7f8fa;
+  border-radius: 6px;
+  padding: 10px 12px;
+  max-height: 200px;
+  overflow: auto;
+  line-height: 1.7;
+  margin: 0;
 }
 </style>
