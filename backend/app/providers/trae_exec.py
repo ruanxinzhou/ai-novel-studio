@@ -38,6 +38,19 @@ def resolve_trae_binary(configured: str | None = None) -> str:
     raise ProviderError("未找到 trae-cli，请安装 TraeCode CLI 并登录")
 
 
+def _kill_tree(pid: int) -> None:
+    """终止整棵进程树。taskkill /T 按 PID 父子关系连杀，孙进程也不留。"""
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                           capture_output=True, timeout=15)
+        else:
+            import signal, os
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except Exception:
+        pass  # 尽力而为：失败也不阻塞超时路径，上方 communicate(15) 兜底
+
+
 class TraeExecProvider(Provider):
     name = "trae_exec"
 
@@ -55,26 +68,42 @@ class TraeExecProvider(Provider):
         prompt = "\n\n".join(
             f"[{m['role']}]\n{m['content']}" for m in messages)
 
-        with tempfile.TemporaryDirectory(prefix="trae_exec_") as td:
+        with tempfile.TemporaryDirectory(prefix="trae_exec_",
+                                         ignore_cleanup_errors=True) as td:
             out_file = str(Path(td) / "last_message.txt")
             cmd = [self.binary, "exec", "--ephemeral", "--skip-git-repo-check",
                    "-s", "read-only", "--color", "never", "--json",
                    "-m", model, "-o", out_file, prompt]
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True,
-                                      encoding="utf-8", errors="replace",
-                                      timeout=self.timeout_sec)
-            except subprocess.TimeoutExpired as e:
-                raise ProviderError(f"trae exec 超时({self.timeout_sec}s)") from e
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    stdin=subprocess.DEVNULL, text=True,
+                    encoding="utf-8", errors="replace")
+            except OSError as e:
+                raise ProviderError(f"trae exec 启动失败：{e}") from e
 
             usage = Usage()
+            try:
+                stdout, stderr = proc.communicate(timeout=self.timeout_sec)
+            except subprocess.TimeoutExpired:
+                # 只 kill 主进程不够：孙进程持有输出管道会让 communicate
+                # 永久阻塞（真实事故：traex 挂 7h，请求无限等待），
+                # 必须杀整棵进程树再收管道
+                _kill_tree(proc.pid)
+                try:
+                    stdout, stderr = proc.communicate(timeout=15)
+                except subprocess.TimeoutExpired:
+                    stdout, stderr = "", ""  # 放弃管道，宁可泄漏句柄不卡请求
+                raise ProviderError(
+                    f"trae exec 超时({self.timeout_sec}s)，已终止进程树") from None
+
             if proc.returncode != 0:
-                tail = (proc.stderr or proc.stdout)[-300:]
+                tail = (stderr or stdout or "")[-300:]
                 raise ProviderError(f"trae exec 退出码 {proc.returncode}: {tail}")
 
             # JSONL 事件：item.completed 取正文，turn.completed 取用量
             text = ""
-            for line in (proc.stdout or "").splitlines():
+            for line in (stdout or "").splitlines():
                 line = line.strip()
                 if not line.startswith("{"):
                     continue

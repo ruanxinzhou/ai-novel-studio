@@ -25,11 +25,17 @@ class Router:
         self.trae_acp = trae_acp
 
     def resolve(self, step: str) -> list[Provider]:
-        """返回该步骤的通道尝试顺序 [primary, fallback]。"""
+        """返回该步骤的通道尝试顺序 [primary, fallback]。
+
+        未注册的步骤默认 trae_exec → minimax 兜底，保证任何步骤
+        主通道挂掉时都能故障转移，而不是让请求无限等待。
+        """
         route = self.cfg.routing.get(step, {})
         primary = route.get("primary", "trae_exec")
-        fallback = route.get("fallback")
-        order = [primary] + ([fallback] if fallback and fallback != primary else [])
+        fallback = route.get("fallback", "minimax" if "trae_exec" in self.channels else None)
+        if fallback == primary:
+            fallback = None
+        order = [primary] + ([fallback] if fallback else [])
         return [self.channels[name] for name in order if name in self.channels]
 
     def chat_stream(self, step: str, messages: list[dict], model: str | None = None,

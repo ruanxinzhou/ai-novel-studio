@@ -26,7 +26,7 @@ class Usage:
 
 @dataclass
 class StreamEvent:
-    kind: str              # "delta" | "usage" | "done" | "error"
+    kind: str              # "delta" | "thinking" | "usage" | "done" | "error"
     text: str = ""
     usage: Usage | None = None
     meta: dict = field(default_factory=dict)

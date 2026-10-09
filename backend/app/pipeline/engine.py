@@ -15,6 +15,7 @@ Provider 无 finish_reason，用 output_tokens ≥ 0.95×max_tokens 代理判定
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any, Callable
 
 from app.chunking import XYWriter
 from app.context import Material, MaterialAssembler, MaterialFamily
@@ -176,7 +177,10 @@ class PipelineRunner:
         user_directive: str | None = None,
         x_chunk_length: int | None = None,
         journal: RunJournal | None = None,
+        on_event: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> LayerRunResult:
+        """on_event(kind, payload) 实时回调：thinking/delta（含 index）、
+        resumed（收据复用）、block_done（单块完成）、notice（failover）。"""
         writer = XYWriter(
             [(x, "") for x, _ in x_pairs],
             x_chunk_length=x_chunk_length or spec.x_chunk_length,
@@ -206,13 +210,20 @@ class PipelineRunner:
                     attempts=0, dedup_overlaps=0,
                 )
                 resumed.append(i)
+                if on_event:
+                    on_event("resumed", {"index": i})
             else:
-                def generate(acc: str | None, _messages=rendered.messages, _max_tokens=max_tokens) -> tuple[str, str]:
+                def generate(acc: str | None, _messages=rendered.messages, _max_tokens=max_tokens,
+                             _index=i) -> tuple[str, str]:
                     msgs = list(_messages)
                     if acc:
                         tail = acc[-CONTINUATION_TAIL_CHARS:]
                         msgs.append({"role": "user", "content": f"从断点处续写，不要重复已写内容：\n{tail}"})
+                    if hasattr(self.provider, "chat_stream"):
+                        return self._generate_stream(msgs, _max_tokens, _index, on_event)
                     resp = self.provider.chat(msgs, self.model, max_tokens=_max_tokens)
+                    if on_event:
+                        on_event("delta", {"index": _index, "text": resp.text})
                     return resp.text, proxy_finish_reason(resp.usage.output_tokens, _max_tokens)
 
                 try:
@@ -229,6 +240,9 @@ class PipelineRunner:
                         completion_status=completion.status, attempts=completion.attempts,
                     ))
 
+            if on_event and receipt is None:
+                on_event("block_done", {"index": i, "status": completion.status,
+                                        "chars": len(completion.text)})
             edited.append(chunk.edit(y_chunk=completion.text))
             if spec.anchor_enabled:
                 anchor_text = completion.text
@@ -240,6 +254,26 @@ class PipelineRunner:
         writer.apply_chunks(chunks, edited)
         return LayerRunResult(layer=spec.name, pairs=list(writer.xy_pairs), calls=calls,
                               snapshots=snapshots, resumed_indices=resumed)
+
+    def _generate_stream(self, msgs: list[dict], max_tokens: int, index: int,
+                         on_event: Callable[[str, dict[str, Any]], None] | None) -> tuple[str, str]:
+        """流式调用：thinking/delta 实时回调，同时聚合出正文与截断判定。"""
+        parts: list[str] = []
+        usage_total = 0
+        for ev in self.provider.chat_stream(msgs, self.model, max_tokens=max_tokens):
+            if ev.kind == "delta":
+                parts.append(ev.text)
+                if on_event:
+                    on_event("delta", {"index": index, "text": ev.text})
+            elif ev.kind == "thinking":
+                if on_event:
+                    on_event("thinking", {"index": index, "text": ev.text})
+            elif ev.kind == "notice":
+                if on_event:
+                    on_event("notice", {"text": ev.text})
+            elif ev.kind == "usage" and ev.usage:
+                usage_total = ev.usage.output_tokens
+        return "".join(parts), proxy_finish_reason(usage_total, max_tokens)
 
 
 def _finalized(source_id: str, content: str, title: str, keywords: tuple[str, ...] = ()) -> Material:

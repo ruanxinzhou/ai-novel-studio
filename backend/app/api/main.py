@@ -5,7 +5,9 @@ M1-T5：Prompt 工坊（查看/编辑/重置/干跑）。
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
+from queue import Queue
 from typing import Iterator, Literal
 
 from fastapi import FastAPI, HTTPException
@@ -31,6 +33,17 @@ from ..providers import Router, get_router
 from ..review import STATUS_PENDING, MarkerStore, review_chapter
 from ..review.markers import markers_material
 from ..skills import MODULES, available_modules, module_rules, skill_materials
+from ..wizard import (
+    STATIONS,
+    DeskStore,
+    WizardStore,
+    chapter_title_of,
+    finalize_chapter,
+    generate_direction_cards,
+    outline_map,
+    run_chapter_stage,
+    work_text,
+)
 
 app = FastAPI(title="Novel Studio API", version="0.4.0")
 
@@ -246,7 +259,10 @@ def _journal_path(run_id: str, project: str | None = None):
 
 
 def _router_provider(step: str):
-    """把 Router（带 failover 的 step 路由）适配成 PipelineRunner 需要的 Provider。"""
+    """把 Router（带 failover 的 step 路由）适配成 PipelineRunner 需要的 Provider。
+
+    仅当底层路由支持流式时才暴露 chat_stream，runner 据此选择流式/整块路径。
+    """
     router: Router = get_router()
 
     class _Adapter:
@@ -257,10 +273,16 @@ def _router_provider(step: str):
         def chat(messages, model=None, max_tokens=None, extra=None):
             return router.chat(step, messages, model, max_tokens)
 
+    if hasattr(router, "chat_stream"):
+        def chat_stream(messages, model=None, max_tokens=None, extra=None):
+            yield from router.chat_stream(step, messages, model, max_tokens)
+
+        _Adapter.chat_stream = staticmethod(chat_stream)
     return _Adapter()
 
 
-def _run_layer(layer: str, body: LayerRunIn) -> dict:
+def _prepare_layer(layer: str, body: LayerRunIn) -> dict:
+    """层运行共用准备：材料装配 + 运行键 + 幂等收据 + runner。"""
     if layer not in SPECS:
         raise HTTPException(status_code=404, detail=f"未知层：{layer}")
     spec = SPECS[layer]
@@ -297,26 +319,42 @@ def _run_layer(layer: str, body: LayerRunIn) -> dict:
                               body.user_directive)
     journal = RunJournal(_journal_path(run_key, body.project), layer, run_key)
     runner = PipelineRunner(_router_provider(layer), prompt_store=_prompt_store)
-    try:
-        result = runner.run_layer(spec, body.x_pairs, materials=all_mats,
-                                  user_directive=body.user_directive,
-                                  x_chunk_length=body.x_chunk_length, journal=journal)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"生成失败（已完成块已留收据）：{e}")
+    return {"spec": spec, "mats": all_mats, "run_key": run_key, "journal": journal,
+            "runner": runner, "skills": injected_skills, "corpus": corpus_mats}
+
+
+def _layer_response(prep: dict, result) -> dict:
+    journal: RunJournal = prep["journal"]
+    chapter_no = prep.get("chapter_no")
+    markers = _markers_for(prep.get("project"))
     return {
-        "run_id": run_key,
-        "layer": layer,
+        "run_id": prep["run_key"],
+        "layer": prep["spec"].name,
         "y": result.y,
         "pairs": result.pairs,
         "resumed_indices": result.resumed_indices,
-        "skills_injected": [m.source_id for m in injected_skills],
-        "corpus_injected": [m.source_id for m in corpus_mats],
-        "markers_injected": [m.as_dict() for m in _markers_for(body.project).pending_for(body.chapter_no or 0)]
-        if body.chapter_no is not None else [],
+        "skills_injected": [m.source_id for m in prep["skills"]],
+        "corpus_injected": [m.source_id for m in prep["corpus"]],
+        "markers_injected": [m.as_dict() for m in markers.pending_for(chapter_no or 0)]
+        if chapter_no is not None else [],
         "calls": [{"completion_status": c.completion_status, "attempts": c.attempts}
                   for c in result.calls],
         "journal": journal.summary(),
     }
+
+
+def _run_layer(layer: str, body: LayerRunIn) -> dict:
+    prep = _prepare_layer(layer, body)
+    prep["project"] = body.project
+    prep["chapter_no"] = body.chapter_no
+    try:
+        result = prep["runner"].run_layer(prep["spec"], body.x_pairs, materials=prep["mats"],
+                                          user_directive=body.user_directive,
+                                          x_chunk_length=body.x_chunk_length,
+                                          journal=prep["journal"])
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"生成失败（已完成块已留收据）：{e}")
+    return _layer_response(prep, result)
 
 
 @app.post("/api/runs/{layer}")
@@ -329,6 +367,47 @@ def runs_start(layer: str, body: LayerRunIn) -> dict:
 def runs_retry(layer: str, body: LayerRunIn) -> dict:
     """幂等重试：语义同 runs_start，completed 块不重生成，只补失败/缺失块。"""
     return _run_layer(layer, body)
+
+
+@app.post("/api/runs/{layer}/stream")
+def runs_stream(layer: str, body: LayerRunIn) -> StreamingResponse:
+    """SSE 流式运行：实时透出思考过程（thinking）与正文增量（delta），
+    每块完成发 block_done，收据复用发 resumed，结束时发 result + done。"""
+    prep = _prepare_layer(layer, body)
+    prep["project"] = body.project
+    prep["chapter_no"] = body.chapter_no
+
+    def sse(event: str, data) -> str:
+        return f"event: {event}\ndata: {json_dumps(data)}\n\n"
+
+    def gen() -> Iterator[str]:
+        q: Queue = Queue()
+        END = object()
+
+        def work():
+            try:
+                def on_event(kind, payload):
+                    q.put((kind, payload))
+                result = prep["runner"].run_layer(
+                    prep["spec"], body.x_pairs, materials=prep["mats"],
+                    user_directive=body.user_directive,
+                    x_chunk_length=body.x_chunk_length,
+                    journal=prep["journal"], on_event=on_event)
+                q.put(("result", _layer_response(prep, result)))
+            except Exception as e:
+                q.put(("fail", {"detail": f"生成失败（已完成块已留收据）：{e}"}))
+            finally:
+                q.put((END, None))
+
+        threading.Thread(target=work, daemon=True).start()
+        while True:
+            kind, payload = q.get()
+            if kind is END:
+                break
+            yield sse(kind, payload)
+        yield "event: done\ndata: {}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 @app.get("/api/runs/{run_id}")
@@ -507,7 +586,11 @@ class RollbackIn(BaseModel):
 
 @app.get("/api/projects")
 def projects_list() -> dict:
-    return {"projects": _project_store.list()}
+    out = []
+    for meta in _project_store.list():
+        meta["wizard_summary"] = _wizard_summary(meta["id"])
+        out.append(meta)
+    return {"projects": out}
 
 
 @app.post("/api/projects")
@@ -842,3 +925,225 @@ def import_adopt_outline(pid: str) -> dict:
     v = _project_store.adopt(pid, "outline", x_pairs=[], y=y,
                              note=f"导入拆解汇总（{len(outlines)} 章）")
     return {"seq": v.seq, "chapters": len(outlines)}
+
+
+# ---- M5 引导式写作：主路向导 + 今日章台 ----
+
+_wizard_stores: dict[str, WizardStore] = {}
+_desk_stores: dict[str, DeskStore] = {}
+
+
+def _wizard_for(pid: str) -> WizardStore:
+    if pid not in _wizard_stores:
+        _wizard_stores[pid] = WizardStore(
+            REPO / "backend" / "data" / "projects" / pid / "wizard.json")
+    return _wizard_stores[pid]
+
+
+def _desk_for(pid: str) -> DeskStore:
+    if pid not in _desk_stores:
+        _desk_stores[pid] = DeskStore(
+            REPO / "backend" / "data" / "projects" / pid / "desk.json")
+    return _desk_stores[pid]
+
+
+def _journal_dir(pid: str) -> Path:
+    return REPO / "backend" / "data" / "projects" / pid / "runs"
+
+
+def _desk_summary(pid: str) -> dict:
+    """章台总览：章来源 = 大纲拆章 ∪ 章台记录 ∪ draft 正文拆章。"""
+    desk = _desk_for(pid)
+    o_map = outline_map(_project_store, pid)
+    draft_titles: dict[int, str] = {}
+    v = _project_store.current(pid, "draft")
+    if v is not None:
+        for c in split_import(v.y):
+            draft_titles[c["no"]] = c["title"]
+    chapters = []
+    for no in sorted(set(o_map) | set(draft_titles) | set(desk.all_nos())):
+        w = desk.get(no)
+        body = o_map.get(no, "")
+        latest = (work_text(w, "polish") or work_text(w, "draft")) if w else ""
+        chapters.append({
+            "no": no,
+            "title": (w.title if w and w.title else "") or draft_titles.get(no, "")
+            or chapter_title_of(body),
+            "has_outline": no in o_map,
+            "plot_done": bool(work_text(w, "plot")),
+            "draft_done": bool(work_text(w, "draft")),
+            "polish_done": bool(work_text(w, "polish")),
+            "review_verdict": (w.review or {}).get("verdict") if w and w.review else None,
+            "finalized_at": w.finalized_at if w else "",
+            "chars": len(latest),
+            "outline_preview": body[:80],
+        })
+    return {
+        "project": pid, "chapters": chapters, "total": len(chapters),
+        "finalized": sum(1 for c in chapters if c["finalized_at"]),
+        "outline_chapters": len(o_map),
+    }
+
+
+def _wizard_summary(pid: str) -> dict:
+    """项目卡进度摘要（列表页免 N+1 全量状态）。"""
+    try:
+        state = _wizard_for(pid).stations_state(pid, _project_store, _desk_for(pid))
+        desk = _desk_summary(pid)
+        return {
+            "done": sum(1 for s in state["stations"] if s["done"]),
+            "graduated": state["graduated"],
+            "current_station": state["current_station"],
+            "chapters_total": desk["total"],
+            "chapters_finalized": desk["finalized"],
+        }
+    except Exception:
+        return {"done": 0, "graduated": False, "current_station": None,
+                "chapters_total": 0, "chapters_finalized": 0}
+
+
+class WizardUpdateIn(BaseModel):
+    idea: dict[str, str] | None = None
+    seed: str | None = None
+    direction: str | None = None
+    direction_source: str | None = None
+    n_chapters: int | None = None
+
+
+@app.get("/api/projects/{pid}/wizard")
+def wizard_detail(pid: str) -> dict:
+    _require_project(pid)
+    store = _wizard_for(pid)
+    return {"project": pid, "wizard": store.get().as_dict(),
+            **store.stations_state(pid, _project_store, _desk_for(pid))}
+
+
+@app.put("/api/projects/{pid}/wizard")
+def wizard_update(pid: str, body: WizardUpdateIn) -> dict:
+    _require_project(pid)
+    if body.direction is not None and not body.direction.strip():
+        raise HTTPException(status_code=422, detail="方向不能为空（不想用方向卡请跳过该站）")
+    try:
+        d = _wizard_for(pid).update(idea=body.idea, seed=body.seed, direction=body.direction,
+                                    direction_source=body.direction_source,
+                                    n_chapters=body.n_chapters)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"project": pid, "wizard": d.as_dict()}
+
+
+@app.post("/api/projects/{pid}/wizard/brainstorm")
+def wizard_brainstorm(pid: str) -> dict:
+    """生成 5 张方向卡（chore 通道）：先问后给，采纳仍需作者签收。"""
+    _require_project(pid)
+    d = _wizard_for(pid).get()
+    try:
+        result = generate_direction_cards(_chore_provider(), _prompt_store, d.seed,
+                                          idea_context=d.idea.get("context", ""))
+    except ValueError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"cards": result.cards, "attempts": result.attempts}
+
+
+@app.post("/api/projects/{pid}/wizard/{station}/skip")
+def wizard_skip(pid: str, station: str) -> dict:
+    _require_project(pid)
+    if station not in STATIONS:
+        raise HTTPException(status_code=404, detail=f"未知站：{station}")
+    _wizard_for(pid).toggle_skip(station)
+    store = _wizard_for(pid)
+    return {"project": pid, "wizard": store.get().as_dict(),
+            **store.stations_state(pid, _project_store, _desk_for(pid))}
+
+
+class DeskRunIn(BaseModel):
+    stage: Literal["plot", "draft", "polish"]
+    directive: str | None = None
+    force: bool = False
+
+
+class DeskTextIn(BaseModel):
+    text: str
+
+
+class DeskFinalizeIn(BaseModel):
+    auto_entities: bool = True
+
+
+@app.get("/api/projects/{pid}/desk")
+def desk_detail(pid: str) -> dict:
+    _require_project(pid)
+    return _desk_summary(pid)
+
+
+@app.get("/api/projects/{pid}/desk/{chapter}")
+def desk_chapter(pid: str, chapter: int) -> dict:
+    """单章工作区：各阶段全文 + 本章大纲。"""
+    _require_project(pid)
+    work = _desk_for(pid).get(chapter)
+    return {
+        "project": pid,
+        "chapter": work.as_dict() if work else {"no": chapter, "title": "", "plot": {},
+                                                "draft": {}, "polish": {}, "review": None,
+                                                "finalized_at": ""},
+        "outline": outline_map(_project_store, pid).get(chapter, ""),
+    }
+
+
+@app.put("/api/projects/{pid}/desk/{chapter}/{stage}")
+def desk_save_text(pid: str, chapter: int, stage: str, body: DeskTextIn) -> dict:
+    """作者编辑保存（三出口之「自己写/改」一级公民）：文本直存章台。"""
+    _require_project(pid)
+    try:
+        work = _desk_for(pid).record(chapter, stage, body.text, run_id="manual")
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"chapter": chapter, "stage": stage, "chars": len(body.text),
+            "finalized_at": work.finalized_at}
+
+
+@app.post("/api/projects/{pid}/desk/{chapter}/run")
+def desk_run(pid: str, chapter: int, body: DeskRunIn) -> dict:
+    """单章单层生成：plot/draft/polish；同输入幂等回收据，force 重生成。"""
+    _require_project(pid)
+    try:
+        return run_chapter_stage(
+            _router_provider(body.stage), _prompt_store, _project_store, pid,
+            _markers_for(pid), _wizard_for(pid), _desk_for(pid),
+            chapter, body.stage, directive=body.directive, force=body.force,
+            journal_dir=_journal_dir(pid))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"生成失败（已完成块已留收据）：{e}")
+
+
+@app.post("/api/projects/{pid}/desk/{chapter}/review")
+def desk_review(pid: str, chapter: int) -> dict:
+    """单章六项一致性审稿，结果入章台记录。"""
+    _require_project(pid)
+    desk = _desk_for(pid)
+    prose = work_text(desk.get(chapter), "polish") or work_text(desk.get(chapter), "draft")
+    if not prose:
+        raise HTTPException(status_code=422, detail="本章还没有正文，请先生成正文")
+    outline = outline_map(_project_store, pid).get(chapter, "")
+    try:
+        review = review_chapter(_router_provider("review"), _prompt_store, outline, prose)
+    except ValueError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    desk.record_review(chapter, review.as_dict())
+    return {"chapter": chapter, **review.as_dict()}
+
+
+@app.post("/api/projects/{pid}/desk/{chapter}/finalize")
+def desk_finalize(pid: str, chapter: int, body: DeskFinalizeIn | None = None) -> dict:
+    """定稿 + 保鲜飞轮：实体抽取、标记核验、整本合成采纳 draft 版本。"""
+    _require_project(pid)
+    auto = body.auto_entities if body else True
+    try:
+        return finalize_chapter(
+            _chore_provider(), _prompt_store, _project_store, pid,
+            _entities_for(pid), _markers_for(pid), _desk_for(pid),
+            chapter, auto_entities=auto)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 层运行台：选层 → 输入 x → 勾模块 → 检索范文 → 运行 → 结果与断点收据
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   LAYER_LABELS,
@@ -29,6 +29,29 @@ const reviewing = ref(false)
 const review = ref<ChapterReview | null>(null)
 const adoptNote = ref('')
 const adopting = ref(false)
+
+// 实时流式状态：思考过程 / 正文增量 / 块进度 / 通道提示
+const liveThinking = ref('')
+const liveText = ref('')
+const liveIndex = ref(0)
+const doneBlocks = ref<number[]>([])
+const resumedBlocks = ref<number[]>([])
+const notices = ref<string[]>([])
+const livePane = ref<HTMLElement | null>(null)
+
+watch(liveText, () => {
+  const el = livePane.value
+  if (el) el.scrollTop = el.scrollHeight
+})
+
+function resetLive() {
+  liveThinking.value = ''
+  liveText.value = ''
+  liveIndex.value = 0
+  doneBlocks.value = []
+  resumedBlocks.value = []
+  notices.value = []
+}
 
 const modules = ref<SkillModule[]>([])
 const selectedModules = ref<string[]>([])
@@ -97,7 +120,7 @@ const body = () => ({
   project: currentProjectId.value || undefined,
 })
 
-async function doRun(kind: 'run' | 'retry') {
+async function doRun() {
   const pairs = buildXPairs()
   if (!pairs.length) {
     ElMessage.warning('请至少输入一行 x 内容（每行一个块）')
@@ -106,13 +129,32 @@ async function doRun(kind: 'run' | 'retry') {
   running.value = true
   result.value = null
   review.value = null
+  resetLive()
   try {
-    result.value = kind === 'run' ? await runsApi.run(layer.value, body()) : await runsApi.retry(layer.value, body())
+    // 流式运行：思考与正文实时上屏，结束拿完整结果；completed 块自动命中收据
+    const r = await runsApi.stream(layer.value, body(), {
+      onThinking: (text, index) => {
+        liveIndex.value = index
+        liveThinking.value += text
+      },
+      onDelta: (text, index) => {
+        liveIndex.value = index
+        liveText.value += text
+      },
+      onResumed: (index) => {
+        resumedBlocks.value.push(index)
+      },
+      onBlockDone: (index) => {
+        doneBlocks.value.push(index)
+      },
+      onNotice: (text) => {
+        notices.value.push(text)
+      },
+    })
+    result.value = r
     ElMessage.success(
-      `完成：${result.value.journal.completed}/${result.value.journal.total} 块` +
-        (result.value.resumed_indices.length
-          ? `，复用收据 ${result.value.resumed_indices.length} 块`
-          : ''),
+      `完成：${r.journal.completed}/${r.journal.total} 块` +
+        (r.resumed_indices.length ? `，复用收据 ${r.resumed_indices.length} 块` : ''),
     )
   } catch (e) {
     ElMessage.error(`运行失败：${(e as Error).message}`)
@@ -245,10 +287,10 @@ async function adoptToProject() {
           </el-checkbox-group>
         </div>
 
-        <el-button type="primary" :loading="running" style="width: 100%; margin-top: 12px" @click="doRun('run')">
+        <el-button type="primary" :loading="running" style="width: 100%; margin-top: 12px" @click="doRun">
           运行 {{ LAYER_LABELS[layer] }} 层
         </el-button>
-        <el-button :loading="running" style="width: 100%; margin-top: 8px" @click="doRun('retry')">
+        <el-button :loading="running" style="width: 100%; margin-top: 8px" @click="doRun">
           幂等重试（只补失败块）
         </el-button>
         <div v-if="result?.markers_injected?.length" style="margin-top: 10px">
@@ -263,6 +305,26 @@ async function adoptToProject() {
     </el-col>
 
     <el-col :span="15">
+      <el-card v-if="running || liveText || liveThinking" shadow="never" style="margin-bottom: 14px">
+        <template #header>
+          <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
+            <span>实时生成</span>
+            <el-tag v-if="running" size="small" type="primary">块 {{ liveIndex + 1 }} 生成中…</el-tag>
+            <el-tag v-for="i in doneBlocks" :key="`d${i}`" size="small" type="success">块 {{ i + 1 }} 完成</el-tag>
+            <el-tag v-for="i in resumedBlocks" :key="`r${i}`" size="small" type="info">块 {{ i + 1 }} 收据复用</el-tag>
+            <span v-for="(n, i) in notices" :key="i" style="font-size: 12px; color: #e6a23c">{{ n }}</span>
+          </div>
+        </template>
+        <el-collapse v-if="liveThinking" style="margin-bottom: 10px">
+          <el-collapse-item title="思考过程" name="think">
+            <pre class="thinking-pane">{{ liveThinking }}</pre>
+          </el-collapse-item>
+        </el-collapse>
+        <div ref="livePane" class="live-pane">
+          <pre style="white-space: pre-wrap; font-family: inherit; line-height: 1.9; margin: 0">{{ liveText }}<span v-if="running" class="typing-cursor">▍</span></pre>
+        </div>
+      </el-card>
+
       <el-card v-if="result" shadow="never">
         <template #header>
           <div style="display: flex; gap: 12px; align-items: center">
@@ -354,3 +416,32 @@ async function adoptToProject() {
     </el-col>
   </el-row>
 </template>
+
+<style scoped>
+.thinking-pane {
+  white-space: pre-wrap;
+  font-family: inherit;
+  font-size: 12px;
+  color: #909399;
+  background: #f7f8fa;
+  border-radius: 6px;
+  padding: 10px 12px;
+  max-height: 240px;
+  overflow: auto;
+  line-height: 1.7;
+  margin: 0;
+}
+.live-pane {
+  max-height: 420px;
+  overflow: auto;
+}
+.typing-cursor {
+  color: var(--el-color-primary);
+  animation: blink 1s step-end infinite;
+}
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+</style>

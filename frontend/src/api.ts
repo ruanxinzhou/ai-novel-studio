@@ -204,9 +204,65 @@ export const runsApi = {
   retry: (layer: string, body: LayerRunBody) =>
     req<LayerRunResult>(`/api/runs/${layer}/retry`, { method: 'POST', body: JSON.stringify(body) }),
   status: (runId: string) => req<LayerRunResult['journal']>(`/api/runs/${runId}`),
+  // SSE 流式运行：实时收思考/正文增量，结束返回完整结果（fail 时抛错）
+  stream: async (layer: string, body: LayerRunBody, h: {
+    onThinking?: (text: string, index: number) => void
+    onDelta?: (text: string, index: number) => void
+    onResumed?: (index: number) => void
+    onBlockDone?: (index: number, status: string, chars: number) => void
+    onNotice?: (text: string) => void
+  }): Promise<LayerRunResult> => {
+    const r = await fetch(`/api/runs/${layer}/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!r.ok || !r.body) {
+      const d = await r.json().catch(() => ({}))
+      throw new Error(d.detail ?? `${r.status} ${r.statusText}`)
+    }
+    const reader = r.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    let result: LayerRunResult | null = null
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      let sep: number
+      while ((sep = buf.indexOf('\n\n')) >= 0) {
+        const frame = buf.slice(0, sep)
+        buf = buf.slice(sep + 2)
+        let event = 'message'
+        let data = ''
+        for (const line of frame.split('\n')) {
+          if (line.startsWith('event:')) event = line.slice(6).trim()
+          else if (line.startsWith('data:')) data += line.slice(5).trim()
+        }
+        if (!data) continue
+        const p = JSON.parse(data)
+        if (event === 'thinking') h.onThinking?.(p.text, p.index ?? 0)
+        else if (event === 'delta') h.onDelta?.(p.text, p.index ?? 0)
+        else if (event === 'resumed') h.onResumed?.(p.index)
+        else if (event === 'block_done') h.onBlockDone?.(p.index, p.status, p.chars)
+        else if (event === 'notice') h.onNotice?.(p.text)
+        else if (event === 'result') result = p
+        else if (event === 'fail') throw new Error(p.detail)
+      }
+    }
+    if (!result) throw new Error('流式运行未返回结果')
+    return result
+  },
 }
 
 // ---- 小说项目（M3a）----
+export interface WizardSummary {
+  done: number
+  graduated: boolean
+  current_station: string | null
+  chapters_total: number
+  chapters_finalized: number
+}
 export interface ProjectMeta {
   id: string
   title: string
@@ -214,6 +270,7 @@ export interface ProjectMeta {
   created_at: string
   updated_at: string
   current?: Record<string, number>
+  wizard_summary?: WizardSummary
 }
 export interface ProjectLayerSummary {
   seq: number
@@ -401,5 +458,158 @@ export const importApi = {
   adoptOutline: (pid: string) =>
     req<{ seq: number; chapters: number }>(`/api/projects/${pid}/import/adopt_outline`, {
       method: 'POST',
+    }),
+}
+
+// ---- M5 引导式写作：向导 + 章台 ----
+export const STATION_ORDER = ['topic', 'brainstorm', 'architecture', 'plotplan', 'writing', 'polish'] as const
+export const STATION_LABELS: Record<string, string> = {
+  topic: '选题',
+  brainstorm: '脑洞',
+  architecture: '故事架构',
+  plotplan: '剧情规划',
+  writing: '成稿',
+  polish: '润色',
+}
+export interface WizardIdea {
+  context: string
+  desire: string
+  obstacle: string
+  text: string
+}
+export interface WizardData {
+  idea: WizardIdea
+  seed: string
+  direction: string
+  direction_source: string
+  n_chapters: number
+  skipped: string[]
+}
+export interface StationState {
+  station: string
+  label: string
+  done: boolean
+  skipped: boolean
+}
+export interface WizardDetail {
+  project: string
+  wizard: WizardData
+  stations: StationState[]
+  current_station: string | null
+  graduated: boolean
+  gates_ok: boolean
+}
+export interface DirectionCard {
+  direction: string
+  reason: string
+  hook: string
+  premise: string
+}
+export interface WizardUpdateBody {
+  idea?: Partial<WizardIdea>
+  seed?: string
+  direction?: string
+  direction_source?: string
+  n_chapters?: number
+}
+
+export const wizardApi = {
+  detail: (pid: string) => req<WizardDetail>(`/api/projects/${pid}/wizard`),
+  update: (pid: string, body: WizardUpdateBody) =>
+    req<{ project: string; wizard: WizardData }>(`/api/projects/${pid}/wizard`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  brainstorm: (pid: string) =>
+    req<{ cards: DirectionCard[]; attempts: number }>(`/api/projects/${pid}/wizard/brainstorm`, {
+      method: 'POST',
+    }),
+  skip: (pid: string, station: string) =>
+    req<WizardDetail>(`/api/projects/${pid}/wizard/${station}/skip`, { method: 'POST' }),
+}
+
+export interface DeskChapter {
+  no: number
+  title: string
+  has_outline: boolean
+  plot_done: boolean
+  draft_done: boolean
+  polish_done: boolean
+  review_verdict: string | null
+  finalized_at: string
+  chars: number
+  outline_preview: string
+}
+export interface DeskDetail {
+  project: string
+  chapters: DeskChapter[]
+  total: number
+  finalized: number
+  outline_chapters: number
+}
+export interface DeskWorkText {
+  text: string
+  run_id: string
+  updated_at: string
+}
+export interface DeskChapterFull {
+  no: number
+  title: string
+  plot: DeskWorkText
+  draft: DeskWorkText
+  polish: DeskWorkText
+  review: ChapterReview | null
+  finalized_at: string
+}
+export interface DeskChapterDetail {
+  project: string
+  chapter: DeskChapterFull
+  outline: string
+}
+export interface DeskRunResult {
+  chapter: number
+  stage: string
+  y: string
+  run_id: string
+  resumed_indices: number[]
+  calls: { completion_status: string; attempts: number }[]
+}
+export interface FinalizeResult {
+  chapter: number
+  chars: number
+  entities: {
+    created?: EntityInfo[]
+    updated?: EntityInfo[]
+    dropped?: number
+    attempts?: number
+    error?: string
+  } | null
+  marker_hits: { marker: MarkerInfo; hit: boolean }[]
+  draft_version: number
+  total_chapters: number
+}
+
+export const deskApi = {
+  detail: (pid: string) => req<DeskDetail>(`/api/projects/${pid}/desk`),
+  chapter: (pid: string, chapter: number) =>
+    req<DeskChapterDetail>(`/api/projects/${pid}/desk/${chapter}`),
+  run: (pid: string, chapter: number, stage: string, opts: { directive?: string; force?: boolean } = {}) =>
+    req<DeskRunResult>(`/api/projects/${pid}/desk/${chapter}/run`, {
+      method: 'POST',
+      body: JSON.stringify({ stage, directive: opts.directive || null, force: opts.force || false }),
+    }),
+  saveText: (pid: string, chapter: number, stage: string, text: string) =>
+    req<{ chapter: number; stage: string; chars: number }>(
+      `/api/projects/${pid}/desk/${chapter}/${stage}`,
+      { method: 'PUT', body: JSON.stringify({ text }) },
+    ),
+  review: (pid: string, chapter: number) =>
+    req<ChapterReview & { chapter: number }>(`/api/projects/${pid}/desk/${chapter}/review`, {
+      method: 'POST',
+    }),
+  finalize: (pid: string, chapter: number, autoEntities = true) =>
+    req<FinalizeResult>(`/api/projects/${pid}/desk/${chapter}/finalize`, {
+      method: 'POST',
+      body: JSON.stringify({ auto_entities: autoEntities }),
     }),
 }

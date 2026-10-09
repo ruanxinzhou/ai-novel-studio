@@ -24,6 +24,39 @@ PRICE_CNY_PER_MTOK = {
 DEFAULT_HOST = "https://api.minimax.chat/v1"
 
 
+class ThinkSplitter:
+    """跨 chunk 剥 <think> 块：正文与思考分流（思考透传给前端展示）。"""
+
+    def __init__(self):
+        self.in_think = False
+
+    def feed(self, delta: str) -> tuple[str, str]:
+        """喂入一个 SSE content chunk，返回 (正文, 思考) 两段。"""
+        plain: list[str] = []
+        think: list[str] = []
+        buf = delta
+        while buf:
+            if self.in_think:
+                end = buf.find("</think>")
+                if end >= 0:
+                    think.append(buf[:end])
+                    buf = buf[end + 8:]
+                    self.in_think = False
+                else:
+                    think.append(buf)
+                    buf = ""
+            else:
+                start = buf.find("<think>")
+                if start >= 0:
+                    plain.append(buf[:start])
+                    buf = buf[start + 7:]
+                    self.in_think = True
+                else:
+                    plain.append(buf)
+                    buf = ""
+        return "".join(plain), "".join(think)
+
+
 class MiniMaxProvider(Provider):
     name = "minimax"
 
@@ -58,7 +91,7 @@ class MiniMaxProvider(Provider):
                 if r.status_code != 200:
                     detail = r.read().decode("utf-8", errors="replace")[:300]
                     raise ProviderError(f"MiniMax HTTP {r.status_code}: {detail}")
-                in_think = False
+                splitter = ThinkSplitter()
                 usage = Usage()
                 for line in r.iter_lines():
                     if not line.startswith("data:"):
@@ -77,19 +110,12 @@ class MiniMaxProvider(Provider):
                     delta = (ev.get("choices") or [{}])[0].get("delta", {}).get("content")
                     if not delta:
                         continue
-                    # <think> 块不透传（推理过程不进正文）；跨 chunk 状态机
-                    if "<think>" in delta:
-                        before, _, delta = delta.partition("<think>")
-                        in_think = True
-                        if before:
-                            yield StreamEvent(kind="delta", text=before)
-                    if in_think:
-                        if "</think>" not in delta:
-                            continue
-                        delta = delta.split("</think>", 1)[1]
-                        in_think = False
-                    if delta:
-                        yield StreamEvent(kind="delta", text=delta)
+                    # 思考块实时透传（kind="thinking"），不进正文
+                    plain, think = splitter.feed(delta)
+                    if think:
+                        yield StreamEvent(kind="thinking", text=think)
+                    if plain:
+                        yield StreamEvent(kind="delta", text=plain)
                 usage.cost_cny = self._estimate_cost(model, usage)
                 yield StreamEvent(kind="usage", usage=usage)
                 yield StreamEvent(kind="done")
