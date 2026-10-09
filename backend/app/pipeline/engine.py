@@ -47,7 +47,8 @@ class PipelineSpec:
 
 SPECS: dict[str, PipelineSpec] = {
     "intro": PipelineSpec("intro", x_chunk_length=200, y_chunk_length=800, target_chars=400),
-    "outline": PipelineSpec("outline", x_chunk_length=40, y_chunk_length=4_000, target_chars=1_500),
+    # 大纲分段生成必须滚动衔接：否则每段只看简介自说自话，跨段事件重复、情节断裂
+    "outline": PipelineSpec("outline", x_chunk_length=40, y_chunk_length=4_000, target_chars=1_500, anchor_enabled=True),
     "plot": PipelineSpec("plot", x_chunk_length=2_000, y_chunk_length=4_000, target_chars=1_200),
     "draft": PipelineSpec("draft", x_chunk_length=4_000, y_chunk_length=6_000, target_chars=2_000, anchor_enabled=True),
     "polish": PipelineSpec("polish", x_chunk_length=6_000, y_chunk_length=6_000, target_chars=2_000),

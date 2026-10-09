@@ -104,6 +104,9 @@ const outlineMaxChapter = computed(() => {
   return max
 })
 
+// 防呆标记：要点框装的是项目当前大纲——「开始生成」前确认是否真要重新生成
+const loadedOutlineIntoX = ref(false)
+
 async function loadOutlineToX() {
   if (!projectOutline.value) return
   if (xLines.value.trim()) {
@@ -114,7 +117,8 @@ async function loadOutlineToX() {
     }
   }
   xLines.value = projectOutline.value.y
-  ElMessage.success('已载入当前大纲——直接改，或用「继续调整」按新要求迭代后采纳')
+  loadedOutlineIntoX.value = true
+  ElMessage.success('已载入当前大纲——微调请用「继续调整」；点「开始生成」会重新分段生成全书')
 }
 
 async function loadIntroToX() {
@@ -259,6 +263,7 @@ function pickTask(t: TaskCard) {
   task.value = t
   result.value = null
   adopted.value = false
+  if (t.key !== 'outline') loadedOutlineIntoX.value = false
   syncDefaults()
 }
 
@@ -339,6 +344,19 @@ async function doRun() {
     if (task.value.key === 'chapter' && !chapterNo.value) {
       ElMessage.warning('写正文请先填章号——会自动带上该章待兑现的必现情节标记')
       return
+    }
+    if (task.value.key === 'outline' && loadedOutlineIntoX.value) {
+      loadedOutlineIntoX.value = false
+      try {
+        await ElMessageBox.confirm(
+          '要点框是项目当前大纲。点「开始生成」会重新分段生成全书大纲——每段独立产出，跨段剧情与成长事件可能重复、不连贯。' +
+            '只想按指令调整细节的话，请先生成一次再用结果区的「继续调整」（原样保留，只改要求部分）。仍要重新生成？',
+          '重新生成确认',
+          { type: 'warning', confirmButtonText: '仍要重新生成', cancelButtonText: '取消' },
+        )
+      } catch {
+        return
+      }
     }
   }
 
