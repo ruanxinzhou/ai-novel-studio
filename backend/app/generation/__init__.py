@@ -23,7 +23,7 @@ from app.generation.budget import (
     estimate_prompt_tokens,
     plan_budget,
 )
-from app.generation.json_repair import parse_repaired_json, repair_truncated_json
+from app.generation.json_repair import parse_repaired_json, repair_truncated_json, strip_code_fence
 
 __all__ = [
     "BOUNDED",
@@ -46,6 +46,7 @@ __all__ = [
     "estimate_output_need_tokens",
     "estimate_prompt_tokens",
     "parse_repaired_json",
+    "strip_code_fence",
     "plan_budget",
     "repair_truncated_json",
     "strip_overlap",

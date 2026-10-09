@@ -2,7 +2,42 @@ import json
 
 import pytest
 
-from app.generation import parse_repaired_json, repair_truncated_json
+from app.generation import parse_repaired_json, repair_truncated_json, strip_code_fence
+
+
+class TestStripCodeFence:
+    def test_json_fence_stripped(self):
+        raw = '```json\n[{"direction": "理性解谜派"}]\n```'
+        assert json.loads(strip_code_fence(raw)) == [{"direction": "理性解谜派"}]
+
+    def test_plain_fence_stripped(self):
+        raw = "```\n{\"a\": 1}\n```"
+        assert json.loads(strip_code_fence(raw)) == {"a": 1}
+
+    def test_no_fence_unchanged(self):
+        raw = '{"a": 1}'
+        assert strip_code_fence(raw) == raw
+
+    def test_unterminated_fence_opening_stripped(self):
+        # 截断输出只有开头围栏：剥围栏头，闭合交给截断修复
+        raw = '```json\n[{"a": 1}'
+        assert strip_code_fence(raw) == '[{"a": 1}'
+        assert json.loads(repair_truncated_json(strip_code_fence(raw))) == [{"a": 1}]
+
+
+class TestParseRepairedJsonWithFence:
+    def test_fenced_complete_json(self):
+        raw = '```json\n[{"direction": "嘴炮社牛流", "hook": "唠晕古神"}]\n```'
+        assert parse_repaired_json(raw) == [{"direction": "嘴炮社牛流", "hook": "唠晕古神"}]
+
+    def test_fenced_truncated_json_repaired(self):
+        raw = '```json\n[{"direction": "疯狂进化流", "premise": "主角每活过一次恐怖事件'
+        data = parse_repaired_json(raw)
+        assert data is not None and data[0]["premise"].startswith("主角每活过")
+
+    def test_fenced_object(self):
+        raw = '```json\n{"verdict": "pass"}\n```'
+        assert parse_repaired_json(raw) == {"verdict": "pass"}
 
 
 class TestRepairTruncatedJson:

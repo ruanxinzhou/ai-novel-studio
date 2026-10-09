@@ -6,8 +6,20 @@
 from __future__ import annotations
 
 import json
+import re
 
 _CLOSERS = {"{": "}", "[": "]"}
+_FENCE_FULL = re.compile(r"^\s*```[^\n`]*\n(.*?)```\s*$", re.DOTALL)
+_FENCE_OPEN = re.compile(r"^\s*```[^\n`]*\n", re.DOTALL)
+
+
+def strip_code_fence(raw: str) -> str:
+    """剥掉模型常见的 ```json ... ``` 围栏（MiniMax 等结构化输出习惯）；
+    截断输出只有开头围栏时，剥掉围栏头让截断修复接管。"""
+    m = _FENCE_FULL.match(raw)
+    if m:
+        return m.group(1)
+    return _FENCE_OPEN.sub("", raw, count=1)
 
 
 def repair_truncated_json(raw: str) -> str | None:
@@ -64,6 +76,7 @@ def repair_truncated_json(raw: str) -> str | None:
 
 def parse_repaired_json(raw: str) -> object | None:
     """修复 + 解析；任何一步失败返回 None（fail-loud 交给调用方决定重生成）。"""
+    raw = strip_code_fence(raw)
     repaired = repair_truncated_json(raw)
     if repaired is None:
         return None
