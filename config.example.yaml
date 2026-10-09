@@ -1,0 +1,26 @@
+# Novel Studio 配置模板
+# 复制为 config.local.yaml（gitignore，不会提交），按机器填写。
+
+providers:
+  trae:
+    binary: null            # null = 自动解析（Win: traex.exe / Mac: PATH 中的 trae-cli）
+    default_model: GLM-5.3  # 可选: Kimi-K2.8-Preview / DeepSeek-V4-Pro 正式版 / MiniMax-M3 / Doubao-Seed-Evolving
+    exec_timeout_sec: 300
+  minimax:
+    api_key: "sk-api-在此填入你的Key"
+    base_url: null          # null = 自动探测（api.minimax.chat / api.minimaxi.com）
+    default_model: MiniMax-M2
+
+# 流水线步骤 -> 通道路由（primary 失败自动切 fallback）
+routing:
+  outline:      { primary: trae_exec,  fallback: minimax }
+  chapter:      { primary: trae_exec,  fallback: minimax }
+  plot:         { primary: trae_exec,  fallback: minimax }
+  draft:        { primary: trae_exec,  fallback: minimax }
+  polish:       { primary: trae_exec,  fallback: minimax }
+  review:       { primary: trae_exec,  fallback: minimax }
+  debug:        { primary: minimax,    fallback: trae_exec }   # Prompt 调试要快
+  chore:        { primary: minimax,    fallback: trae_exec }   # 摘要/抽取/校验
+
+vault:
+  path: ../my-novel-vault    # Obsidian Vault 目录（相对 novel-studio 或绝对路径）

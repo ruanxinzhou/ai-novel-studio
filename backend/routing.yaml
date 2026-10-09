@@ -1,0 +1,11 @@
+# 流水线步骤路由表（config.local.yaml 的 routing 可覆盖此文件）
+# primary: 主通道；fallback: 故障转移通道
+routing:
+  outline:      { primary: trae_exec,  fallback: minimax }
+  chapter:      { primary: trae_exec,  fallback: minimax }
+  plot:         { primary: trae_exec,  fallback: minimax }
+  draft:        { primary: trae_exec,  fallback: minimax }
+  polish:       { primary: trae_exec,  fallback: minimax }
+  review:       { primary: trae_exec,  fallback: minimax }
+  debug:        { primary: minimax,    fallback: trae_exec }
+  chore:        { primary: minimax,    fallback: trae_exec }

@@ -1,0 +1,21 @@
+# 本机配置（含 API Key，严禁提交）
+config.local.yaml
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+*.local
+
+# 运行产物
+*.log
+.DS_Store
+Thumbs.db
