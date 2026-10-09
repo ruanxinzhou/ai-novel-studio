@@ -5,10 +5,11 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   LAYER_LABELS,
   LAYERS,
+  STATION_LABELS,
   projectsApi,
   type ProjectMeta,
 } from '../api'
-import { currentProjectId } from '../state'
+import { activeTab, currentProjectId } from '../state'
 
 const projects = ref<ProjectMeta[]>([])
 const loading = ref(false)
@@ -38,6 +39,8 @@ async function refresh() {
 
 function enter(p: ProjectMeta) {
   currentProjectId.value = p.id
+  // 进入即达主路：未毕业送去向导，已毕业直达章台
+  activeTab.value = p.wizard_summary?.graduated ? 'desk' : 'wizard'
   ElMessage.success(`当前项目：《${p.title}》`)
 }
 
@@ -140,17 +143,31 @@ onMounted(refresh)
               {{ p.intro.length > 60 ? p.intro.slice(0, 60) + '…' : p.intro }}
             </div>
             <div v-else style="min-height: 32px; margin: 6px 0"></div>
-            <div style="display: flex; gap: 10px; flex-wrap: wrap; margin: 6px 0">
-              <span v-for="l in LAYERS" :key="l" style="font-size: 12px">
-                <template v-if="p.current?.[l]">
-                  <span style="color: #67c23a">●</span>
-                  {{ LAYER_LABELS[l] }} v{{ p.current[l] }}
-                </template>
-                <template v-else>
-                  <span style="color: #dcdfe6">●</span>
-                  <span style="color: #bbb">{{ LAYER_LABELS[l] }}</span>
-                </template>
-              </span>
+            <div style="margin: 6px 0; font-size: 12px; min-height: 24px">
+              <template v-if="p.wizard_summary?.graduated">
+                <el-tag type="success" size="small">已开书</el-tag>
+                <span style="margin-left: 8px; color: #666">
+                  章台 {{ p.wizard_summary.chapters_finalized }} / {{ p.wizard_summary.chapters_total }} 章定稿
+                </span>
+              </template>
+              <template v-else-if="p.wizard_summary">
+                <el-tag size="small" type="info">开书向导 {{ p.wizard_summary.done }}/6 站</el-tag>
+                <span v-if="p.wizard_summary.current_station" style="margin-left: 8px; color: #bbb">
+                  当前：{{ STATION_LABELS[p.wizard_summary.current_station] ?? p.wizard_summary.current_station }}
+                </span>
+              </template>
+              <template v-else>
+                <span v-for="l in LAYERS" :key="l" style="margin-right: 10px">
+                  <template v-if="p.current?.[l]">
+                    <span style="color: #67c23a">●</span>
+                    {{ LAYER_LABELS[l] }} v{{ p.current[l] }}
+                  </template>
+                  <template v-else>
+                    <span style="color: #dcdfe6">●</span>
+                    <span style="color: #bbb">{{ LAYER_LABELS[l] }}</span>
+                  </template>
+                </span>
+              </template>
             </div>
             <div style="font-size: 12px; color: #aaa; margin-bottom: 10px">
               更新于 {{ p.updated_at || '—' }}
