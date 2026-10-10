@@ -1184,8 +1184,52 @@ def corpus_import_chaishu(body: ChaishuImportIn) -> dict:
     by_type: dict[str, int] = {}
     for r in rows:
         by_type[r["excerpt_type"]] = by_type.get(r["excerpt_type"], 0) + 1
+
+    # ---- 同步建参考项目：与自己的小说项目平行，互相可作范文 ----
+    pid = _ensure_reference_project(title, body, chapters, labels, labeled_n, report_text)
+
     return {"added": n, "by_type": by_type, "title": title, "article_id": slug,
-            "chapters_total": len(chapters), "labeled": labeled_n}
+            "chapters_total": len(chapters), "labeled": labeled_n, "project_id": pid}
+
+
+def _ensure_reference_project(title: str, body: ChaishuImportIn, chapters: list[dict],
+                              labels: dict[int, dict], labeled_n: int,
+                              report_text: str) -> str:
+    """拆书产物项目化：复用同书名参考项目（重复导入=层版本更新），intro 放体检表、outline 放全书脉络。"""
+    existing = _project_store.find_by_title(title, kind="reference")
+    meta = existing if existing else _project_store.create(
+        title=title, intro=(body.tags[0] if body.tags else "拆书参考项目"), kind="reference")
+
+    def ch_name(no: int) -> str:
+        return f"第{no}章" if no else "前言"
+
+    # 简介层：体格概要 + 节奏体检表全文（聚合统计，无具体情节）
+    intro_text = (f"《{title}》——拆书参考项目（仅借鉴节奏与结构，非本人创作）\n\n"
+                  f"共 {len(chapters)} 章，已标注 {labeled_n} 章"
+                  + (f"；附加标签：{'、'.join(body.tags)}" if body.tags else "")
+                  + "\n\n" + report_text) if report_text else (
+                  f"《{title}》——拆书参考项目（仅借鉴节奏与结构，非本人创作）\n\n"
+                  f"共 {len(chapters)} 章，已标注 {labeled_n} 章。"
+                  f"完整节奏体检表待全量拆解后重新导入生成。")
+    _project_store.adopt(meta.id, "intro", [], intro_text,
+                         note=f"拆书导入：{labeled_n}/{len(chapters)} 章已标注")
+
+    # 大纲层：全书脉络（每章一行：章号+标题+概要），配合创作导航按章浏览
+    lines: list[str] = [f"《{title}》全书脉络（已拆 {labeled_n}/{len(chapters)} 章）", ""]
+    vol = None
+    for c in chapters:
+        no = c.get("no", 0)
+        if c.get("volume") != vol:
+            vol = c.get("volume")
+            lines.append(f"【{vol}】")
+        lb = labels.get(no)
+        line = f"{ch_name(no)} {c.get('title', '')}"
+        if lb and lb.get("summary"):
+            line += f"：{lb['summary']}"
+        lines.append(line)
+    _project_store.adopt(meta.id, "outline", [], "\n".join(lines),
+                         note=f"拆书导入：全书 {len(chapters)} 章脉络")
+    return meta.id
 
 
 # ---- M5 引导式写作：主路向导 + 今日章台 ----
@@ -1321,6 +1365,7 @@ class DeskRunIn(BaseModel):
     stage: Literal["plot", "draft", "polish"]
     directive: str | None = None
     force: bool = False
+    materials: list[MaterialIn] | None = None   # 跨项目参考层（互为范文）
 
 
 class DeskTextIn(BaseModel):
@@ -1369,18 +1414,27 @@ def desk_save_text(pid: str, chapter: int, stage: str, body: DeskTextIn) -> dict
 
 @app.post("/api/projects/{pid}/desk/{chapter}/run")
 def desk_run(pid: str, chapter: int, body: DeskRunIn) -> dict:
-    """单章单层生成：plot/draft/polish；同输入幂等回收据，force 重生成。"""
+    """单章单层生成：plot/draft/polish；同输入幂等回收据，force 重生成。
+    materials：跨项目参考层（REFERENCE 族），与其他项目互为范文。"""
     _require_project(pid)
     try:
         return run_chapter_stage(
             _router_provider(body.stage), _prompt_store, _project_store, pid,
             _markers_for(pid), _wizard_for(pid), _desk_for(pid),
             chapter, body.stage, directive=body.directive, force=body.force,
-            journal_dir=_journal_dir(pid))
+            journal_dir=_journal_dir(pid),
+            extra_materials=_desk_extra_materials(body))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"生成失败（已完成块已留收据）：{e}")
+
+
+def _desk_extra_materials(body: DeskRunIn) -> list[Material] | None:
+    if not body.materials:
+        return None
+    return [Material(source_id=m.source_id, family=_FAMILIES[m.family],
+                     content=m.content, title=m.title) for m in body.materials]
 
 
 @app.post("/api/projects/{pid}/desk/{chapter}/run/stream")
@@ -1403,7 +1457,8 @@ def desk_run_stream(pid: str, chapter: int, body: DeskRunIn) -> StreamingRespons
                     _router_provider(body.stage), _prompt_store, _project_store, pid,
                     _markers_for(pid), _wizard_for(pid), _desk_for(pid),
                     chapter, body.stage, directive=body.directive, force=body.force,
-                    journal_dir=_journal_dir(pid), on_event=on_event)
+                    journal_dir=_journal_dir(pid), extra_materials=_desk_extra_materials(body),
+                    on_event=on_event)
                 q.put(("result", result))
             except ValueError as e:
                 q.put(("fail", {"detail": str(e)}))

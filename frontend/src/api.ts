@@ -239,6 +239,7 @@ export const corpusApi = {
       article_id: string
       chapters_total: number
       labeled: number
+      project_id: string
     }>('/api/corpus/import_chaishu', {
       method: 'POST',
       body: JSON.stringify({ dir, title: title ?? '', tags: tags ?? [] }),
@@ -319,6 +320,7 @@ export interface ProjectMeta {
   id: string
   title: string
   intro: string
+  kind?: 'own' | 'reference'   // reference = 拆书参考项目（仅借鉴，不写作）
   created_at: string
   updated_at: string
   current?: Record<string, number>
@@ -671,23 +673,38 @@ export const deskApi = {
     ),
   chapter: (pid: string, chapter: number) =>
     req<DeskChapterDetail>(`/api/projects/${pid}/desk/${chapter}`),
-  run: (pid: string, chapter: number, stage: string, opts: { directive?: string; force?: boolean } = {}) =>
+  run: (
+    pid: string,
+    chapter: number,
+    stage: string,
+    opts: { directive?: string; force?: boolean; materials?: { source_id: string; family: string; content: string; title?: string }[] } = {},
+  ) =>
     req<DeskRunResult>(`/api/projects/${pid}/desk/${chapter}/run`, {
       method: 'POST',
-      body: JSON.stringify({ stage, directive: opts.directive || null, force: opts.force || false }),
+      body: JSON.stringify({
+        stage,
+        directive: opts.directive || null,
+        force: opts.force || false,
+        materials: opts.materials?.length ? opts.materials : null,
+      }),
     }),
   // 流式生成：正文增量实时回调，结束返回完整运行结果
   runStream: (
     pid: string,
     chapter: number,
     stage: string,
-    opts: { directive?: string; force?: boolean } = {},
+    opts: { directive?: string; force?: boolean; materials?: { source_id: string; family: string; content: string; title?: string }[] } = {},
     h: SSEHandlers,
   ): Promise<DeskRunResult> =>
     fetch(`/api/projects/${pid}/desk/${chapter}/run/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ stage, directive: opts.directive || null, force: opts.force || false }),
+      body: JSON.stringify({
+        stage,
+        directive: opts.directive || null,
+        force: opts.force || false,
+        materials: opts.materials?.length ? opts.materials : null,
+      }),
     }).then((r) => consumeSSE<DeskRunResult>(r, h)),
   saveText: (pid: string, chapter: number, stage: string, text: string) =>
     req<{ chapter: number; stage: string; chars: number }>(

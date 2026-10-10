@@ -59,6 +59,7 @@ class ProjectMeta:
     id: str
     title: str
     intro: str = ""
+    kind: str = "own"        # own=自己的小说项目；reference=拆书参考项目（仅借鉴，不写作）
     created_at: str = ""
     updated_at: str = ""
     current: dict[str, int] = field(default_factory=dict)   # layer -> seq
@@ -93,16 +94,30 @@ class ProjectStore:
 
     # ---- CRUD ----
 
-    def create(self, title: str, intro: str = "") -> ProjectMeta:
+    def create(self, title: str, intro: str = "", kind: str = "own") -> ProjectMeta:
         title = title.strip()
         if not title:
             raise ValueError("书名不能为空")
         pid = f"{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6]}"
-        meta = ProjectMeta(id=pid, title=title, intro=intro.strip(),
+        meta = ProjectMeta(id=pid, title=title, intro=intro.strip(), kind=kind,
                            created_at=_now(), updated_at=_now())
         self._dir(pid).mkdir(parents=True, exist_ok=True)
         self._write_meta(meta)
         return meta
+
+    def find_by_title(self, title: str, kind: str | None = None) -> ProjectMeta | None:
+        """按书名找项目（拆书重复导入复用同一参考项目）；kind 限定类型。"""
+        title = title.strip()
+        for d in sorted(self.root.iterdir()):
+            if not d.is_dir():
+                continue
+            try:
+                meta = self._read_meta(d.name)
+            except (FileNotFoundError, json.JSONDecodeError):
+                continue
+            if meta.title == title and (kind is None or meta.kind == kind):
+                return meta
+        return None
 
     def list(self) -> list[dict]:
         out = []
@@ -192,6 +207,7 @@ class ProjectStore:
         data = json.loads(self._meta_path(pid).read_text(encoding="utf-8"))
         return ProjectMeta(
             id=data["id"], title=data["title"], intro=data.get("intro", ""),
+            kind=data.get("kind", "own"),
             created_at=data.get("created_at", ""), updated_at=data.get("updated_at", ""),
             current=data.get("current", {}), layer_seqs=data.get("layer_seqs", {}),
         )

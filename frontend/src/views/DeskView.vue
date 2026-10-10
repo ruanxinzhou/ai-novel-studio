@@ -3,12 +3,16 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
+  LAYER_LABELS,
+  LAYERS,
   deskApi,
+  projectsApi,
   refineApi,
   type ChapterReview,
   type DeskChapterDetail,
   type DeskDetail,
   type FinalizeResult,
+  type ProjectMeta,
 } from '../api'
 import { activeTab, currentProjectId } from '../state'
 
@@ -153,6 +157,74 @@ async function refineStage(stage: StageKey) {
   }
 }
 
+// ---------- 项目参考（互为范文：把其他项目/拆书参考书的层注入三段生成） ----------
+const refProjects = ref<ProjectMeta[]>([])
+const refPid = ref('')
+const refLayer = ref('')
+const refLayerOptions = ref<string[]>([])
+const addingRef = ref(false)
+const injectedProjectLayers = ref<{ source_id: string; title: string; content: string; chars: number }[]>([])
+const showRefs = ref(['outline'])   // 本章大纲默认展开，参考资料默认收起
+
+const refProjectOptions = computed(() =>
+  refProjects.value.filter((p) => p.id !== currentProjectId.value))
+
+async function loadRefProjects() {
+  try {
+    const r = await projectsApi.list()
+    refProjects.value = r.projects
+  } catch {
+    refProjects.value = []
+  }
+}
+
+async function onRefProjectChange() {
+  refLayer.value = ''
+  refLayerOptions.value = []
+  if (!refPid.value) return
+  try {
+    const d = await projectsApi.detail(refPid.value)
+    refLayerOptions.value = LAYERS.filter((l) => d.layers[l]?.current)
+  } catch (e) {
+    ElMessage.error(`读取项目层失败：${(e as Error).message}`)
+  }
+}
+
+async function addProjectLayerRef() {
+  if (!refPid.value || !refLayer.value) {
+    ElMessage.warning('先选项目和层')
+    return
+  }
+  addingRef.value = true
+  try {
+    const r = await projectsApi.layer(refPid.value, refLayer.value)
+    if (!r.version) {
+      ElMessage.warning('该层还没有内容')
+      return
+    }
+    const p = refProjects.value.find((x) => x.id === refPid.value)!
+    injectedProjectLayers.value.push({
+      source_id: `project:${refPid.value}:${refLayer.value}:${r.version.seq}`,
+      title: `《${p.title}》${LAYER_LABELS[refLayer.value] ?? refLayer.value}`,
+      content: r.version.y,
+      chars: r.version.y.length,
+    })
+  } catch (e) {
+    ElMessage.error(`读取层内容失败：${(e as Error).message}`)
+  } finally {
+    addingRef.value = false
+  }
+}
+
+function removeProjectLayerRef(i: number) {
+  injectedProjectLayers.value.splice(i, 1)
+}
+
+const deskRefMaterials = () =>
+  injectedProjectLayers.value.map((m) => ({
+    source_id: m.source_id, family: 'reference', content: m.content, title: m.title,
+  }))
+
 async function runStage(stage: StageKey) {
   if (busy.value) return
   busy.value = stage
@@ -165,7 +237,11 @@ async function runStage(stage: StageKey) {
       currentProjectId.value,
       currentNo.value,
       stage,
-      { directive: directive[stage].trim() || undefined, force: force[stage] },
+      {
+        directive: directive[stage].trim() || undefined,
+        force: force[stage],
+        materials: deskRefMaterials(),
+      },
       {
         onThinking: (t) => {
           thinking[stage] += t
@@ -253,6 +329,7 @@ onMounted(async () => {
     await selectChapter(focus.value)
     focus.value = 0
   }
+  loadRefProjects()
 })
 
 watch(currentProjectId, () => {
@@ -368,9 +445,51 @@ function goContinueOutline() {
             <el-tag v-if="detail.chapter.finalized_at" type="success">已定稿 {{ detail.chapter.finalized_at.slice(0, 16) }}</el-tag>
             <el-tag v-else-if="currentNo === todayNo" type="primary" effect="plain">今日目标</el-tag>
           </div>
-          <el-collapse style="margin-top: 10px">
+          <el-collapse v-model="showRefs" style="margin-top: 10px">
             <el-collapse-item title="本章大纲" name="outline">
               <div class="outline-preview">{{ detail.outline || '（本章暂无大纲，可直接写，建议之后回向导补齐）' }}</div>
+            </el-collapse-item>
+            <el-collapse-item :name="'refs'">
+              <template #title>
+                参考资料注入（其他项目 / 拆书参考书）
+                <el-tag v-if="injectedProjectLayers.length" size="small" type="info" style="margin-left: 8px">
+                  已挂 {{ injectedProjectLayers.length }} 层
+                </el-tag>
+              </template>
+              <div style="font-size: 12px; color: #999; margin-bottom: 8px">
+                挂载后本章三段生成（剧情/正文/润色）都会带上这些层作参考——写新书时可挂拆书参考书的大纲，连载时可挂自己旧书的正文
+              </div>
+              <el-form inline>
+                <el-form-item>
+                  <el-select
+                    v-model="refPid"
+                    filterable
+                    clearable
+                    placeholder="选项目（含参考书）"
+                    style="width: 200px"
+                    @change="onRefProjectChange"
+                  >
+                    <el-option
+                      v-for="p in refProjectOptions"
+                      :key="p.id"
+                      :value="p.id"
+                      :label="(p.kind === 'reference' ? '〔参考书〕' : '') + p.title"
+                    />
+                  </el-select>
+                </el-form-item>
+                <el-form-item>
+                  <el-select v-model="refLayer" placeholder="选层" style="width: 100px" :disabled="!refPid">
+                    <el-option v-for="l in refLayerOptions" :key="l" :value="l" :label="LAYER_LABELS[l] ?? l" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item>
+                  <el-button size="small" :loading="addingRef" :disabled="!refPid || !refLayer" @click="addProjectLayerRef">加入</el-button>
+                </el-form-item>
+              </el-form>
+              <div v-for="(m, i) in injectedProjectLayers" :key="m.source_id" style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px">
+                <el-tag size="small" type="info" closable @close="removeProjectLayerRef(i)">{{ m.title }}</el-tag>
+                <span style="font-size: 12px; color: #999">{{ m.chars.toLocaleString() }} 字</span>
+              </div>
             </el-collapse-item>
           </el-collapse>
         </el-card>

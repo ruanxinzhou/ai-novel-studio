@@ -17,6 +17,7 @@ import {
   type Excerpt,
   type LayerRunResult,
   type LayerVersionFull,
+  type ProjectMeta,
   type SkillModule,
 } from '../api'
 import { activeTab, currentProjectId } from '../state'
@@ -240,6 +241,7 @@ onMounted(async () => {
   } catch (e) {
     ElMessage.error(`加载失败：${(e as Error).message}`)
   }
+  loadRefProjects()
   await loadProjectLayers()
   if (pipelineContinue.value) {
     pipelineContinue.value = false
@@ -284,6 +286,68 @@ async function previewCorpus() {
   } catch (e) {
     ElMessage.error(`检索失败：${(e as Error).message}`)
   }
+}
+
+// ---------- 项目参考（互为范文：把任意项目——含拆书参考书——的层内容直接注入） ----------
+const refProjects = ref<ProjectMeta[]>([])
+const refPid = ref('')
+const refLayer = ref('')
+const refLayerOptions = ref<string[]>([])
+const addingRef = ref(false)
+const injectedProjectLayers = ref<{ source_id: string; title: string; content: string; chars: number }[]>([])
+
+const refProjectOptions = computed(() =>
+  refProjects.value.filter((p) => p.id !== currentProjectId.value))
+
+async function loadRefProjects() {
+  try {
+    const r = await projectsApi.list()
+    refProjects.value = r.projects
+  } catch {
+    refProjects.value = []
+  }
+}
+
+async function onRefProjectChange() {
+  refLayer.value = ''
+  refLayerOptions.value = []
+  if (!refPid.value) return
+  try {
+    const d = await projectsApi.detail(refPid.value)
+    refLayerOptions.value = LAYERS.filter((l) => d.layers[l]?.current)
+  } catch (e) {
+    ElMessage.error(`读取项目层失败：${(e as Error).message}`)
+  }
+}
+
+async function addProjectLayerRef() {
+  if (!refPid.value || !refLayer.value) {
+    ElMessage.warning('先选项目和层')
+    return
+  }
+  addingRef.value = true
+  try {
+    const r = await projectsApi.layer(refPid.value, refLayer.value)
+    if (!r.version) {
+      ElMessage.warning('该层还没有内容')
+      return
+    }
+    const p = refProjects.value.find((x) => x.id === refPid.value)!
+    injectedProjectLayers.value.push({
+      source_id: `project:${refPid.value}:${refLayer.value}:${r.version.seq}`,
+      title: `【项目参考】《${p.title}》${LAYER_LABELS[refLayer.value] ?? refLayer.value}`,
+      content: r.version.y,
+      chars: r.version.y.length,
+    })
+  } catch (e) {
+    ElMessage.error(`读取层内容失败：${(e as Error).message}`)
+  } finally {
+    addingRef.value = false
+  }
+}
+
+function removeProjectLayerRef(i: number) {
+  injectedProjectLayers.value.splice(i, 1)
 }
 
 function buildXPairs(): [string, string][] {
@@ -399,12 +463,16 @@ async function doRun() {
   result.value = null
   adopted.value = false
   resetLive()
+  // 项目参考（互为范文）与分支材料合并注入
+  const projectRefMats = injectedProjectLayers.value.map((m) => ({
+    source_id: m.source_id, family: 'reference', content: m.content, title: m.title,
+  }))
   try {
     // 流式运行：思考与正文实时上屏；已完成块自动命中收据秒回，失败块只补失败
     const r = await runsApi.stream(layer.value, {
       ...body(),
       x_pairs: pairs,
-      materials: extraMaterials,
+      materials: [...(extraMaterials ?? []), ...projectRefMats],
       user_directive: directive ?? (userDirective.value || undefined),
       x_chunk_length: chunkLength ?? (xChunkLength.value || undefined),
     }, {
@@ -820,6 +888,39 @@ async function saveXToProject() {
                       <div style="font-size: 12px; color: #888; margin-left: 24px; white-space: pre-wrap">{{ h.text.slice(0, 80) }}…</div>
                     </div>
                   </el-checkbox-group>
+                </div>
+
+                <el-divider style="margin: 12px 0">项目参考（其他项目 / 拆书参考书的层）</el-divider>
+                <el-form inline>
+                  <el-form-item>
+                    <el-select
+                      v-model="refPid"
+                      filterable
+                      clearable
+                      placeholder="选项目（含参考书）"
+                      style="width: 220px"
+                      @change="onRefProjectChange"
+                    >
+                      <el-option
+                        v-for="p in refProjectOptions"
+                        :key="p.id"
+                        :value="p.id"
+                        :label="(p.kind === 'reference' ? '〔参考书〕' : '') + p.title"
+                      />
+                    </el-select>
+                  </el-form-item>
+                  <el-form-item>
+                    <el-select v-model="refLayer" placeholder="选层" style="width: 110px" :disabled="!refPid">
+                      <el-option v-for="l in refLayerOptions" :key="l" :value="l" :label="LAYER_LABELS[l] ?? l" />
+                    </el-select>
+                  </el-form-item>
+                  <el-form-item>
+                    <el-button :loading="addingRef" :disabled="!refPid || !refLayer" @click="addProjectLayerRef">加入</el-button>
+                  </el-form-item>
+                </el-form>
+                <div v-for="(m, i) in injectedProjectLayers" :key="m.source_id" style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px">
+                  <el-tag size="small" type="info" closable @close="removeProjectLayerRef(i)">{{ m.title }}</el-tag>
+                  <span style="font-size: 12px; color: #999">{{ m.chars.toLocaleString() }} 字</span>
                 </div>
               </el-collapse-item>
             </el-collapse>

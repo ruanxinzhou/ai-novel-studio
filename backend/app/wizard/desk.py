@@ -96,9 +96,11 @@ def run_chapter_stage(
     directive: str | None = None,
     force: bool = False,
     journal_dir: Path | str | None = None,
+    extra_materials: list[Material] | None = None,
     on_event=None,
 ) -> dict:
-    """单章单层生成：plot/draft/polish；同输入幂等回收据，force 绕过。"""
+    """单章单层生成：plot/draft/polish；同输入幂等回收据，force 绕过。
+    extra_materials：作者勾选的跨项目参考层（REFERENCE 族，互为范文）。"""
     if stage not in STAGES:
         raise ValueError(f"未知阶段：{stage}")
     spec = SPECS[stage]
@@ -133,6 +135,8 @@ def run_chapter_stage(
     direction_mat = _direction_material(wizard)
     if direction_mat is not None:
         materials.append(direction_mat)
+    if extra_materials:
+        materials.extend(extra_materials)
     anchor = ""
     if stage == "draft":
         if marker_store is not None:

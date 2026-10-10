@@ -141,7 +141,10 @@ onMounted(refresh)
           >
             <div style="display: flex; justify-content: space-between; align-items: center">
               <b style="font-size: 15px">《{{ p.title }}》</b>
-              <el-tag v-if="p.id === currentProjectId" size="small" type="primary">当前</el-tag>
+              <span style="display: flex; gap: 4px; align-items: center">
+                <el-tag v-if="p.kind === 'reference'" size="small" type="warning">参考书</el-tag>
+                <el-tag v-if="p.id === currentProjectId" size="small" type="primary">当前</el-tag>
+              </span>
             </div>
             <div
               v-if="p.intro"
@@ -151,7 +154,13 @@ onMounted(refresh)
             </div>
             <div v-else style="min-height: 32px; margin: 6px 0"></div>
             <div style="margin: 6px 0; font-size: 12px; min-height: 24px">
-              <template v-if="p.wizard_summary?.graduated">
+              <template v-if="p.kind === 'reference'">
+                <el-tag type="warning" size="small" effect="plain">拆书参考</el-tag>
+                <span style="margin-left: 8px; color: #666">
+                  {{ p.current?.intro ? '节奏体检 + 全书脉络已入库' : '待导入' }}，仅借鉴不写作
+                </span>
+              </template>
+              <template v-else-if="p.wizard_summary?.graduated">
                 <el-tag type="success" size="small">已开书</el-tag>
                 <span style="margin-left: 8px; color: #666">
                   章台 {{ p.wizard_summary.chapters_finalized }} / {{ p.wizard_summary.chapters_total }} 章定稿
