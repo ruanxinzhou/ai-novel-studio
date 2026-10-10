@@ -44,7 +44,7 @@ const TASKS: TaskCard[] = [
     key: 'outline',
     layer: 'outline',
     title: '全书大纲',
-    desc: '根据简介和要点，排出分章大纲（每行一个「第N章」）',
+    desc: '给一段创作方向 + 章数直接排大纲；也可逐章写要点，或在大纲后续写新章',
     inputHint: '每行一个「第N章」+ 这一章发生什么。前几章是黄金三章，建议写细。',
     example: '例：第1章 主角加班夜归，捡到会低语的青铜镜，被拉入第一场试炼',
   },
@@ -134,12 +134,17 @@ async function loadIntroToX() {
   ElMessage.success('已载入当前简介——直接改，或用「继续调整」按新要求迭代后采纳')
 }
 
-// ---------- 大纲续写模式：已有 N 章，从第 N+1 章接着排 ----------
-const outlineMode = ref<'fresh' | 'continue'>('fresh')
+// ---------- 大纲生成模式：fresh=逐章要点 / direction=方向创作 / continue=续写 ----------
+const outlineMode = ref<'fresh' | 'direction' | 'continue'>('fresh')
 const contStart = ref<number>(1)
 const contCount = ref<number>(30)
 const contVolume = ref('')
 const isContinueRun = computed(() => task.value.key === 'outline' && outlineMode.value === 'continue')
+const isDirectionRun = computed(() => task.value.key === 'outline' && outlineMode.value === 'direction')
+
+// 方向创作：给一段方向（新故事构思 / 改编再创作思路 / 整体约束文档）+ 章数 → 直接排大纲
+const directionDoc = ref('')
+const dirCount = ref<number>(30)
 
 watch(outlineMaxChapter, (v) => {
   // 载入大纲/切项目后，起点默认落在已有最后一章的下一章
@@ -307,7 +312,7 @@ const body = () => ({
 })
 
 async function doRun() {
-  // 续写分支：x 用新章号骨架，已有大纲作为定稿材料注入，结果与旧大纲拼接
+  // 三个分支：续写=旧大纲注入+新章骨架拼接；方向=方向文档 required 注入+全书骨架；要点=逐行要点
   let pairs: [string, string][]
   let extraMaterials: { source_id: string; family: string; content: string; title: string }[] | undefined
   let directive: string | undefined
@@ -331,9 +336,39 @@ async function doRun() {
       title: `已有大纲（前 ${outlineMaxChapter.value} 章，续写衔接）`,
     }]
     directive =
-      `已有大纲 ${outlineMaxChapter.value} 章见材料。本次从第 ${contStart.value} 章续写到第 ${end} 章，共 ${contCount.value} 章` +
+      `已有大纲 ${outlineMaxChapter.value} 章见材料。本次从第 ${contStart.value} 续写到第 ${end} 章，共 ${contCount.value} 章` +
       (contVolume.value.trim() ? `，新卷首行写「${contVolume.value.trim()}」` : '') +
       '。衔接已有剧情、伏笔与文风，不得改动已有章节。'
+    chunkLength = 40
+  } else if (isDirectionRun.value) {
+    if (!directionDoc.value.trim()) {
+      ElMessage.warning('请填写创作方向——可以是故事构思、改编思路或整体约束文档')
+      return
+    }
+    if (!dirCount.value || dirCount.value < 1) {
+      ElMessage.warning('请填要生成的章数')
+      return
+    }
+    pairs = Array.from({ length: dirCount.value }, (_, i) => [`第${i + 1}章\n`, ''] as [string, string])
+    extraMaterials = [{
+      source_id: 'direction:doc',
+      family: 'required',
+      content: directionDoc.value.trim(),
+      title: '创作方向（全书必须整体遵循）',
+    }]
+    if (projectIntro.value) {
+      extraMaterials.push({
+        source_id: 'intro:current',
+        family: 'finalized',
+        content: projectIntro.value.y,
+        title: '项目简介（故事基调，有冲突时以创作方向为准）',
+      })
+    }
+    directive =
+      `按【创作方向】排出第 1 至 ${dirCount.value} 章的全书大纲，共 ${dirCount.value} 章。` +
+      '方向里的题材、主角、金手指、核心冲突、卷结构、节奏约束全部落实到大纲中；' +
+      '前 3 章按黄金三章标准排：主角亮相、金手指落地、第一个钩子。' +
+      (userDirective.value.trim() ? `\n作者补充要求：${userDirective.value.trim()}` : '')
     chunkLength = 40
   } else {
     pairs = buildXPairs()
@@ -645,10 +680,40 @@ async function saveXToProject() {
 
             <el-form-item v-if="task.key === 'outline'" label="生成方式">
               <el-radio-group v-model="outlineMode">
+                <el-radio-button value="direction">方向创作</el-radio-button>
                 <el-radio-button value="fresh">从头生成</el-radio-button>
                 <el-radio-button value="continue">续写新章</el-radio-button>
               </el-radio-group>
             </el-form-item>
+
+            <!-- 方向创作：给方向 + 章数，不用逐章写要点 -->
+            <template v-if="isDirectionRun">
+              <el-form-item label="创作方向">
+                <el-input
+                  v-model="directionDoc"
+                  type="textarea"
+                  :rows="8"
+                  placeholder="写下你想写一个怎样的故事，任何形式都行：&#10;&#10;· 一段构思：克苏鲁无限流，主角能剪辑诡异经历成恐怖片传播，靠世人恐惧值变强……&#10;· 改编再创作：参考《某书》的单元剧节奏，但换成中式民俗背景，主角换成女性摄影师……&#10;· 整体约束文档：题材、卷结构、金手指规则、升级节奏、每卷主线、结局走向……"
+                />
+                <div style="font-size: 12px; color: #999; margin-top: 4px">
+                  方向会作为全书最高约束注入；高级选项里可勾选参考素材（如拆书节奏表、同类书脉络）一起注入
+                </div>
+              </el-form-item>
+              <el-form-item label="章数">
+                <div style="width: 100%; display: flex; gap: 8px; align-items: center">
+                  <el-input-number v-model="dirCount" :min="1" :max="500" style="width: 130px" />
+                  <span style="font-size: 13px">章（第 1 – {{ dirCount }} 章）</span>
+                </div>
+                <div style="font-size: 12px; color: #888; margin-top: 4px">
+                  自动分段生成并滚动衔接（每段约 40 章）{{ projectIntro ? '；项目简介将作为基调参考' : '' }}
+                </div>
+              </el-form-item>
+              <el-alert
+                v-if="projectOutline"
+                type="info" :closable="false" style="margin-bottom: 6px"
+                title="项目已有大纲：本次生成的是全新大纲，采纳后作为新版本入库（旧版本仍在历史里可回滚）"
+              />
+            </template>
 
             <template v-if="isContinueRun">
               <el-form-item label="续写范围">
@@ -668,7 +733,7 @@ async function saveXToProject() {
               </el-form-item>
             </template>
 
-            <el-form-item v-if="!isContinueRun" :label="isAdvanced ? '输入块' : '要点'">
+            <el-form-item v-if="!isContinueRun && !isDirectionRun" :label="isAdvanced ? '输入块' : '要点'">
               <div style="width: 100%">
                 <el-input
                   v-model="xLines"
@@ -761,7 +826,13 @@ async function saveXToProject() {
           </el-form>
 
           <el-button type="primary" :loading="running" style="width: 100%; margin-top: 12px" @click="doRun">
-            {{ running ? '生成中…' : hasFailed ? '继续生成（只补失败部分）' : isContinueRun ? `续写第 ${contStart}–${contStart + contCount - 1} 章` : '开始生成' }}
+            {{
+              running ? '生成中…'
+              : hasFailed ? '继续生成（只补失败部分）'
+              : isContinueRun ? `续写第 ${contStart}–${contStart + contCount - 1} 章`
+              : isDirectionRun ? `按方向生成 ${dirCount} 章大纲`
+              : '开始生成'
+            }}
           </el-button>
           <div style="font-size: 12px; color: #999; text-align: center; margin-top: 6px">
             中断没关系：同输入重跑只补缺的部分，已写好的不重复花钱
