@@ -179,13 +179,16 @@ class TestRunsStreamApi:
         assert r.status_code == 404
 
 
-def test_routing_yaml_all_minimax_primary():
+def test_routing_primary_channels():
     from app.config import load_config
 
     routing = load_config().routing
-    for step in ["intro", "outline", "plot", "draft", "polish", "review", "debug", "chore", "refine"]:
+    # 创作主路全 MiniMax；chore（拆解抽取类）主路本地 trae_exec 不花钱、MiniMax 兜底
+    for step in ["intro", "outline", "plot", "draft", "polish", "review", "debug", "refine"]:
         assert routing[step]["primary"] == "minimax", f"{step} 主路应为 minimax"
         assert routing[step]["fallback"] == "trae_exec"
+    assert routing["chore"]["primary"] == "trae_exec", "chore 主路应为 trae_exec"
+    assert routing["chore"]["fallback"] == "minimax"
 
 
 class TestRefineStreamApi:

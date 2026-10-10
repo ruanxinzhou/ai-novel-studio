@@ -3,7 +3,7 @@
 M1-T5：Prompt 工坊（查看/编辑/重置/干跑）。
 """
 from __future__ import annotations
-
+import hashlib
 import json
 import threading
 from pathlib import Path
@@ -16,6 +16,8 @@ from pydantic import BaseModel
 
 from ..config import REPO
 from ..context import Material, MaterialFamily
+from ..corpus import add_excerpts as corpus_add_excerpts
+from ..corpus import article_exists as corpus_article_exists
 from ..corpus import count as corpus_count
 from ..corpus import list_tags, list_types, search as corpus_search
 from ..entities import ENTITY_TYPES, TYPE_LABELS, EntityStore, extract_entities
@@ -1014,6 +1016,53 @@ def import_adopt_outline(pid: str) -> dict:
     v = _project_store.adopt(pid, "outline", x_pairs=[], y=y,
                              note=f"导入拆解汇总（{len(outlines)} 章）")
     return {"seq": v.seq, "chapters": len(outlines)}
+
+
+class ImportToCorpusIn(BaseModel):
+    title: str                        # 书名（语料标题与标签用）
+    tags: list[str] = []              # 附加标签：类型/题材等
+    file_path: str = ""               # 来源备注
+
+
+@app.post("/api/projects/{pid}/import/to_corpus")
+def import_to_corpus(pid: str, body: ImportToCorpusIn) -> dict:
+    """把已拆解完成的章大纲存入范文语料库：每章一条 + 全书脉络一条。
+
+    长篇大纲入语料后，运行台「融合再创作」可检索注入——借鉴他书的节奏
+    结构与伏笔布局再创作。同一书名只能存一次（重复会被拒）。
+    """
+    _require_project(pid)
+    outlines = _import_journal_for(pid).completed_outlines()
+    if not outlines:
+        raise HTTPException(status_code=422, detail="尚无已完成的章大纲，请先拆解")
+    title = body.title.strip() or "未命名长篇"
+    slug = "novel-" + hashlib.md5(title.encode("utf-8")).hexdigest()[:8]
+    if corpus_article_exists(slug):
+        raise HTTPException(status_code=409, detail=f"《{title}》的大纲已在语料库中，请勿重复存入")
+    tags = ["长篇", title, *body.tags]
+    rows = [
+        {
+            "excerpt_id": f"{slug}-ch{no:04d}",
+            "article_id": slug,
+            "title": f"{title}·第{no}章",
+            "file_path": body.file_path,
+            "excerpt_type": "长篇章节大纲",
+            "tags": tags,
+            "text": f"第{no}章\n{outline}",
+        }
+        for no, outline in outlines
+    ]
+    rows.append({
+        "excerpt_id": f"{slug}-arc",
+        "article_id": slug,
+        "title": f"{title}·全书脉络",
+        "file_path": body.file_path,
+        "excerpt_type": "长篇全书大纲",
+        "tags": tags,
+        "text": "\n\n".join(f"第{no}章 {outline}" for no, outline in outlines),
+    })
+    corpus_add_excerpts(rows)
+    return {"added": len(rows), "chapters": len(outlines), "title": title}
 
 
 # ---- M5 引导式写作：主路向导 + 今日章台 ----

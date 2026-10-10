@@ -112,3 +112,44 @@ def count(
 ) -> int:
     """组合过滤后的总条数（分页 total 用）。"""
     return sum(1 for e in _load_all() if _matches(e, excerpt_type, tag, keyword))
+
+
+def article_exists(article_id: str) -> bool:
+    """同一 article_id 是否已入库（拆书防重复导入用）。"""
+    return any(e.article_id == article_id for e in _load_all())
+
+
+_FIELDS = ("excerpt_id", "article_id", "title", "file_path",
+           "excerpt_type", "tags", "para_start", "para_end", "text")
+
+
+def add_excerpts(rows: list[dict], path: Path | None = None) -> list[str]:
+    """把拆解出的长篇大纲追加进语料库（CSV append）。
+
+    rows 每条至少含 excerpt_id/article_id/title/excerpt_type/text；
+    tags 可给 list 或 "|" 分隔 str；file_path/para_start/para_end 可缺省。
+    写默认路径后清缓存使检索立即可见。返回写入的 excerpt_id 列表。
+    """
+    if not rows:
+        return []
+    target = Path(path) if path else CORPUS_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    new_file = not target.exists()
+    ids: list[str] = []
+    with target.open("a", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        if new_file:
+            w.writerow(_FIELDS)
+        for r in rows:
+            tags = r.get("tags", "")
+            if isinstance(tags, (list, tuple)):
+                tags = "|".join(str(t) for t in tags if t)
+            w.writerow([
+                r["excerpt_id"], r["article_id"], r.get("title", ""),
+                r.get("file_path", ""), r["excerpt_type"], tags,
+                r.get("para_start", ""), r.get("para_end", ""), r["text"],
+            ])
+            ids.append(r["excerpt_id"])
+    if path is None:
+        _load_all.cache_clear()
+    return ids

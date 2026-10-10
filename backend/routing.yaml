@@ -11,5 +11,6 @@ routing:
   polish:       { primary: minimax,    fallback: trae_exec }
   review:       { primary: minimax,    fallback: trae_exec }
   debug:        { primary: minimax,    fallback: trae_exec }
-  chore:        { primary: minimax,    fallback: trae_exec }
   refine:       { primary: minimax,    fallback: trae_exec }
+  # chore = 拆解抽取类（导入拆章大纲、实体抽取）：走本地 trae-cli 不花钱，MiniMax 兜底
+  chore:        { primary: trae_exec,  fallback: minimax }
