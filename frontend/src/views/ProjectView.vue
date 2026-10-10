@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 项目工作台：五层分步导航，逐层回看/编辑/采纳/回滚——一本小说一条主线
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   LAYER_LABELS,
@@ -23,6 +23,43 @@ const adoptNote = ref('')
 const busy = ref(false)
 const exporting = ref(false)
 const lastExportDir = ref('')
+
+// ---------- 章节拆分：剧情/正文等长文本按「第N章」分段，查看与编辑只装当前章 ----------
+// split 保留每段原始换行，join('') 恢复全文完全无损
+const SEG_HEAD = /^第\s*\d+\s*章.*$/m
+
+function splitSegments(text: string): string[] {
+  if (!text || !SEG_HEAD.test(text)) return text ? [text] : []
+  return text.split(/(?=^第\s*\d+\s*章.*$)/m).filter((p) => p.trim())
+}
+
+function segTitle(s: string): string {
+  const m = s.match(SEG_HEAD)
+  return m ? m[0].trim().slice(0, 30) : '卷首/前言'
+}
+
+const viewSegs = computed(() => (version.value ? splitSegments(version.value.y) : []))
+const viewSeg = ref(0)
+
+const editSegs = computed(() => (editing.value ? splitSegments(editText.value) : []))
+const editSeg = ref(0)
+const edited = ref<Record<number, string>>({}) // 已改章节覆盖表
+const editDirtyCount = computed(() => Object.keys(edited.value).length)
+
+// 当前编辑章：未改过取原文，改动实时存入覆盖表（切章不丢内容）
+const editCurrentSeg = computed({
+  get: () => edited.value[editSeg.value] ?? editSegs.value[editSeg.value] ?? '',
+  set: (v: string) => {
+    edited.value[editSeg.value] = v
+  },
+})
+
+// 采纳用全文：覆盖表套回分段后无损拼接
+const editFullText = computed(() =>
+  editSegs.value.length > 1
+    ? editSegs.value.map((s, i) => edited.value[i] ?? s).join('')
+    : editText.value,
+)
 
 // 版本历史服务端分页：切层回第 1 页
 const historyPage = ref(1)
@@ -65,6 +102,7 @@ async function showLayer(layer: string, seq?: number) {
   activeLayer.value = layer
   viewingSeq.value = seq ?? null
   editing.value = false
+  viewSeg.value = 0
   if (!currentProjectId.value) return
   try {
     const r = await projectsApi.layer(currentProjectId.value, layer, seq, historyPage.value, historyPageSize)
@@ -79,11 +117,13 @@ async function showLayer(layer: string, seq?: number) {
 function startEdit() {
   editText.value = version.value?.y ?? ''
   adoptNote.value = ''
+  edited.value = {}
+  editSeg.value = 0
   editing.value = true
 }
 
 async function adopt() {
-  if (!currentProjectId.value || !editText.value.trim()) {
+  if (!currentProjectId.value || !editFullText.value.trim()) {
     ElMessage.warning('内容不能为空')
     return
   }
@@ -92,7 +132,7 @@ async function adopt() {
     await projectsApi.adopt(
       currentProjectId.value,
       activeLayer.value,
-      editText.value,
+      editFullText.value,
       version.value?.x_pairs ?? [],
       adoptNote.value,
     )
@@ -192,7 +232,19 @@ function historyPageChange(p: number) {
         </template>
 
         <template v-if="editing">
-          <el-input v-model="editText" type="textarea" :rows="16" />
+          <template v-if="editSegs.length > 1">
+            <div class="seg-nav">
+              <el-button size="small" :disabled="editSeg === 0" @click="editSeg--">上一章</el-button>
+              <el-select v-model="editSeg" filterable size="small" style="width: 230px">
+                <el-option v-for="(s, i) in editSegs" :key="i" :value="i" :label="segTitle(s)" />
+              </el-select>
+              <el-button size="small" :disabled="editSeg >= editSegs.length - 1" @click="editSeg++">下一章</el-button>
+              <span class="seg-pos">{{ editSeg + 1 }}/{{ editSegs.length }} 章</span>
+              <el-tag v-if="editDirtyCount" type="warning" size="small">已改 {{ editDirtyCount }} 章</el-tag>
+            </div>
+            <el-input v-model="editCurrentSeg" type="textarea" :autosize="{ minRows: 12, maxRows: 24 }" />
+          </template>
+          <el-input v-else v-model="editText" type="textarea" :rows="16" />
           <el-input v-model="adoptNote" placeholder="版本备注（如：调整了第3章节奏）" style="margin-top: 8px" />
           <div style="margin-top: 8px">
             <el-button type="primary" :loading="busy" @click="adopt">采纳为新版本</el-button>
@@ -200,7 +252,18 @@ function historyPageChange(p: number) {
           </div>
         </template>
         <template v-else-if="version">
-          <pre style="white-space: pre-wrap; font-family: inherit; line-height: 1.9; max-height: 480px; overflow: auto">{{ version.y }}</pre>
+          <template v-if="viewSegs.length > 1">
+            <div class="seg-nav">
+              <el-button size="small" :disabled="viewSeg === 0" @click="viewSeg--">上一章</el-button>
+              <el-select v-model="viewSeg" filterable size="small" style="width: 230px">
+                <el-option v-for="(s, i) in viewSegs" :key="i" :value="i" :label="segTitle(s)" />
+              </el-select>
+              <el-button size="small" :disabled="viewSeg >= viewSegs.length - 1" @click="viewSeg++">下一章</el-button>
+              <span class="seg-pos">{{ viewSeg + 1 }}/{{ viewSegs.length }} 章（共 {{ version.y.length.toLocaleString() }} 字）</span>
+            </div>
+            <pre class="seg-pane">{{ viewSegs[viewSeg] }}</pre>
+          </template>
+          <pre v-else class="seg-pane">{{ version.y }}</pre>
           <el-collapse v-if="version.x_pairs.length" style="margin-top: 8px">
             <el-collapse-item title="输入 x 块">
               <div v-for="(p, i) in version.x_pairs" :key="i" style="font-size: 13px; color: #666; margin-bottom: 4px">
@@ -257,5 +320,24 @@ function historyPageChange(p: number) {
 }
 .layer-item.active {
   background: #ecf5ff;
+}
+.seg-nav {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.seg-pos {
+  font-size: 12px;
+  color: #888;
+}
+.seg-pane {
+  white-space: pre-wrap;
+  font-family: inherit;
+  line-height: 1.9;
+  max-height: 520px;
+  overflow: auto;
+  margin: 0;
 }
 </style>
