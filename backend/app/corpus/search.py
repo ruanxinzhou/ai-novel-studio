@@ -153,3 +153,34 @@ def add_excerpts(rows: list[dict], path: Path | None = None) -> list[str]:
     if path is None:
         _load_all.cache_clear()
     return ids
+
+
+def replace_article(article_id: str, rows: list[dict], path: Path | None = None) -> int:
+    """删除同 article_id 的旧条目后整体重写（拆书重复导入 = 更新而非报错）。
+
+    拆书先试点后全量：第二次导入（更多章标签）应覆盖第一次的条目。
+    返回写入条数。
+    """
+    target = Path(path) if path else CORPUS_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    keep: list[dict] = []
+    if target.exists():
+        with target.open(encoding="utf-8", newline="") as f:
+            keep = [r for r in csv.DictReader(f) if r.get("article_id") != article_id]
+    with target.open("w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(_FIELDS)
+        for r in keep:
+            w.writerow([r.get(k, "") for k in _FIELDS])
+        for r in rows:
+            tags = r.get("tags", "")
+            if isinstance(tags, (list, tuple)):
+                tags = "|".join(str(t) for t in tags if t)
+            w.writerow([
+                r["excerpt_id"], r["article_id"], r.get("title", ""),
+                r.get("file_path", ""), r["excerpt_type"], tags,
+                r.get("para_start", ""), r.get("para_end", ""), r["text"],
+            ])
+    if path is None:
+        _load_all.cache_clear()
+    return len(rows)

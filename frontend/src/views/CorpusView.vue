@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 范文语料检索：类型/标签/关键词，用于写作前借结构
-import { onMounted, ref } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { corpusApi, type Excerpt } from '../api'
 
@@ -14,6 +14,18 @@ const total = ref(0)
 const searching = ref(false)
 const page = ref(1)
 const pageSize = 10
+
+// 导入拆书目录（tools/chaishu 产物）
+const impVisible = ref(false)
+const impLoading = ref(false)
+const impForm = reactive({ dir: '', title: '', tags: '' })
+const impResult = ref<{
+  added: number
+  by_type: Record<string, number>
+  title: string
+  chapters_total: number
+  labeled: number
+} | null>(null)
 
 onMounted(async () => {
   try {
@@ -47,6 +59,29 @@ async function doSearch(p = 1) {
     searching.value = false
   }
 }
+
+async function doImport() {
+  if (!impForm.dir.trim()) {
+    ElMessage.warning('请填写拆书工具的输出目录')
+    return
+  }
+  impLoading.value = true
+  impResult.value = null
+  try {
+    const extra = impForm.tags.split(/[,，\s]+/).filter(Boolean)
+    const r = await corpusApi.importChaishu(impForm.dir.trim(), impForm.title.trim(), extra)
+    impResult.value = r
+    ElMessage.success(`已导入《${r.title}》${r.added} 条`)
+    const [t, g] = await Promise.all([corpusApi.types(), corpusApi.tags()])
+    types.value = t.types
+    tags.value = g.tags
+    await doSearch(1)
+  } catch (e) {
+    ElMessage.error(`导入失败：${(e as Error).message}`)
+  } finally {
+    impLoading.value = false
+  }
+}
 </script>
 
 <template>
@@ -67,6 +102,7 @@ async function doSearch(p = 1) {
       </el-form-item>
       <el-form-item>
         <el-button type="primary" :loading="searching" @click="doSearch()">检索</el-button>
+        <el-button @click="impResult = null; impVisible = true">导入拆书目录</el-button>
       </el-form-item>
     </el-form>
 
@@ -94,5 +130,33 @@ async function doSearch(p = 1) {
         @current-change="(p: number) => doSearch(p)"
       />
     </div>
+
+    <el-dialog v-model="impVisible" title="导入拆书目录" width="580px">
+      <div style="color: #888; font-size: 12px; line-height: 1.8; margin-bottom: 10px">
+        导入独立拆书工具（tools/chaishu）的输出目录，生成三类条目：节奏体检表、全书脉络（每 100 章一块）、单章大纲。
+        同书重复导入 = 覆盖更新（先试点后全量可直接重导）。
+      </div>
+      <el-form label-width="80px">
+        <el-form-item label="目录路径" required>
+          <el-input v-model="impForm.dir" placeholder="拆书 CLI 的输出目录，如 C:\Users\你\Downloads\拆书-书名" />
+        </el-form-item>
+        <el-form-item label="书名">
+          <el-input v-model="impForm.title" placeholder="留空则从目录名「拆书-」之后推断" />
+        </el-form-item>
+        <el-form-item label="附加标签">
+          <el-input v-model="impForm.tags" placeholder="逗号分隔，可选，如：克苏鲁, 无限流" />
+        </el-form-item>
+      </el-form>
+      <el-alert v-if="impResult" type="success" :closable="false">
+        <template #title>
+          《{{ impResult.title }}》共导入 {{ impResult.added }} 条（已标注 {{ impResult.labeled }}/{{ impResult.chapters_total }} 章）
+        </template>
+        <el-tag v-for="(n, t) in impResult.by_type" :key="t" size="small" style="margin: 4px 6px 0 0">{{ t }} ×{{ n }}</el-tag>
+      </el-alert>
+      <template #footer>
+        <el-button @click="impVisible = false">关闭</el-button>
+        <el-button type="primary" :loading="impLoading" @click="doImport">导入</el-button>
+      </template>
+    </el-dialog>
   </el-card>
 </template>

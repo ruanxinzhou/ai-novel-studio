@@ -20,6 +20,7 @@ from ..corpus import add_excerpts as corpus_add_excerpts
 from ..corpus import article_exists as corpus_article_exists
 from ..corpus import count as corpus_count
 from ..corpus import list_tags, list_types, search as corpus_search
+from ..corpus import replace_article as corpus_replace_article
 from ..entities import ENTITY_TYPES, TYPE_LABELS, EntityStore, extract_entities
 from ..entities.vault import export_vault
 from ..importer import ImportJournal, analyze_chapter, split_import
@@ -1063,6 +1064,128 @@ def import_to_corpus(pid: str, body: ImportToCorpusIn) -> dict:
     })
     corpus_add_excerpts(rows)
     return {"added": len(rows), "chapters": len(outlines), "title": title}
+
+
+class ChaishuImportIn(BaseModel):
+    dir: str                          # 拆书 CLI 输出目录（拆书-书名/）
+    title: str = ""                   # 书名（缺省从目录名「拆书-」之后推断）
+    tags: list[str] = []              # 附加标签：题材/类型等
+
+
+_CHAISHU_EVENT_CN = {"shuangdian": "爽点", "foreshadow": "伏笔",
+                     "upgrade": "升级", "other": "转折"}
+_ARC_CHUNK = 100  # 全书脉络每块章数：装配器按预算注入，单块不能过大
+
+
+def _load_jsonl(path: Path) -> list[dict]:
+    out: list[dict] = []
+    if not path.exists():
+        return out
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+@app.post("/api/corpus/import_chaishu")
+def corpus_import_chaishu(body: ChaishuImportIn) -> dict:
+    """导入独立拆书 CLI（tools/chaishu）的产物目录到范文语料库。
+
+    读取 chapters.jsonl / labels.jsonl / report.md，生成三类条目：
+    - 长篇节奏分析 ×1：report.md 全文（聚合统计 + 诊断，无具体情节）
+    - 长篇全书大纲 ×N：全部章标题骨架（未拆章仅标题），100 章一块
+    - 长篇章节大纲 ×M：每个已标注章一条（概要 + 钩子 + 事件）
+    同书重复导入 = 覆盖更新（先试点后全量的自然路径）。
+    """
+    d = Path(body.dir)
+    if not d.is_dir():
+        raise HTTPException(status_code=422, detail=f"目录不存在：{body.dir}")
+    chapters = _load_jsonl(d / "chapters.jsonl")
+    if not chapters:
+        raise HTTPException(status_code=422,
+                            detail="目录中没有 chapters.jsonl（或为空），请确认是拆书工具的输出目录")
+    labels = {int(o["no"]): o for o in _load_jsonl(d / "labels.jsonl") if "no" in o}
+    report_text = ""
+    rp = d / "report.md"
+    if rp.exists():
+        report_text = rp.read_text(encoding="utf-8").strip()
+
+    title = body.title.strip()
+    if not title:
+        title = d.name[3:] if d.name.startswith("拆书-") else d.name
+    if not title:
+        raise HTTPException(status_code=422, detail="无法从目录名推断书名，请填写")
+
+    slug = "chaishu-" + hashlib.md5(title.encode("utf-8")).hexdigest()[:8]
+    tags = ["拆书", "长篇", title, *body.tags]
+    rows: list[dict] = []
+    if report_text:
+        rows.append({
+            "excerpt_id": f"{slug}-report", "article_id": slug,
+            "title": f"{title}·节奏体检表", "file_path": str(d),
+            "excerpt_type": "长篇节奏分析", "tags": tags, "text": report_text,
+        })
+
+    def ch_name(no: int) -> str:
+        return f"第{no}章" if no else "前言"
+
+    labeled_n = sum(1 for c in chapters if c.get("no") in labels)
+    n_chunks = (len(chapters) + _ARC_CHUNK - 1) // _ARC_CHUNK
+    for i in range(n_chunks):
+        chunk = chapters[i * _ARC_CHUNK:(i + 1) * _ARC_CHUNK]
+        lines = [f"《{title}》全书脉络（已拆 {labeled_n}/{len(chapters)} 章，"
+                 f"本块 {ch_name(chunk[0].get('no', 0))}–{ch_name(chunk[-1].get('no', 0))}）", ""]
+        vol = None
+        for c in chunk:
+            no = c.get("no", 0)
+            if c.get("volume") != vol:
+                vol = c.get("volume")
+                lines.append(f"【{vol}】")
+            lb = labels.get(no)
+            if lb:
+                lines.append(f"{ch_name(no)} {c.get('title', '')}：{lb.get('summary', '')}")
+            else:
+                lines.append(f"{ch_name(no)} {c.get('title', '')}")
+        rows.append({
+            "excerpt_id": f"{slug}-arc{i:03d}", "article_id": slug,
+            "title": f"{title}·全书脉络 {i + 1}/{n_chunks}",
+            "file_path": str(d), "excerpt_type": "长篇全书大纲",
+            "tags": tags, "text": "\n".join(lines),
+        })
+
+    for c in chapters:
+        no = c.get("no", 0)
+        lb = labels.get(no)
+        if not lb:
+            continue
+        evs = "；".join(
+            f"{e.get('note', '')}（{_CHAISHU_EVENT_CN.get(e.get('type', ''), e.get('type', ''))}）"
+            for e in lb.get("events", []))
+        rows.append({
+            "excerpt_id": f"{slug}-ch{no:04d}", "article_id": slug,
+            "title": f"{title}·{ch_name(no)} {c.get('title', '')}",
+            "file_path": str(d), "excerpt_type": "长篇章节大纲",
+            "tags": tags,
+            "text": (f"{ch_name(no)} {c.get('title', '')}（卷：{c.get('volume', '正文')}）\n"
+                     f"概要：{lb.get('summary', '')}\n"
+                     f"断章钩：{'有' if lb.get('hook') else '无'}｜"
+                     f"升级：{'有' if lb.get('power_up') else '无'}\n"
+                     f"事件：{evs or '无'}"),
+        })
+
+    if not rows:
+        raise HTTPException(status_code=422, detail="目录中没有可导入的内容（无 report.md 且无已标注章）")
+    n = corpus_replace_article(slug, rows)
+    by_type: dict[str, int] = {}
+    for r in rows:
+        by_type[r["excerpt_type"]] = by_type.get(r["excerpt_type"], 0) + 1
+    return {"added": n, "by_type": by_type, "title": title, "article_id": slug,
+            "chapters_total": len(chapters), "labeled": labeled_n}
 
 
 # ---- M5 引导式写作：主路向导 + 今日章台 ----

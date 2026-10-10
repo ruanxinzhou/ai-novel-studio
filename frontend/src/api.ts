@@ -231,6 +231,18 @@ export const corpusApi = {
     }
     return req<{ total: number; excerpts: Excerpt[] } & PageMeta>(`/api/corpus/search?${p}`)
   },
+  importChaishu: (dir: string, title?: string, tags?: string[]) =>
+    req<{
+      added: number
+      by_type: Record<string, number>
+      title: string
+      article_id: string
+      chapters_total: number
+      labeled: number
+    }>('/api/corpus/import_chaishu', {
+      method: 'POST',
+      body: JSON.stringify({ dir, title: title ?? '', tags: tags ?? [] }),
+    }),
 }
 
 // SSE 公共消费器：解析 thinking/delta/resumed/block_done/notice/result/fail 事件
