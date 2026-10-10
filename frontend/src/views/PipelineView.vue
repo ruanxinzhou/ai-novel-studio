@@ -679,9 +679,10 @@ async function saveXToProject() {
                 <div style="display: flex; gap: 8px; margin-top: 8px; align-items: flex-start">
                   <el-input
                     v-model="xAdjustReq"
-                    size="small"
-                    placeholder="不重新生成、直接按要求调整上面内容：例「限制角色获得技能的频率为每10章一次」「第5章冲突太弱，加强转折」"
-                    @keyup.enter="doAdjustX"
+                    type="textarea"
+                    :rows="3"
+                    style="flex: 1"
+                    placeholder="不重新生成、直接按要求调整上面内容（可写多行，逐条列要求）：&#10;· 限制角色获得技能的频率为每10章一次&#10;· 第5章冲突太弱，加强转折"
                   />
                   <el-button size="small" type="warning" plain :loading="xAdjusting" @click="doAdjustX">
                     按要求调整
