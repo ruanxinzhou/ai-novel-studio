@@ -19,6 +19,23 @@ def client(tmp_path, monkeypatch):
         return len(rows)
 
     monkeypatch.setattr("app.api.main.corpus_replace_article", fake_replace)
+    # 提炼通道打桩：不真调 LLM（distill 默认开，绝不能在测试里等模型）
+    from app.providers.base import LLMResponse, Usage
+
+    def fake_chore(step: str = "chore"):
+        class _P:
+            name = f"fake:{step}"
+            default_model = None
+
+            @staticmethod
+            def chat(messages, model=None, max_tokens=None, extra=None):
+                return LLMResponse(
+                    text='[{"title": "章末断钩", "technique": "每章结尾把主角停在具体动作上，不写情绪总结。", "when": "章末收束时"}]',
+                    usage=Usage(input_tokens=1, output_tokens=1))
+
+        return _P()
+
+    monkeypatch.setattr("app.api.main._chore_provider", fake_chore)
     monkeypatch.setattr("app.api.main._project_store", ProjectStore(tmp_path / "projects"))
     monkeypatch.setattr("app.api.main._journal_dir", lambda pid: tmp_path / "runs" / pid)
     monkeypatch.setattr("app.api.main._markers_for",
@@ -34,7 +51,9 @@ def client(tmp_path, monkeypatch):
                         lambda pid: __import__("app.wizard", fromlist=["DeskStore"]).DeskStore(
                             tmp_path / "dsk" / f"{pid}.json"))
     from app.api.main import app
-    return TestClient(app)
+    c = TestClient(app)
+    c.corpus_written = written  # type: ignore[attr-defined]
+    return c
 
 
 def _make_chaishu_dir(tmp_path, n_chapters=5, labeled=(1, 3), with_body=True,
@@ -154,3 +173,59 @@ class TestChaishuReferenceProject:
         assert r["entities_preextracted"] is False
         # 伏笔仍从 labels 直转
         assert r["entities"]["foreshadow"] == 1 and r["entities"]["character"] == 0
+
+
+class TestDistillCards:
+    """⑤拆书闭环：导入时提炼写法卡入语料库（可检索注入）。"""
+
+    def test_distill_writes_cards_to_corpus(self, client, tmp_path):
+        d = _make_chaishu_dir(tmp_path)
+        r = client.post("/api/corpus/import_chaishu", json={"dir": str(d)}).json()
+        assert r["distill"]["status"] == "ok" and r["distill"]["cards"] == 1
+        # 写法卡单独成篇（article = slug-cards），重导同书覆盖不残留旧卡
+        rows = client.corpus_written[f"{r['article_id']}-cards"]
+        assert rows[0]["excerpt_type"] == "写法卡"
+        assert rows[0]["title"] == "测试参考书·写法卡·章末断钩"
+        assert "拆书" in rows[0]["tags"] and "写法卡" in rows[0]["tags"]
+        assert "章末断钩——" in rows[0]["text"] and "适用场景" in rows[0]["text"]
+
+    def test_distill_off_skips(self, client, tmp_path):
+        d = _make_chaishu_dir(tmp_path)
+        r = client.post("/api/corpus/import_chaishu",
+                        json={"dir": str(d), "distill": False}).json()
+        assert r["distill"]["status"] == "skipped"
+        assert not [k for k in client.corpus_written if k.endswith("-cards")]
+
+    def test_distill_failure_tolerated(self, client, tmp_path, monkeypatch):
+        def boom(step: str = "chore"):
+            class _P:
+                name = "boom"
+                default_model = None
+
+                @staticmethod
+                def chat(messages, model=None, max_tokens=None, extra=None):
+                    raise RuntimeError("channel down")
+
+            return _P()
+
+        monkeypatch.setattr("app.api.main._chore_provider", boom)
+        d = _make_chaishu_dir(tmp_path)
+        r = client.post("/api/corpus/import_chaishu", json={"dir": str(d)})
+        # 提炼挂了不影响导入本体
+        assert r.status_code == 200
+        assert r.json()["distill"]["status"] == "failed"
+        assert r.json()["project_id"]
+
+    def test_distill_material_caps_long_books(self):
+        from app.api.main import _DISTILL_CAP_CHARS, _distill_material
+        chapters = [{"no": i, "title": f"c{i}"} for i in range(1, 3000)]
+        labels = {i: {"summary": "概要" * 40, "hook": True, "events": []}
+                  for i in range(1, 3000)}
+        m = _distill_material("", chapters, labels)
+        assert len(m) < _DISTILL_CAP_CHARS + 2_000
+        # 开篇保留全量 + 抽样说明
+        assert "第1章" in m and "第30章" in m
+        assert "保留全量" in m
+        # 无标注章：只有体检表，概要块不出现
+        m2 = _distill_material("体检表", [{"no": 1, "title": "x"}], {})
+        assert m2 == "【节奏体检表】\n体检表"

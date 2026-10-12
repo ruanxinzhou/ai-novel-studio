@@ -150,17 +150,27 @@ def build_state_materials(project_store, entity_store: EntityStore,
     return mats
 
 
-# ---- 开章核对单（章台写第 N 章前的机器自检） ----
+# ---- 开章任务书（章台写第 N 章前的机器自检，五段结构） ----
 
 CHECKLIST_SECTION_LIMITS = {"character": 20, "location": 10, "item": 12, "plotline": 8}
 CHECKLIST_FORESHADOW_LISTED = 15     # 到期伏笔最多列多少条
-FORESHADOW_DUE_AFTER = 8             # 账龄超过多少章标「重点兑现」
+FORESHADOW_DUE_AFTER = 8             # 账龄超过多少章 → 本章必须处理
+FORESHADOW_HARD_AFTER = 12           # 账龄超过多少章 → 硬债务（最老一批尽快处理）
+OPENING_TAIL_CHARS = 400             # 【开篇委托】带的上一章结尾长度
 
 # 兑现节奏（P2③）：空账期用拆书经验目标线垫底，攒了自家数据用自家的
 PAYOFF_TARGET_SMALL = 3              # 小爽点目标章距（天蚕土豆：2-3 章一次）
 PAYOFF_TARGET_MEDIUM = 12            # 中兑现目标章距（10-15 章一次取中值）
 PAYOFF_HUNGER_AFTER = 4              # 连续多少章无兑现报「节奏饥饿」
 _PAID_SCALES = ("small", "medium", "climax")
+
+# 三线节奏（Strand）：quest 主线 / fire 冲突 / bond 羁绊——常量归本模块，
+# wizard.store 仅引用做入参校验（运行时反向 import 会成环）
+STRANDS = ("quest", "fire", "bond")
+STRAND_LABELS = {"quest": "主线", "fire": "冲突", "bond": "羁绊"}
+STRAND_WINDOW = 20                   # 占比统计窗口：最近多少个已写章
+STRAND_TARGET_SHARES = {"quest": 0.6, "fire": 0.2, "bond": 0.2}
+STRAND_GAP_WARNS = {"quest": 5, "fire": 10, "bond": 15}   # 断档红线：连续 N 个已写章未推进
 
 
 def _payoff_records(desk: DeskStore, chapter: int) -> list[tuple[int, str]]:
@@ -173,6 +183,22 @@ def _payoff_records(desk: DeskStore, chapter: int) -> list[tuple[int, str]]:
         if w is not None and w.payoff:
             out.append((no, w.payoff))
     return out
+
+
+def _prior_written(desk: DeskStore, chapter: int) -> list[int]:
+    """截至上一章、已有剧情或正文的章号升序列表（plot 算开工，draft 算成文）。"""
+    out = []
+    for no in desk.all_nos():
+        if no >= chapter:
+            continue
+        work = desk.get(no)
+        if work is not None and (_stage_text(work, "plot") or _stage_text(work, "draft")):
+            out.append(no)
+    return out
+
+
+def _strand_tag_map(desk: DeskStore, nos: list[int]) -> dict[int, list[str]]:
+    return {no: list(getattr(desk.get(no), "strands", []) or []) for no in nos}
 
 
 def _rhythm_section(desk: DeskStore, chapter: int, written: bool) -> str | None:
@@ -215,6 +241,83 @@ def rhythm_hunger(desk: DeskStore, chapter: int) -> str | None:
     return None
 
 
+# ---- 三线节奏（纯数据推导） ----
+
+def strand_warnings(desk: DeskStore, chapter: int) -> list[str]:
+    """三线断档/占比报警（审稿附加项，不走 LLM）。
+
+    断档：某线连续 STRAND_GAP_WARNS 个已写章未推进 → 报警。
+    占比：近 STRAND_WINDOW 个已写章中某线覆盖率不足目标一半（≥10 章样本）→ 报警。
+    打卡率低（近 20 章超三成没点三线标签）→ 提示补打卡。
+    """
+    prior = _prior_written(desk, chapter)
+    if not prior:
+        return []
+    tag_map = _strand_tag_map(desk, prior)
+    warns: list[str] = []
+    for strand in STRANDS:
+        streak = 0
+        for no in reversed(prior):
+            if strand in tag_map[no]:
+                break
+            streak += 1
+        if streak >= STRAND_GAP_WARNS[strand]:
+            warns.append(f"{STRAND_LABELS[strand]}线断档：已连续 {streak} 章未推进"
+                         f"（红线 {STRAND_GAP_WARNS[strand]} 章），本章宜安排")
+    window = prior[-STRAND_WINDOW:]
+    if len(window) >= 10:
+        untagged = sum(1 for no in window if not tag_map[no])
+        if untagged * 3 > len(window):
+            warns.append(f"近 {len(window)} 章有 {untagged} 章未点三线标签——"
+                         "定稿时顺手点选本章推进了 主线/冲突/羁绊 哪些线，占比账才准")
+        for strand in STRANDS:
+            share = sum(1 for no in window if strand in tag_map[no]) / len(window)
+            target = STRAND_TARGET_SHARES[strand]
+            if share < target / 2:
+                warns.append(f"{STRAND_LABELS[strand]}线近 {len(window)} 章覆盖率 {share:.0%}"
+                             f"（目标约 {target:.0%}）——偶尔回头推一推，别一直冷着")
+    return warns
+
+
+def _strand_section(desk: DeskStore, chapter: int, written_nos: list[int]) -> str | None:
+    """【怎么写更顺】里的三线近况块：每条线距上次推进几章 + 本章宜覆盖提示。"""
+    prior = [no for no in written_nos if no < chapter]
+    if not prior:
+        return None
+    tag_map = _strand_tag_map(desk, prior)
+    if not any(tag_map.values()):
+        return ("三线近况：本书尚未记录三线标签（定稿时点选本章推进了 主线/冲突/羁绊 哪些线）。"
+                "参考配比：主线约六成章节要推，冲突与羁绊各约两成——主线断 5 章、冲突断 10 章、"
+                "羁绊断 15 章就算断档。")
+    lines = []
+    for strand in STRANDS:
+        label = STRAND_LABELS[strand]
+        lasts = [no for no in prior if strand in tag_map[no]]
+        if lasts:
+            last = max(lasts)
+            gap = chapter - last
+            seg = f"- {label}线：距上次推进 {gap} 章（第 {last} 章）"
+            if gap > STRAND_GAP_WARNS[strand]:
+                seg += "——已超断档红线，本章宜安排推进"
+        else:
+            seg = f"- {label}线：本书尚未推进过"
+        lines.append(seg)
+    return "三线近况（参考配比：主线约六成、冲突与羁绊各约两成）：\n" + "\n".join(lines)
+
+
+def _opening_commission(desk: DeskStore, chapter: int) -> str | None:
+    """【开篇委托】：上一章实际结尾 + 接棒要求。"""
+    for no in sorted((n for n in desk.all_nos() if n < chapter), reverse=True):
+        work = desk.get(no)
+        tail = _stage_text(work, "polish") or _stage_text(work, "draft")
+        if not tail:
+            continue
+        body = truncate_tail_at_sentence(tail, OPENING_TAIL_CHARS)
+        return ("【开篇委托】（上一章实际写到这——本章开篇必须接住它的变化，不另起炉灶）\n"
+                f"第{no}章结尾：{body}")
+    return None
+
+
 def _written_nos(desk: DeskStore) -> list[int]:
     """已有剧情或正文的章（plot 阶段算开工，draft 算成文）。"""
     out = []
@@ -227,18 +330,25 @@ def _written_nos(desk: DeskStore) -> list[int]:
 
 def build_chapter_checklist(entity_store: EntityStore, desk: DeskStore,
                             chapter: int, outline_total: int) -> Material | None:
-    """开章核对单：写第 N 章前的 REQUIRED 自检材料。
+    """开章任务书：写第 N 章前的 REQUIRED 自检材料，五段结构。
 
-    四块——本章位置（进度与跳章提醒）、节奏位置（距上次兑现几章，
-    无自家记录退化为目标线）、实体快照（截至上一章的既有状态，
-    含已退场/未出场标注）、到期伏笔（按账龄排序，越老越该兑现）。
-    四块全空（开书第一章且无设定）返回 None，不注入空核对单。
+    ①开篇委托（上一章结尾，开篇接住变化）②本章故事（进度与跳章提醒）
+    ③本章人物与设定（截至上一章的实体快照，含已退场/未出场标注）
+    ④怎么写更顺（节奏位置 + 三线近况 + 到期伏笔按账龄排急缓）
+    ⑤收在哪里（章末收束要求）。五段全空（开书第一章且无设定）返回 None。
     """
     sections: list[str] = []
 
-    # 排除本章：写完本章剧情后重跑同阶段，核对单不变才能命中幂等收据
+    # 排除本章：写完本章剧情后重跑同阶段，任务书不变才能命中幂等收据
     written = [no for no in _written_nos(desk) if no != chapter]
     prior_written = [no for no in written if no < chapter]
+
+    # ① 开篇委托
+    opening = _opening_commission(desk, chapter)
+    if opening is not None:
+        sections.append(opening)
+
+    # ② 本章故事（位置）
     pos = [f"本章为第 {chapter} 章"]
     if outline_total > 0:
         pos.append(f"大纲已排至第 {outline_total} 章")
@@ -249,12 +359,9 @@ def build_chapter_checklist(entity_store: EntityStore, desk: DeskStore,
         if prior_written and max(prior_written) < chapter - 1:
             pos.append(f"注意：第 {max(prior_written) + 1}-{chapter - 1} 章尚未写，本章是跳章续写")
     if len(pos) > 1:  # 只有「本章为第 N 章」一行时不单独成节
-        sections.append("【本章位置】\n" + "；".join(pos))
+        sections.append("【本章故事】（本章位置）\n" + "；".join(pos))
 
-    rhythm = _rhythm_section(desk, chapter, bool(written))
-    if rhythm is not None:
-        sections.append(rhythm)
-
+    # ③ 本章人物与设定（实体快照）
     for etype in ("character", "location", "item", "plotline"):
         ents = []
         for e in entity_store.list(type=etype):
@@ -282,10 +389,28 @@ def build_chapter_checklist(entity_store: EntityStore, desk: DeskStore,
         sections.append(f"【{TYPE_LABELS[etype]}快照】（截至上一章的既有设定，不得重设或矛盾）\n"
                         + "\n".join(lines))
 
+    # ④ 怎么写更顺：节奏位置 + 三线近况 + 到期伏笔
+    smooth_parts: list[str] = []
+    rhythm = _rhythm_section(desk, chapter, bool(written))
+    if rhythm is not None:
+        smooth_parts.append(rhythm)
+    strand = _strand_section(desk, chapter, written)
+    if strand is not None:
+        smooth_parts.append(strand)
+
     planted = [e for e in entity_store.list(type="foreshadow", status="planted")
                if e.appearances and min(e.appearances) < chapter]
     if planted:
         planted.sort(key=lambda e: (min(e.appearances), e.name))
+        due_n = sum(1 for e in planted
+                    if chapter - min(e.appearances) >= FORESHADOW_DUE_AFTER)
+        hard_n = sum(1 for e in planted
+                     if chapter - min(e.appearances) >= FORESHADOW_HARD_AFTER)
+        head = (f"【到期伏笔】（未回收共 {len(planted)} 条，按账龄排序——账龄 ≥{FORESHADOW_DUE_AFTER} 章"
+                f"的 {due_n} 条是本章硬债务，必须安排推进或兑现其一")
+        if hard_n:
+            head += f"；其中 ≥{FORESHADOW_HARD_AFTER} 章的 {hard_n} 条已拖到极限，最老的优先处理"
+        head += "）"
         lines = []
         for e in planted[:CHECKLIST_FORESHADOW_LISTED]:
             age = chapter - min(e.appearances)
@@ -294,18 +419,28 @@ def build_chapter_checklist(entity_store: EntityStore, desk: DeskStore,
                 seg += f"：{_clean(e.summary, _SUMMARY_CHARS)}"
             seg += f"（第{min(e.appearances)}章埋，已欠 {age} 章"
             if age >= FORESHADOW_DUE_AFTER:
-                seg += "，重点兑现"
+                seg += "，本章必须处理"
             seg += "）"
             lines.append(f"- {seg}")
         if len(planted) > CHECKLIST_FORESHADOW_LISTED:
             lines.append(f"（其余 {len(planted) - CHECKLIST_FORESHADOW_LISTED} 条略）")
-        sections.append("【到期伏笔】（按账龄排序，本章应安排推进或兑现其一）\n" + "\n".join(lines))
+        smooth_parts.append(head + "\n" + "\n".join(lines))
+    if smooth_parts:
+        sections.append("【怎么写更顺】\n\n" + "\n\n".join(smooth_parts))
 
     if not sections:
         return None
-    head = (f"【开章核对单·第{chapter}章】写本章前机器自检。新章必须与下列既有状态一致："
-            "已出场角色/地点/道具/情节线沿用既有设定，不得重设或自相矛盾；"
-            "到期伏笔是本章的待办债务，应在剧情中安排推进或兑现。")
+
+    # ⑤ 收在哪里（章末收束要求）
+    sections.append(
+        "【收在哪里】本章收尾要求：章末必须落在「变化」上——局势、关系或认知至少一处"
+        "不可逆转；结尾留下一章去向（钩子/悬念/未决动作），不要收成总结陈述，"
+        "也不要在本章内把下一章的爆点提前泄掉。")
+
+    head = (f"【开章任务书·第{chapter}章】写本章前的机器自检与委托。新章必须与下列既有状态一致："
+            "已出场角色/地点/道具/情节线沿用既有设定，不得重设或自相矛盾；到期伏笔是本章的待办债务，"
+            "应在剧情中安排推进或兑现。材料冲突时按此优先级取舍：作者指令 > 本章大纲 > "
+            "本任务书既有状态 > 其他参考材料。")
     return Material(source_id=f"checklist:ch{chapter}", family=MaterialFamily.REQUIRED,
                     content=head + "\n\n" + "\n\n".join(sections),
-                    title=f"开章核对单（第{chapter}章）")
+                    title=f"开章任务书（第{chapter}章）")

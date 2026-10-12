@@ -74,7 +74,8 @@ def available_modules() -> list[dict]:
     return [
         {"name": name, "title": meta["title"], "stages": meta["stages"],
          "default_for": meta["default_for"],
-         "rules_bytes": len(module_rules(name).encode("utf-8"))}
+         "rules_bytes": len(module_rules(name).encode("utf-8")),
+         "digest_bytes": len(module_digest(name).encode("utf-8"))}
         for name, meta in MODULES.items()
     ]
 
@@ -88,6 +89,17 @@ def module_rules(name: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def module_digest(name: str) -> str:
+    """模块摘要版规则（digest.md）：紧凑指令化要点，上下文紧张时代替全文注入。
+    仍是整体注入（只是更短的整体），不违背「绝不静默截断」的原则。"""
+    if name not in MODULES:
+        raise ValueError(f"未知写作模块：{name}")
+    path = MODULE_DIR / name / "digest.md"
+    if not path.exists():
+        raise ValueError(f"模块摘要文件缺失：{name}")
+    return path.read_text(encoding="utf-8")
+
+
 def resolve_for_layer(layer: str, requested: list[str] | None = None) -> list[str]:
     """显式请求优先；未指定时用该层默认集。未知模块一律报错。"""
     if requested:
@@ -98,14 +110,16 @@ def resolve_for_layer(layer: str, requested: list[str] | None = None) -> list[st
     return [name for name, meta in MODULES.items() if layer in meta["default_for"]]
 
 
-def skill_materials(layer: str, requested: list[str] | None = None) -> list[Material]:
-    """启用模块 → REQUIRED 材料（source_id 前缀 skill:）。"""
+def skill_materials(layer: str, requested: list[str] | None = None,
+                    digest: bool = False) -> list[Material]:
+    """启用模块 → REQUIRED 材料（source_id 前缀 skill:）。
+    digest=True 注入摘要版（紧凑指令），False 注入完整规则。"""
     return [
         Material(
             source_id=f"skill:{name}",
             family=MaterialFamily.REQUIRED,
-            content=module_rules(name),
-            title=f"写作模块[{name}]",
+            content=module_digest(name) if digest else module_rules(name),
+            title=f"写作模块[{name}]" + ("（摘要）" if digest else ""),
         )
         for name in resolve_for_layer(layer, requested)
     ]

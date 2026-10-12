@@ -8,11 +8,13 @@ import {
   deskApi,
   projectsApi,
   refineApi,
+  skillsApi,
   type ChapterReview,
   type DeskChapterDetail,
   type DeskDetail,
   type FinalizeResult,
   type ProjectMeta,
+  type SkillModule,
 } from '../api'
 import { activeTab, currentProjectId } from '../state'
 
@@ -56,6 +58,41 @@ async function onPayoffChange(val: string | number | boolean | undefined) {
     ElMessage.error(`兑现记录失败：${(e as Error).message}`)
   }
 }
+
+// 三线打卡（P3③）：本章推进 主线/冲突/羁绊 哪些线——开章任务书的三线近况与审稿的断档报警都吃这份账
+const STRAND_OPTIONS = [
+  { value: 'quest', label: '主线' },
+  { value: 'fire', label: '冲突' },
+  { value: 'bond', label: '羁绊' },
+] as const
+const strandChoice = ref<string[]>([])
+
+async function onStrandsChange(val: string | number | boolean | undefined) {
+  if (!Array.isArray(val)) return
+  strandChoice.value = val
+  if (!currentProjectId.value || !currentNo.value) return
+  try {
+    await deskApi.setStrands(currentProjectId.value, currentNo.value, val)
+  } catch (e) {
+    ElMessage.error(`三线记录失败：${(e as Error).message}`)
+  }
+}
+
+// 写作模块（④摘要版知识卡）：默认按层自动带摘要版省上下文；勾选点名 = 替换默认集并注入完整规则
+const moduleOptions = ref<SkillModule[]>([])
+const chosenModules = ref<string[]>([])
+const fullModules = ref(false)
+
+async function loadModules() {
+  try {
+    moduleOptions.value = (await skillsApi.list()).modules
+  } catch {
+    moduleOptions.value = []
+  }
+}
+
+const defaultModuleTitles = (stage: string) =>
+  moduleOptions.value.filter((m) => m.default_for.includes(stage)).map((m) => m.title)
 
 // 生成中的正文框自动滚到底
 const stagePanes = reactive<Record<StageKey, HTMLElement | null>>({ plot: null, draft: null, polish: null })
@@ -138,6 +175,7 @@ async function selectChapter(no: number) {
     directive.polish = ''
     review.value = ch.review
     payoffChoice.value = ch.payoff ?? ''
+    strandChoice.value = ch.strands ?? []
     lastFinalize.value = null
   } catch (e) {
     ElMessage.error(`章节加载失败：${(e as Error).message}`)
@@ -261,7 +299,7 @@ const deskRefMaterials = () =>
     source_id: m.source_id, family: 'reference', content: m.content, title: m.title,
   }))
 
-// 开章核对单：剧情/正文生成时自动带上实体快照 + 到期伏笔 + 本章位置
+// 开章任务书（P1①五段式）：剧情/正文生成时自动带上——开篇委托/本章故事/人物与设定/怎么写更顺/收在哪里
 const useChecklist = ref(true)
 
 async function runStage(stage: StageKey) {
@@ -281,6 +319,8 @@ async function runStage(stage: StageKey) {
         force: force[stage],
         checklist: useChecklist.value,
         materials: deskRefMaterials(),
+        modules: chosenModules.value.length ? [...chosenModules.value] : undefined,
+        fullModules: fullModules.value,
       },
       {
         onThinking: (t) => {
@@ -302,7 +342,7 @@ async function runStage(stage: StageKey) {
         (r.resumed_indices.length ? '（命中收据）' : ''),
     )
     if (r.checklist_injected) {
-      stageNotes[stage].push('已带开章核对单：实体快照 + 到期伏笔（按账龄） + 本章位置')
+      stageNotes[stage].push('已带五段任务书：开篇委托 → 本章故事 → 人物与设定 → 怎么写更顺（含三线近况/到期伏笔）→ 收在哪里')
     }
     busy.value = '' // 先解锁再刷新，selectChapter 有 busy 守卫
     await loadOverview()
@@ -336,6 +376,42 @@ async function runReview() {
   } catch (e) {
     ElMessage.error(`审稿失败：${(e as Error).message}`)
   } finally {
+    busy.value = ''
+  }
+}
+
+// 定点修复（P3②）：只修审稿不稳项，其余一字不动；写回来源阶段（润色优先），不强制重审
+async function runFix() {
+  if (busy.value) return
+  if (!review.value || review.value.verdict === 'pass' || review.value.fix_applied) return
+  const stage: StageKey = text.polish ? 'polish' : 'draft'
+  busy.value = 'fix'
+  thinking[stage] = ''
+  stageNotes[stage] = ['正在定点修复审稿不稳项——只改问题点，其余一字不动，改完直接写回不重审']
+  const original = text[stage]
+  text[stage] = ''
+  try {
+    const r = await deskApi.fixStream(currentProjectId.value, currentNo.value, {
+      onThinking: (t) => {
+        thinking[stage] += t
+      },
+      onDelta: (t) => {
+        text[stage] += t
+      },
+      onNotice: (n) => {
+        stageNotes[stage].push(n)
+      },
+    })
+    text[stage] = r.y
+    if (review.value) {
+      review.value = { ...review.value, fix_applied: true, fix_summary: `已按 ${r.fixed} 条问题定点修复（未复审）` }
+    }
+    ElMessage.success(`已修复 ${r.fixed} 处不稳项并写回${stage === 'polish' ? '润色' : '正文'}——可复核后直接定稿，要复审再点「运行审稿」`)
+    busy.value = ''
+    await loadOverview()
+  } catch (e) {
+    text[stage] = original
+    ElMessage.error(`定点修复失败：${(e as Error).message}`)
     busy.value = ''
   }
 }
@@ -376,6 +452,7 @@ onMounted(async () => {
     focus.value = 0
   }
   loadRefProjects()
+  loadModules()
 })
 
 watch(currentProjectId, () => {
@@ -482,6 +559,9 @@ function goContinueOutline() {
                 >
                   审{{ c.review_verdict === 'pass' ? '过' : '卡' }}
                 </el-tag>
+                <el-tag v-if="c.strands.length" size="small" effect="plain">
+                  {{ c.strands.map((s) => (s === 'quest' ? '主' : s === 'fire' ? '冲' : '羁')).join('+') }}
+                </el-tag>
                 <el-tag
                   v-if="c.payoff === 'climax'"
                   type="danger"
@@ -562,14 +642,45 @@ function goContinueOutline() {
                 <span style="font-size: 12px; color: #999">{{ m.chars.toLocaleString() }} 字</span>
               </div>
             </el-collapse-item>
+            <el-collapse-item name="modules">
+              <template #title>
+                写作模块注入
+                <el-tag v-if="chosenModules.length" size="small" type="warning" style="margin-left: 8px">
+                  点名 {{ chosenModules.length }} 个·完整规则
+                </el-tag>
+                <el-tag v-else size="small" type="info" style="margin-left: 8px">按层默认·摘要版</el-tag>
+              </template>
+              <div style="font-size: 12px; color: #999; margin-bottom: 8px; line-height: 1.8">
+                不勾选时按层自动带摘要版知识卡（省上下文）：剧情默认「{{ defaultModuleTitles('plot').join('、') || '无' }}」，
+                正文/润色默认「{{ defaultModuleTitles('draft').join('、') || '无' }}」。
+                勾选即点名替换默认集，并注入完整规则——点得越多上下文越满，按需勾。
+              </div>
+              <el-checkbox-group v-model="chosenModules" size="small">
+                <el-checkbox v-for="m in moduleOptions" :key="m.name" :value="m.name" style="margin-right: 14px">
+                  {{ m.title }}
+                </el-checkbox>
+              </el-checkbox-group>
+              <div style="margin-top: 6px">
+                <el-checkbox v-model="fullModules" size="small">
+                  不点名时默认集也注入完整规则（默认摘要版）
+                </el-checkbox>
+              </div>
+            </el-collapse-item>
           </el-collapse>
           <div style="margin-top: 8px; font-size: 12px">
             <el-checkbox v-model="useChecklist" size="small">
-              生成剧情/正文时带开章核对单（实体快照 + 到期伏笔 + 节奏位置）
+              生成剧情/正文时带五段开章任务书（开篇委托 → 本章故事 → 人物与设定 → 怎么写更顺 → 收在哪里）
             </el-checkbox>
             <span style="color: #999">
-              —— 从实体库与章台实时推导：已出场角色/地点/道具/情节线不得重设，账龄最长的未回收伏笔优先兑现，距上次兑现过远会提醒安排
+              —— 从实体库与章台实时推导：接住上一章结尾，已出场实体不得重设，账龄最长的未回收伏笔优先兑现，三线断档会提醒安排
             </span>
+          </div>
+          <div style="margin-top: 6px; font-size: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
+            <span style="flex-shrink: 0"><b>本章推进的线：</b></span>
+            <el-checkbox-group :model-value="strandChoice" size="small" @update:model-value="onStrandsChange">
+              <el-checkbox-button v-for="s in STRAND_OPTIONS" :key="s.value" :value="s.value">{{ s.label }}</el-checkbox-button>
+            </el-checkbox-group>
+            <span style="color: #999">可多选。主线推进情节、冲突制造对抗、羁绊养关系——顺手打卡，开章任务书的三线近况与审稿的断档报警都吃这份账</span>
           </div>
         </el-card>
 
@@ -630,10 +741,21 @@ function goContinueOutline() {
         <!-- 审稿 -->
         <el-card shadow="never" style="margin-bottom: 14px">
           <template #header>
-            <div style="display: flex; gap: 10px; align-items: center">
+            <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap">
               <b>审稿</b>
               <span style="color: #999; font-size: 12px">七项一致性检查：情节逻辑 / 人物目标 / 情感关系 / 物理信息 / 场景过渡 / 章尾钩子 / 跨章联结</span>
               <span style="flex: 1" />
+              <el-button
+                v-if="review && review.verdict !== 'pass' && !review.fix_applied"
+                size="small"
+                type="danger"
+                plain
+                :loading="busy === 'fix'"
+                :disabled="!!busy"
+                @click="runFix"
+              >
+                定点修复不稳项
+              </el-button>
               <el-button size="small" :loading="busy === 'review'" :disabled="!text.draft && !text.polish" @click="runReview">
                 运行审稿
               </el-button>
@@ -650,11 +772,21 @@ function goContinueOutline() {
               <el-tag :type="it.status === '稳' ? 'success' : 'danger'" size="small" effect="plain">{{ it.name }}：{{ it.status }}</el-tag>
               <span style="margin-left: 8px; color: #666">{{ it.problem }}</span>
             </div>
+            <el-alert
+              v-if="review.fix_applied"
+              type="success"
+              :closable="false"
+              :title="`${review.fix_summary ?? '已定点修复'}——修复后不重审，可复核正文直接定稿；要复审再点「运行审稿」`"
+              style="margin-top: 8px"
+            />
             <div v-if="review.rhythm_warning" style="margin-top: 8px; font-size: 12px; color: #e6a23c">
               ⚠ {{ review.rhythm_warning }}
             </div>
-            <div v-if="review.verdict !== 'pass'" style="margin-top: 8px; font-size: 12px; color: #e6a23c">
-              处理方式：改完正文/润色后重新审稿；或到「审稿与标记」页把问题转成下一章必现标记
+            <div v-for="w in review.strand_warnings ?? []" :key="w" style="margin-top: 8px; font-size: 12px; color: #e6a23c">
+              ⚠ {{ w }}
+            </div>
+            <div v-if="review.verdict !== 'pass' && !review.fix_applied" style="margin-top: 8px; font-size: 12px; color: #e6a23c">
+              处理方式：「定点修复」只修不稳项不重审；或自己改完重新审稿；或到「审稿与标记」页把问题转成下一章必现标记
             </div>
           </template>
           <el-empty v-else description="生成正文后先审稿，通过再定稿" :image-size="60" />

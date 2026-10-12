@@ -18,6 +18,8 @@ from app.wizard.store import (
     STAGES,
     STATIONS,
     STATION_LABELS,
+    STRANDS,
+    STRAND_LABELS,
     ChapterWork,
     DeskStore,
     WizardData,
@@ -26,7 +28,7 @@ from app.wizard.store import (
 
 __all__ = [
     "PAYOFF_LABELS", "PAYOFF_SCALES",
-    "STAGES", "STATIONS", "STATION_LABELS",
+    "STAGES", "STATIONS", "STATION_LABELS", "STRANDS", "STRAND_LABELS",
     "ChapterWork", "DeskStore", "WizardData", "WizardStore",
     "DirectionCards", "generate_direction_cards",
     "chapter_outlines", "chapter_title_of", "finalize_chapter", "outline_map",

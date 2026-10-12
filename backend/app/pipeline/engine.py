@@ -49,9 +49,11 @@ SPECS: dict[str, PipelineSpec] = {
     "intro": PipelineSpec("intro", x_chunk_length=200, y_chunk_length=800, target_chars=400),
     # 大纲分段生成必须滚动衔接：否则每段只看简介自说自话，跨段事件重复、情节断裂
     "outline": PipelineSpec("outline", x_chunk_length=40, y_chunk_length=4_000, target_chars=1_500, anchor_enabled=True),
-    "plot": PipelineSpec("plot", x_chunk_length=2_000, y_chunk_length=4_000, target_chars=1_200),
-    "draft": PipelineSpec("draft", x_chunk_length=4_000, y_chunk_length=6_000, target_chars=2_000, anchor_enabled=True),
-    "polish": PipelineSpec("polish", x_chunk_length=6_000, y_chunk_length=6_000, target_chars=2_000),
+    # 目标字数即输出预算来源（×2.4 tok/字）：作者要求「不做最长字数限制」，
+    # 目标给足一章常见上限，宁可模型提前收笔也不在预算侧截断
+    "plot": PipelineSpec("plot", x_chunk_length=2_000, y_chunk_length=6_000, target_chars=2_500),
+    "draft": PipelineSpec("draft", x_chunk_length=4_000, y_chunk_length=10_000, target_chars=8_000, anchor_enabled=True),
+    "polish": PipelineSpec("polish", x_chunk_length=6_000, y_chunk_length=12_000, target_chars=8_000),
 }
 
 
@@ -105,7 +107,7 @@ class PipelineRunner:
         self.provider = provider
         self.prompts = prompt_store or PromptStore()
         self.model = model or getattr(provider, "default_model", None) or ""
-        self.limits = limits or ModelLimits(context_window_tokens=32_000, max_output_tokens=8_192)
+        self.limits = limits or ModelLimits(context_window_tokens=204_800, max_output_tokens=131_072)
         self.assembler = MaterialAssembler(max_bytes=assembler_max_bytes)
 
     def _prepare_one(

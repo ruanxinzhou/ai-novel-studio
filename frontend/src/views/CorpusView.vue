@@ -18,7 +18,7 @@ const pageSize = 10
 // 导入拆书目录（tools/chaishu 产物）
 const impVisible = ref(false)
 const impLoading = ref(false)
-const impForm = reactive({ dir: '', title: '', tags: '', sourceTxt: '' })
+const impForm = reactive({ dir: '', title: '', tags: '', sourceTxt: '', distill: true })
 const impResult = ref<{
   added: number
   by_type: Record<string, number>
@@ -27,6 +27,7 @@ const impResult = ref<{
   labeled: number
   entities?: Record<string, number>
   entities_preextracted?: boolean
+  distill?: { status: string; cards?: number; error?: string }
 } | null>(null)
 
 onMounted(async () => {
@@ -72,7 +73,7 @@ async function doImport() {
   try {
     const extra = impForm.tags.split(/[,，\s]+/).filter(Boolean)
     const r = await corpusApi.importChaishu(
-      impForm.dir.trim(), impForm.title.trim(), extra, impForm.sourceTxt.trim())
+      impForm.dir.trim(), impForm.title.trim(), extra, impForm.sourceTxt.trim(), impForm.distill)
     impResult.value = r
     ElMessage.success(`已导入《${r.title}》${r.added} 条`)
     const [t, g] = await Promise.all([corpusApi.types(), corpusApi.tags()])
@@ -152,6 +153,11 @@ async function doImport() {
         <el-form-item label="附加标签">
           <el-input v-model="impForm.tags" placeholder="逗号分隔，可选，如：克苏鲁, 无限流" />
         </el-form-item>
+        <el-form-item label="提炼写法卡">
+          <el-checkbox v-model="impForm.distill">
+            从拆解材料提炼可跨书复用的写法卡入语料库（约多等半分钟，失败不影响导入）
+          </el-checkbox>
+        </el-form-item>
       </el-form>
       <el-alert v-if="impResult" type="success" :closable="false">
         <template #title>
@@ -163,6 +169,18 @@ async function doImport() {
           {{ impResult.entities.item || 0 }} 道具 / {{ impResult.entities.foreshadow || 0 }} 伏笔
         </div>
       </el-alert>
+      <el-alert
+        v-if="impResult && impResult.distill?.status === 'ok'"
+        type="success" :closable="false"
+        :title="`写法卡：已提炼 ${impResult.distill.cards} 张入语料库（类型「写法卡」）——运行台按类型/标签检索注入，换书也能用`"
+        style="margin-top: 8px"
+      />
+      <el-alert
+        v-else-if="impResult && impResult.distill?.status === 'failed'"
+        type="warning" :closable="false"
+        :title="`写法卡提炼失败（不影响本次导入）：${impResult.distill.error ?? '未知原因'}——可稍后重新导入重试`"
+        style="margin-top: 8px"
+      />
       <el-alert v-if="impResult && impResult.entities_preextracted === false" type="warning" :closable="false"
         title="产物中无 entities.jsonl：实体库只导入了伏笔。重跑拆书工具（默认已含实体层）后重新导入即可补齐角色/地点/道具"
         style="margin-top: 8px" />

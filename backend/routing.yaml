@@ -14,3 +14,5 @@ routing:
   refine:       { primary: minimax,    fallback: trae_exec }
   # chore = 拆解抽取类（导入拆章大纲、实体抽取）：走本地 trae-cli 不花钱，MiniMax 兜底
   chore:        { primary: trae_exec,  fallback: minimax }
+  # distill = 拆书写法卡提炼（一本书一次，产出直接进后续写作上下文，质量优先）
+  distill:      { primary: minimax,    fallback: trae_exec }

@@ -16,7 +16,11 @@ from pydantic import BaseModel
 
 from ..config import REPO
 from ..context import Material, MaterialFamily
-from ..context.ledger import build_state_materials, rhythm_hunger
+from ..context.ledger import (
+    build_state_materials,
+    rhythm_hunger,
+    strand_warnings,
+)
 from ..corpus import add_excerpts as corpus_add_excerpts
 from ..corpus import article_exists as corpus_article_exists
 from ..corpus import count as corpus_count
@@ -24,6 +28,7 @@ from ..corpus import list_tags, list_types, search as corpus_search
 from ..corpus import replace_article as corpus_replace_article
 from ..entities import ENTITY_TYPES, TYPE_LABELS, EntityStore, extract_entities
 from ..entities.vault import export_vault
+from ..generation import PROSE_TOKENS_PER_CHAR, complete_structured
 from ..importer import ImportJournal, analyze_chapter, split_import
 from ..pipeline import (
     SPECS,
@@ -42,6 +47,8 @@ from ..skills import MODULES, available_modules, module_rules, skill_materials
 from ..wizard import (
     PAYOFF_LABELS,
     STATIONS,
+    STRANDS,
+    STRAND_LABELS,
     DeskStore,
     WizardStore,
     chapter_title_of,
@@ -468,7 +475,11 @@ def refine_stream(body: RefineIn) -> StreamingResponse:
                     {"role": "system", "content": SYSTEM_CONTRACT},
                     {"role": "user", "content": user},
                 ]
-                for ev in get_router().chat_stream("refine", messages):
+                # 输出预算 = 正文等长 + 思考余量（推理模型思考与正文共享 max_tokens），
+                # 不做人为上限——131072 是 MiniMax-M3 的模型硬顶，非产品限制
+                out_budget = min(131_072, max(8_192,
+                                              int(len(body.text) * PROSE_TOKENS_PER_CHAR) + 4_096))
+                for ev in get_router().chat_stream("refine", messages, max_tokens=out_budget):
                     if ev.kind == "delta":
                         parts.append(ev.text)
                         q.put(("delta", {"text": ev.text}))
@@ -476,7 +487,14 @@ def refine_stream(body: RefineIn) -> StreamingResponse:
                         q.put(("thinking", {"text": ev.text}))
                     elif ev.kind == "error":
                         q.put(("notice", {"text": ev.text}))
-                q.put(("result", {"y": "".join(parts)}))
+                y = "".join(parts).strip()
+                if not y:
+                    # 空输出多半是思考耗尽预算被截断：报失败让前端还原原文，绝不静默清空
+                    q.put(("fail", {"detail": "模型输出为空：思考可能耗尽了 token 预算，请重试"}))
+                else:
+                    if y == body.text.strip():
+                        q.put(("notice", {"text": "模型未产生任何改动：输出与原文完全相同，可换更具体的调整要求重试"}))
+                    q.put(("result", {"y": y}))
             except Exception as e:
                 q.put(("fail", {"detail": f"调整失败：{e}"}))
             finally:
@@ -940,16 +958,16 @@ def import_text(pid: str, body: ImportTextIn) -> dict:
     return resp
 
 
-def _chore_provider():
+def _chore_provider(step: str = "chore"):
     router: Router = get_router()
 
     class _Adapter:
-        name = "router:chore"
+        name = f"router:{step}"
         default_model = None
 
         @staticmethod
         def chat(messages, model=None, max_tokens=None, extra=None):
-            return router.chat("chore", messages, model, max_tokens)
+            return router.chat(step, messages, model, max_tokens)
 
     return _Adapter()
 
@@ -1086,6 +1104,7 @@ class ChaishuImportIn(BaseModel):
     title: str = ""                   # 书名（缺省从目录名「拆书-」之后推断）
     tags: list[str] = []              # 附加标签：题材/类型等
     source_txt: str = ""              # 原书 txt 路径（旧版底料无正文时按章号补齐）
+    distill: bool = True              # 提炼写法卡：聚合统计 → 可迁移技法（LLM，失败不阻断导入）
 
 
 _CHAISHU_EVENT_CN = {"shuangdian": "爽点", "foreshadow": "伏笔",
@@ -1240,9 +1259,33 @@ def corpus_import_chaishu(body: ChaishuImportIn) -> dict:
     pid, ent_counts, has_entities = _ensure_reference_project(
         d, title, body, chapters, labels, labeled_n, report_text)
 
+    # ---- ⑤拆书闭环：提炼可迁移写法卡入语料库（失败不阻断导入） ----
+    distill_info: dict = {"status": "skipped"}
+    if body.distill:
+        try:
+            cards = _distill_technique_cards(
+                _chore_provider("distill"), _prompt_store, title, report_text, chapters, labels)
+            if cards:
+                card_rows = [{
+                    "excerpt_id": f"{slug}-card{i:02d}",
+                    "article_id": f"{slug}-cards",
+                    "title": f"{title}·写法卡·{card['title']}",
+                    "file_path": str(d),
+                    "excerpt_type": "写法卡",
+                    "tags": ["拆书", "写法卡", title, *body.tags],
+                    "text": f"{card['title']}——{card['technique']}\n适用场景：{card['when']}",
+                } for i, card in enumerate(cards)]
+                corpus_replace_article(f"{slug}-cards", card_rows)
+                distill_info = {"status": "ok", "cards": len(cards)}
+            else:
+                distill_info = {"status": "empty"}
+        except Exception as e:
+            distill_info = {"status": "failed", "error": str(e)[:200]}
+
     return {"added": n, "by_type": by_type, "title": title, "article_id": slug,
             "chapters_total": len(chapters), "labeled": labeled_n, "project_id": pid,
-            "entities": ent_counts, "entities_preextracted": has_entities}
+            "entities": ent_counts, "entities_preextracted": has_entities,
+            "distill": distill_info}
 
 
 def _ensure_reference_project(d: Path, title: str, body: ChaishuImportIn, chapters: list[dict],
@@ -1354,6 +1397,76 @@ def _ensure_reference_project(d: Path, title: str, body: ChaishuImportIn, chapte
     return meta.id, ent_counts, bool(ent_rows)
 
 
+# ---- ⑤拆书闭环：拆解材料 → 可迁移写法卡（LLM 提炼，入语料库可检索注入） ----
+
+DISTILL_SYSTEM = """你是网文写作技法研究员，任务是把一本书的拆解分析提炼成可跨书复用的写法卡。
+只输出一个 JSON 数组，每个元素格式：{"title": "技法名（10字内）", "technique": "怎么用（60-120字，写给写作者的直接指令）",
+"when": "什么时候用（一句话场景）"}。只提炼「换一本书还能用」的技法，严禁复述具体情节、人名、设定。
+不要输出数组以外的任何文字。"""
+
+_DISTILL_CAP_CHARS = 60_000   # 逐章概要字符上限：超出保留开篇全量 + 其余等距抽样
+_DISTILL_KEEP_HEAD = 30      # 开篇结构对「开篇收束套路」最有参考价值，优先保留
+
+
+def _distill_material(report_text: str, chapters: list[dict],
+                      labels: dict[int, dict]) -> str:
+    """提炼材料 = 节奏体检表（聚合统计）+ 逐章概要（钩子/事件标注）。"""
+    parts: list[str] = []
+    if report_text:
+        parts.append(f"【节奏体检表】\n{report_text}")
+    lines: list[str] = []
+    for c in chapters:
+        lb = labels.get(c.get("no", 0))
+        if not lb:
+            continue
+        evs = "；".join(
+            f"{e.get('note', '')}（{_CHAISHU_EVENT_CN.get(e.get('type', ''), e.get('type', ''))}）"
+            for e in lb.get("events", []))
+        line = f"第{c.get('no', 0)}章 {lb.get('summary', '')}"
+        if lb.get("hook"):
+            line += "｜断章钩"
+        if evs:
+            line += f"｜{evs}"
+        lines.append(line)
+    if lines:
+        text = "\n".join(lines)
+        head = "【逐章概要】"
+        if len(text) > _DISTILL_CAP_CHARS:
+            stride = max(2, int(len(text) / _DISTILL_CAP_CHARS) + 1)
+            text = "\n".join(lines[:_DISTILL_KEEP_HEAD] + lines[_DISTILL_KEEP_HEAD::stride])
+            head = f"【逐章概要】（章数多，开篇 {_DISTILL_KEEP_HEAD} 章保留全量，其余每 {stride} 章取 1 章）"
+        parts.append(head + "\n" + text)
+    return "\n\n".join(parts)
+
+
+def _distill_technique_cards(provider, prompt_store, title: str, report_text: str,
+                             chapters: list[dict], labels: dict[int, dict]) -> list[dict]:
+    """LLM 从拆解材料提炼写法卡 [{title, technique, when}]；材料为空直接空手而归。"""
+    material = _distill_material(report_text, chapters, labels)
+    if not material:
+        return []
+    instruction = prompt_store.effective("distill")
+    messages = [
+        {"role": "system", "content": DISTILL_SYSTEM},
+        {"role": "user", "content": f"{instruction}\n\n【拆书材料】\n《{title}》拆解如下：\n\n{material}"},
+    ]
+
+    def generate() -> str:
+        return provider.chat(messages).text
+
+    completion = complete_structured(generate)
+    if not isinstance(completion.data, list):
+        return []
+    cards: list[dict] = []
+    for item in completion.data:
+        if not isinstance(item, dict):
+            continue
+        card = {k: str(item.get(k, "") or "").strip() for k in ("title", "technique", "when")}
+        if card["title"] and card["technique"]:
+            cards.append(card)
+    return cards
+
+
 # ---- M5 引导式写作：主路向导 + 今日章台 ----
 
 _wizard_stores: dict[str, WizardStore] = {}
@@ -1406,6 +1519,7 @@ def _desk_summary(pid: str) -> dict:
             "review_verdict": (w.review or {}).get("verdict") if w and w.review else None,
             "finalized_at": w.finalized_at if w else "",
             "payoff": w.payoff if w else "",
+            "strands": list(w.strands) if w else [],
             "chars": len(latest),
             "outline_preview": body[:80],
         })
@@ -1494,7 +1608,9 @@ class DeskRunIn(BaseModel):
     directive: str | None = None
     force: bool = False
     materials: list[MaterialIn] | None = None   # 跨项目参考层（互为范文）
-    checklist: bool = True                      # 开章核对单（实体快照/到期伏笔/节奏位置）
+    checklist: bool = True                      # 开章任务书（五段结构）
+    modules: list[str] | None = None            # 写作模块：显式点名（注入完整规则）
+    full_modules: bool = False                  # 未点名时 True=默认集完整规则（默认摘要版）
 
 
 class DeskTextIn(BaseModel):
@@ -1529,7 +1645,8 @@ def desk_chapter(pid: str, chapter: int) -> dict:
         "project": pid,
         "chapter": work.as_dict() if work else {"no": chapter, "title": "", "plot": {},
                                                 "draft": {}, "polish": {}, "review": None,
-                                                "finalized_at": "", "payoff": ""},
+                                                "finalized_at": "", "payoff": "",
+                                                "strands": []},
         "outline": outline_map(_project_store, pid).get(chapter, ""),
     }
 
@@ -1545,6 +1662,23 @@ def desk_set_payoff(pid: str, chapter: int, body: DeskPayoffIn) -> dict:
         raise HTTPException(status_code=422, detail=str(e))
     return {"chapter": chapter, "payoff": work.payoff,
             "payoff_label": PAYOFF_LABELS.get(work.payoff, "")}
+
+
+class DeskStrandsIn(BaseModel):
+    strands: list[Literal["quest", "fire", "bond"]] = []
+
+
+@app.put("/api/projects/{pid}/desk/{chapter}/strands")
+def desk_set_strands(pid: str, chapter: int, body: DeskStrandsIn) -> dict:
+    """记录/修改本章推进的三线标签（主线/冲突/羁绊多选，可清空）。
+    注意：必须先于 PUT /{stage} 泛型路由注册，否则 "strands" 会被当作 stage 吃掉。"""
+    _require_project(pid)
+    try:
+        work = _desk_for(pid).record_strands(chapter, body.strands)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"chapter": chapter, "strands": work.strands,
+            "strand_labels": [STRAND_LABELS.get(s, s) for s in work.strands]}
 
 
 @app.put("/api/projects/{pid}/desk/{chapter}/{stage}")
@@ -1571,7 +1705,8 @@ def desk_run(pid: str, chapter: int, body: DeskRunIn) -> dict:
             chapter, body.stage, directive=body.directive, force=body.force,
             journal_dir=_journal_dir(pid),
             extra_materials=_desk_extra_materials(body),
-            entity_store=_entities_for(pid) if body.checklist else None)
+            entity_store=_entities_for(pid) if body.checklist else None,
+            modules=body.modules, full_modules=body.full_modules)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
@@ -1607,7 +1742,8 @@ def desk_run_stream(pid: str, chapter: int, body: DeskRunIn) -> StreamingRespons
                     chapter, body.stage, directive=body.directive, force=body.force,
                     journal_dir=_journal_dir(pid), extra_materials=_desk_extra_materials(body),
                     entity_store=_entities_for(pid) if body.checklist else None,
-                    on_event=on_event)
+                    on_event=on_event,
+                    modules=body.modules, full_modules=body.full_modules)
                 q.put(("result", result))
             except ValueError as e:
                 q.put(("fail", {"detail": str(e)}))
@@ -1630,7 +1766,7 @@ def desk_run_stream(pid: str, chapter: int, body: DeskRunIn) -> StreamingRespons
 @app.post("/api/projects/{pid}/desk/{chapter}/review")
 def desk_review(pid: str, chapter: int) -> dict:
     """单章七项一致性审稿（第七项跨章联结对照上一章结尾），结果入章台记录；
-    附节奏饥饿检查（纯数据，不走 LLM）。"""
+    附节奏饥饿与三线断档/占比检查（纯数据，不走 LLM）。"""
     _require_project(pid)
     desk = _desk_for(pid)
     prose = work_text(desk.get(chapter), "polish") or work_text(desk.get(chapter), "draft")
@@ -1646,8 +1782,85 @@ def desk_review(pid: str, chapter: int) -> dict:
     hunger = rhythm_hunger(desk, chapter)
     if hunger:
         record["rhythm_warning"] = hunger
+    s_warns = strand_warnings(desk, chapter)
+    if s_warns:
+        record["strand_warnings"] = s_warns
     desk.record_review(chapter, record)
     return {"chapter": chapter, **record}
+
+
+@app.post("/api/projects/{pid}/desk/{chapter}/fix/stream")
+def desk_fix_stream(pid: str, chapter: int) -> StreamingResponse:
+    """审稿定点修复：取章台最近一次审稿的不稳项，只修问题点不改其余——
+    输出完整全文写回来源阶段（润色优先于正文），审稿记录标注已修复（不重审，
+    省一轮全章审查；要复审可再点「运行审稿」）。SSE 实时透出 thinking/delta。"""
+    _require_project(pid)
+    desk = _desk_for(pid)
+    work = desk.get(chapter)
+    review = (work.review or {}) if work else {}
+    problems = [it for it in (review.get("items") or [])
+                if isinstance(it, dict) and it.get("status") == "不稳"]
+    if not problems:
+        raise HTTPException(status_code=422, detail="没有可修复的审稿问题——先运行审稿")
+    prose = work_text(work, "polish") or work_text(work, "draft")
+    if not prose:
+        raise HTTPException(status_code=422, detail="本章没有可修复的正文")
+    stage = "polish" if work_text(work, "polish") else "draft"
+    problem_lines = "\n".join(
+        f"{i}. {it.get('name', '')}：{it.get('problem', '') or '未说明问题'}"
+        for i, it in enumerate(problems, 1))
+
+    def sse(event: str, data) -> str:
+        return f"event: {event}\ndata: {json_dumps(data)}\n\n"
+
+    def gen() -> Iterator[str]:
+        q: Queue = Queue()
+        END = object()
+
+        def work_thread():
+            parts: list[str] = []
+            try:
+                instruction = _prompt_store.effective("fix")
+                user = (f"{instruction}\n\n【原文】\n{prose}\n\n【问题清单】\n{problem_lines}\n"
+                        f"{OUTPUT_CONTRACT}")
+                messages = [
+                    {"role": "system", "content": SYSTEM_CONTRACT},
+                    {"role": "user", "content": user},
+                ]
+                out_budget = min(131_072, max(8_192,
+                                              int(len(prose) * PROSE_TOKENS_PER_CHAR) + 4_096))
+                for ev in get_router().chat_stream("refine", messages, max_tokens=out_budget):
+                    if ev.kind == "delta":
+                        parts.append(ev.text)
+                        q.put(("delta", {"text": ev.text}))
+                    elif ev.kind == "thinking":
+                        q.put(("thinking", {"text": ev.text}))
+                    elif ev.kind == "error":
+                        q.put(("notice", {"text": ev.text}))
+                y = "".join(parts).strip()
+                if not y:
+                    q.put(("fail", {"detail": "模型输出为空：思考可能耗尽了 token 预算，请重试"}))
+                else:
+                    desk.record(chapter, stage, y, run_id="review-fix")
+                    updated = dict(review)
+                    updated["fix_applied"] = True
+                    updated["fix_summary"] = f"已按 {len(problems)} 条问题定点修复（未复审）"
+                    desk.record_review(chapter, updated)
+                    q.put(("result", {"y": y, "stage": stage, "fixed": len(problems)}))
+            except Exception as e:
+                q.put(("fail", {"detail": f"定点修复失败：{e}"}))
+            finally:
+                q.put((END, None))
+
+        threading.Thread(target=work_thread, daemon=True).start()
+        while True:
+            kind, payload = q.get()
+            if kind is END:
+                break
+            yield sse(kind, payload)
+        yield "event: done\ndata: {}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 @app.post("/api/projects/{pid}/desk/{chapter}/finalize")

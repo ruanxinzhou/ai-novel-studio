@@ -30,6 +30,10 @@ STAGES = ("plot", "draft", "polish")
 PAYOFF_SCALES = ("none", "small", "medium", "climax")
 PAYOFF_LABELS = {"none": "无", "small": "小爽点", "medium": "中兑现", "climax": "卷高潮"}
 
+# 三线标签（Strand 节奏：定稿时顺手多选，本章推进了哪些线）
+# 常量归 context.ledger（推导逻辑所有者），这里引用做入参校验
+from app.context.ledger import STRANDS, STRAND_LABELS  # noqa: E402
+
 
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -175,6 +179,7 @@ class ChapterWork:
     review: dict | None = None                   # review_chapter().as_dict()
     finalized_at: str = ""
     payoff: str = ""                             # 本章兑现规模：none/small/medium/climax，空=未记录
+    strands: list[str] = field(default_factory=list)  # 本章推进的线：quest/fire/bond 多选，空=未记录
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -187,6 +192,7 @@ class ChapterWork:
             polish=dict(d.get("polish") or {}), review=d.get("review"),
             finalized_at=str(d.get("finalized_at", "") or ""),
             payoff=str(d.get("payoff", "") or ""),
+            strands=[s for s in (d.get("strands") or []) if s in STRANDS],
         )
 
 
@@ -255,5 +261,15 @@ class DeskStore:
             raise ValueError(f"未知兑现规模：{payoff}（可选 {PAYOFF_SCALES}）")
         work = self.ensure(no)
         work.payoff = payoff
+        self._flush()
+        return work
+
+    def record_strands(self, no: int, strands: list[str]) -> ChapterWork:
+        """记录/修改本章推进的三线标签（可多选可清空）；供节奏占比与断档检查消费。"""
+        bad = [s for s in strands if s not in STRANDS]
+        if bad:
+            raise ValueError(f"未知线标签：{bad}（可选 {STRANDS}）")
+        work = self.ensure(no)
+        work.strands = list(dict.fromkeys(strands))   # 去重保序
         self._flush()
         return work

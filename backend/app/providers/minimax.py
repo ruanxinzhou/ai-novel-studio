@@ -16,6 +16,8 @@ from .base import Provider, ProviderError, StreamEvent, Usage, strip_think
 
 # 现金单价（元/百万token）。占位值，接入账单后校准。
 PRICE_CNY_PER_MTOK = {
+    "MiniMax-M3": {"in": 2.1, "out": 8.4},
+    "MiniMax-M2.7": {"in": 2.1, "out": 8.4},
     "MiniMax-M2": {"in": 1.0, "out": 8.0},
     "MiniMax-M1": {"in": 1.0, "out": 8.0},
     "abab6.5s-chat": {"in": 1.0, "out": 1.0},
@@ -61,7 +63,7 @@ class MiniMaxProvider(Provider):
     name = "minimax"
 
     def __init__(self, api_key: str, base_url: str | None = None,
-                 default_model: str = "MiniMax-M2"):
+                 default_model: str = "MiniMax-M3"):
         if not api_key or "在此填入" in api_key:
             raise ProviderError("MiniMax api_key 未配置（config.local.yaml）")
         self.api_key = api_key
@@ -80,9 +82,11 @@ class MiniMaxProvider(Provider):
                     max_tokens: int | None = None,
                     extra: dict | None = None) -> Iterator[StreamEvent]:
         model = model or self.default_model
-        body: dict = {"model": model, "messages": messages,
-                      "max_tokens": max_tokens or 2048, "stream": True,
+        body: dict = {"model": model, "messages": messages, "stream": True,
                       "stream_options": {"include_usage": True}}
+        # max_tokens 不传时交给 API 模型默认（M3 ≥10K，远优于硬编码 2048 截断）
+        if max_tokens:
+            body["max_tokens"] = max_tokens
         body.update(extra or {})
         try:
             with httpx.stream("POST", f"{self.base_url}/chat/completions",
@@ -107,7 +111,12 @@ class MiniMaxProvider(Provider):
                         u = ev["usage"]
                         usage = Usage(input_tokens=u.get("prompt_tokens", 0),
                                       output_tokens=u.get("completion_tokens", 0))
-                    delta = (ev.get("choices") or [{}])[0].get("delta", {}).get("content")
+                    delta_obj = (ev.get("choices") or [{}])[0].get("delta", {})
+                    # M3 等新模型思考走独立 reasoning_content 字段；M2 系内嵌 <think>
+                    reasoning = delta_obj.get("reasoning_content")
+                    if reasoning:
+                        yield StreamEvent(kind="thinking", text=reasoning)
+                    delta = delta_obj.get("content")
                     if not delta:
                         continue
                     # 思考块实时透传（kind="thinking"），不进正文

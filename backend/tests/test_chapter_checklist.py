@@ -69,7 +69,7 @@ def test_position_entities_and_foreshadow(env):
     m = build_chapter_checklist(env.entities, env.desk, 3, 50)
     assert m is not None
     assert m.family == MaterialFamily.REQUIRED and m.source_id == "checklist:ch3"
-    for frag in ("【本章位置】", "第 3 章", "第 50 章", "进度约 6%",
+    for frag in ("【本章故事】（本章位置）", "第 3 章", "第 50 章", "进度约 6%",
                  "已写 2 章（最近写到第 2 章）",
                  "【角色快照】", "陆离：主角（第1-2章）", "老王：看门大爷〔已退场〕",
                  "幕后黑手：终卷BOSS〔设定中，尚未出场〕",
@@ -84,7 +84,7 @@ def test_old_foreshadow_marked_and_gap_warning(env):
     env.desk.record(2, "plot", "二")
     env.entities.add("foreshadow", "青铜镜来历", summary="第1章埋", chapter=1)
     m = build_chapter_checklist(env.entities, env.desk, 12, 30)
-    assert "已欠 11 章，重点兑现" in m.content
+    assert "已欠 11 章，本章必须处理" in m.content
     assert "第 3-11 章尚未写，本章是跳章续写" in m.content
 
 
@@ -179,7 +179,7 @@ def test_run_chapter_stage_injects_checklist(env):
                           entity_store=env.entities)
     assert r["checklist_injected"] is True
     prompt = "\n".join(m["content"] for m in provider.messages)
-    assert "开章核对单" in prompt and "青铜镜" in prompt and "到期伏笔" in prompt
+    assert "开章任务书" in prompt and "青铜镜" in prompt and "到期伏笔" in prompt
 
 
 def test_run_chapter_stage_without_store_no_checklist(env):
@@ -189,7 +189,7 @@ def test_run_chapter_stage_without_store_no_checklist(env):
     r = run_chapter_stage(provider, env.prompts, env.project, env.pid, env.markers,
                           env.wizard, env.desk, 1, "plot", journal_dir=None)
     assert r["checklist_injected"] is False
-    assert "开章核对单" not in "\n".join(m["content"] for m in provider.messages)
+    assert "开章任务书" not in "\n".join(m["content"] for m in provider.messages)
 
 
 def test_polish_stage_never_injects(env):
@@ -249,4 +249,4 @@ def test_api_checklist_default_on_and_toggle_off(client, tmp_path, monkeypatch):
     r2 = client.post(f"/api/projects/{pid}/desk/2/run",
                      json={"stage": "plot", "checklist": False, "force": True}).json()
     assert r2["checklist_injected"] is False
-    assert "开章核对单" not in "\n".join(m["content"] for m in captured)
+    assert "开章任务书" not in "\n".join(m["content"] for m in captured)

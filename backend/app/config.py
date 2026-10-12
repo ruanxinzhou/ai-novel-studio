@@ -21,7 +21,7 @@ class TraeConfig:
 class MiniMaxConfig:
     api_key: str = ""
     base_url: str | None = None
-    default_model: str = "MiniMax-M2"
+    default_model: str = "MiniMax-M3"
 
 
 @dataclass

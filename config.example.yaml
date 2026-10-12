@@ -9,7 +9,7 @@ providers:
   minimax:
     api_key: "sk-api-在此填入你的Key"
     base_url: null          # null = 自动探测（api.minimax.chat / api.minimaxi.com）
-    default_model: MiniMax-M2
+    default_model: MiniMax-M3
 
 # 流水线步骤 -> 通道路由（primary 失败自动切 fallback）
 routing:

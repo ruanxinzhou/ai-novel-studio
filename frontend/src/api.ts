@@ -63,6 +63,7 @@ export interface SkillModule {
   stages: string[]
   default_for: string[]
   rules_bytes: number
+  digest_bytes: number
 }
 
 // ---- 语料 ----
@@ -131,6 +132,9 @@ export interface ChapterReview {
   unstable_count: number
   attempts: number
   rhythm_warning?: string // 审稿附带的节奏饥饿提示（纯数据检查，不参与 blocked 判定）
+  strand_warnings?: string[] // 三线断档/占比/打卡率提示（纯数据检查）
+  fix_applied?: boolean // 定点修复已执行（不再强制重审）
+  fix_summary?: string
 }
 
 // ---- 必现标记（M2）----
@@ -235,7 +239,7 @@ export const corpusApi = {
     }
     return req<{ total: number; excerpts: Excerpt[] } & PageMeta>(`/api/corpus/search?${p}`)
   },
-  importChaishu: (dir: string, title?: string, tags?: string[], sourceTxt?: string) =>
+  importChaishu: (dir: string, title?: string, tags?: string[], sourceTxt?: string, distill = true) =>
     req<{
       added: number
       by_type: Record<string, number>
@@ -246,9 +250,10 @@ export const corpusApi = {
       project_id: string
       entities?: Record<string, number>
       entities_preextracted?: boolean
+      distill?: { status: string; cards?: number; error?: string }
     }>('/api/corpus/import_chaishu', {
       method: 'POST',
-      body: JSON.stringify({ dir, title: title ?? '', tags: tags ?? [], source_txt: sourceTxt ?? '' }),
+      body: JSON.stringify({ dir, title: title ?? '', tags: tags ?? [], source_txt: sourceTxt ?? '', distill }),
     }),
 }
 
@@ -622,6 +627,7 @@ export interface DeskChapter {
   review_verdict: string | null
   finalized_at: string
   payoff: string
+  strands: string[] // 本章推进的线：quest/fire/bond 多选，空=未记录
   chars: number
   outline_preview: string
 }
@@ -652,6 +658,7 @@ export interface DeskChapterFull {
   review: ChapterReview | null
   finalized_at: string
   payoff: string // 本章兑现规模：none/small/medium/climax，空=未记录
+  strands: string[] // 本章推进的线：quest/fire/bond 多选，空=未记录
 }
 export interface DeskChapterDetail {
   project: string
@@ -699,7 +706,7 @@ export const deskApi = {
     pid: string,
     chapter: number,
     stage: string,
-    opts: { directive?: string; force?: boolean; checklist?: boolean; materials?: { source_id: string; family: string; content: string; title?: string }[] } = {},
+    opts: { directive?: string; force?: boolean; checklist?: boolean; materials?: { source_id: string; family: string; content: string; title?: string }[]; modules?: string[]; fullModules?: boolean } = {},
   ) =>
     req<DeskRunResult>(`/api/projects/${pid}/desk/${chapter}/run`, {
       method: 'POST',
@@ -709,6 +716,8 @@ export const deskApi = {
         force: opts.force || false,
         checklist: opts.checklist !== false,
         materials: opts.materials?.length ? opts.materials : null,
+        modules: opts.modules ?? null,
+        full_modules: opts.fullModules || false,
       }),
     }),
   // 流式生成：正文增量实时回调，结束返回完整运行结果
@@ -716,7 +725,7 @@ export const deskApi = {
     pid: string,
     chapter: number,
     stage: string,
-    opts: { directive?: string; force?: boolean; checklist?: boolean; materials?: { source_id: string; family: string; content: string; title?: string }[] } = {},
+    opts: { directive?: string; force?: boolean; checklist?: boolean; materials?: { source_id: string; family: string; content: string; title?: string }[]; modules?: string[]; fullModules?: boolean } = {},
     h: SSEHandlers,
   ): Promise<DeskRunResult> =>
     fetch(`/api/projects/${pid}/desk/${chapter}/run/stream`, {
@@ -728,6 +737,8 @@ export const deskApi = {
         force: opts.force || false,
         checklist: opts.checklist !== false,
         materials: opts.materials?.length ? opts.materials : null,
+        modules: opts.modules ?? null,
+        full_modules: opts.fullModules || false,
       }),
     }).then((r) => consumeSSE<DeskRunResult>(r, h)),
   saveText: (pid: string, chapter: number, stage: string, text: string) =>
@@ -739,6 +750,16 @@ export const deskApi = {
     req<ChapterReview & { chapter: number }>(`/api/projects/${pid}/desk/${chapter}/review`, {
       method: 'POST',
     }),
+  // 定点修复：只修审稿不稳项，其余一字不动；结果写回来源阶段（润色优先），不强制重审
+  fixStream: (pid: string, chapter: number, h: SSEHandlers) =>
+    fetch(`/api/projects/${pid}/desk/${chapter}/fix/stream`, { method: 'POST' })
+      .then((r) => consumeSSE<{ y: string; stage: string; fixed: number }>(r, h)),
+  // 三线打卡：记录本章推进了 主线/冲突/羁绊 哪些线（开章任务书与审稿报警都吃这份账）
+  setStrands: (pid: string, chapter: number, strands: string[]) =>
+    req<{ chapter: number; strands: string[]; strand_labels: string[] }>(
+      `/api/projects/${pid}/desk/${chapter}/strands`,
+      { method: 'PUT', body: JSON.stringify({ strands }) },
+    ),
   // 兑现四选一：随手记录/修改本章兑现规模（未定稿可先记，定稿后可改）
   setPayoff: (pid: string, chapter: number, payoff: string) =>
     req<{ chapter: number; payoff: string; payoff_label: string }>(

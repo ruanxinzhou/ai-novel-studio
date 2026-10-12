@@ -21,6 +21,7 @@ from app.pipeline.journal import RunJournal, compute_run_key
 from app.pipeline.prompts import PromptStore
 from app.review.markers import MarkerStore, markers_material
 from app.providers.base import Provider
+from app.skills import skill_materials
 from app.wizard.store import STAGES, DeskStore, WizardStore
 
 _CHAPTER_HEAD = re.compile(r"^#{0,4}\s*第\s*(\d+)\s*章", re.MULTILINE)
@@ -141,10 +142,14 @@ def run_chapter_stage(
     extra_materials: list[Material] | None = None,
     entity_store=None,
     on_event=None,
+    modules: list[str] | None = None,
+    full_modules: bool = False,
 ) -> dict:
     """单章单层生成：plot/draft/polish；同输入幂等回收据，force 绕过。
     extra_materials：作者勾选的跨项目参考层（REFERENCE 族，互为范文）。
-    entity_store：给定时为 plot/draft 注入开章核对单（实体快照/到期伏笔/节奏位置）。"""
+    entity_store：给定时为 plot/draft 注入开章任务书（五段结构）。
+    modules/full_modules：写作模块注入——未指定时按层默认集注入摘要版
+    （digest，省上下文）；显式点名或 full_modules=True 时注入完整规则。"""
     if stage not in STAGES:
         raise ValueError(f"未知阶段：{stage}")
     spec = SPECS[stage]
@@ -152,6 +157,9 @@ def run_chapter_stage(
     o_map = outline_map(project_store, pid)
 
     materials: list[Material] = []
+    # 写作模块：默认集摘要随行（显式点名 → 完整规则）
+    materials.extend(skill_materials(stage, requested=modules,
+                                     digest=(modules is None and not full_modules)))
     if stage == "plot":
         body = o_map.get(chapter, "")
         if not body:
