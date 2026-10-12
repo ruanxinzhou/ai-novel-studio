@@ -17,6 +17,7 @@ from app.wizard import (
     WizardStore,
     chapter_outlines,
     finalize_chapter,
+    parse_outline,
     run_chapter_stage,
 )
 
@@ -179,13 +180,42 @@ class TestChapterOutlines:
         assert chapter_outlines("") == {}
         assert chapter_outlines("没有章号的大纲") == {}
 
-    def test_volume_head_joins_next_chapter(self):
+    def test_volume_heads_group_chapters(self):
+        """卷头成结构：不黏章正文，parse_outline 返回卷分组。"""
         text = "第一卷 入门\n第1章\n试炼。\n第2章\n变故。\n第二卷 风起\n第3章\n新篇。\n"
-        o = chapter_outlines(text)
+        o, vols = parse_outline(text)
         assert set(o) == {1, 2, 3}
-        assert o[1].startswith("第一卷")
-        assert o[2] == "变故。"
-        assert o[3].startswith("第二卷")
+        assert o[1] == "试炼。" and o[2] == "变故。" and o[3] == "新篇。"
+        assert [v["title"] for v in vols] == ["第一卷 入门", "第二卷 风起"]
+        assert vols[0]["chapters"] == [1, 2] and vols[1]["chapters"] == [3]
+
+    def test_markdown_heads_parsed(self):
+        """## 第N章 / ## 第N卷 Markdown 格式与裸格式等价（作者编辑器随手改格式不炸）。"""
+        text = "## 第一卷 风起\n\n## 第1章《开端》\n大纲A\n\n## 第2章《转折》\n大纲B\n"
+        o, vols = parse_outline(text)
+        assert o[1].startswith("《开端》") and "大纲A" in o[1]
+        assert o[2].startswith("《转折》")
+        assert vols[0]["title"] == "第一卷 风起" and vols[0]["chapters"] == [1, 2]
+
+    def test_volume_note_kept_not_polluting_chapter(self):
+        """卷头到下一章之间的零散引言记为卷 note，不进任何章大纲也不丢。"""
+        text = "第1章\n无卷。\n第二卷 中段\n卷引言：这里开始换地图。\n第2章\n有卷。"
+        o, vols = parse_outline(text)
+        assert o[1] == "无卷。" and o[2] == "有卷。"
+        assert vols[0]["title"] == "" and vols[0]["chapters"] == [1]   # 卷头前的章归无名首组
+        assert vols[1]["title"] == "第二卷 中段"
+        assert vols[1]["note"] == "卷引言：这里开始换地图。"
+        assert vols[1]["chapters"] == [2]
+
+    def test_markdown_separator_lines_stripped(self):
+        text = "第1章《标题》\n-------------\n大纲正文。\n\n第2章\n=====\n第二章正文。"
+        o, _ = parse_outline(text)
+        assert o[1] == "《标题》\n大纲正文。"
+        assert o[2] == "第二章正文。"
+
+    def test_no_volume_heads_flat_unnamed_group(self):
+        o, vols = parse_outline("第1章\n一。\n第2章\n二。")
+        assert vols[0]["title"] == "" and vols[0]["chapters"] == [1, 2]
 
 
 class TestDeskStore:
@@ -596,6 +626,22 @@ class TestDeskApi:
         client.put(f"/api/projects/{pid}/desk/2/payoff", json={"payoff": "small"})
         r4b = client.post(f"/api/projects/{pid}/desk/4/review").json()
         assert "rhythm_warning" not in r4b
+
+    def test_desk_overview_groups_by_volume(self, client):
+        """大纲带卷头（裸/Markdown 均可）：总览返回 volumes，章带所属卷名。"""
+        pid = client.post("/api/projects", json={"title": "分卷书"}).json()["id"]
+        client.post(f"/api/projects/{pid}/layers/outline", json={
+            "y": "第一卷 蓝星\n第1章\n一。\n第2章\n二。\n## 第二卷 戏内\n## 第3章《入戏》\n三。",
+            "x_pairs": [],
+        })
+        r = client.get(f"/api/projects/{pid}/desk").json()
+        assert r["outline_chapters"] == 3
+        assert [v["title"] for v in r["volumes"]] == ["第一卷 蓝星", "第二卷 戏内"]
+        assert r["volumes"][0]["chapters"] == [1, 2] and r["volumes"][1]["chapters"] == [3]
+        by_no = {c["no"]: c for c in r["chapters"]}
+        assert by_no[1]["volume"] == "第一卷 蓝星"
+        assert by_no[3]["volume"] == "第二卷 戏内" and by_no[3]["title"] == "《入戏》"
+        assert by_no[1]["outline_preview"] == "一。"      # 卷头不黏进章大纲
 
     def test_desk_review_injects_prev_tail(self, client, monkeypatch):
         """第七项跨章联结：章台审稿自动带上一章结尾作对照（第一章无前章不注入）。"""

@@ -614,6 +614,7 @@ export const wizardApi = {
 export interface DeskChapter {
   no: number
   title: string
+  volume: string // 所属卷名（大纲「第N卷 卷名」行），空=未分卷
   has_outline: boolean
   plot_done: boolean
   draft_done: boolean
@@ -624,12 +625,18 @@ export interface DeskChapter {
   chars: number
   outline_preview: string
 }
+export interface DeskVolume {
+  title: string // 空字符串 = 卷头出现前的无名首组
+  note: string // 卷头到下一章之间的零散引言
+  chapters: number[]
+}
 export interface DeskDetail {
   project: string
   chapters: DeskChapter[]
   total: number
   finalized: number
   outline_chapters: number
+  volumes: DeskVolume[]
 }
 export interface DeskWorkText {
   text: string

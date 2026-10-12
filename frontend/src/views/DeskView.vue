@@ -80,6 +80,21 @@ const pagedChapters = computed(() =>
     ? overview.value.chapters.slice((deskPage.value - 1) * deskPageSize, deskPage.value * deskPageSize)
     : [],
 )
+// 按卷分组：本页内卷名相同的相邻章归一组（卷跨页时下页重复组头）
+const chapterGroups = computed(() => {
+  const groups: { volume: string; items: typeof pagedChapters.value }[] = []
+  for (const c of pagedChapters.value) {
+    const last = groups[groups.length - 1]
+    if (last && last.volume === c.volume) last.items.push(c)
+    else groups.push({ volume: c.volume, items: [c] })
+  }
+  return groups
+})
+const volumeNotes = computed(() => {
+  const m = new Map<string, string>()
+  for (const v of overview.value?.volumes ?? []) if (v.note) m.set(v.title, v.note)
+  return m
+})
 
 async function loadOverview(keepSelection = true) {
   if (!currentProjectId.value) {
@@ -371,6 +386,11 @@ watch(currentProjectId, () => {
   loadOverview(false)
 })
 
+// tab 用 v-show 常驻：在别处改了大纲（向导/创作导航），切回章台要重拉总览
+watch(activeTab, (tab) => {
+  if (tab === 'desk' && currentProjectId.value && !busy.value) loadOverview()
+})
+
 // 跳运行台续写大纲：置位标志，PipelineView 读取后进入续写模式并清零
 function goContinueOutline() {
   const w = window as unknown as { __pipelineContinue?: { value: boolean } }
@@ -394,7 +414,7 @@ function goContinueOutline() {
   </div>
 
   <div v-else-if="!overview.chapters.length">
-    <el-empty description="还没有章节可写——先在创作向导的「故事架构」站生成大纲，章台才有章可做">
+    <el-empty description="还没有章节可写——先在创作向导的「故事架构」站生成大纲（章头单独一行「第N章」，支持 # 标题；分卷写「第N卷 卷名」行），章台才有章可做">
       <el-button type="primary" @click="activeTab = 'wizard'">去创作向导</el-button>
     </el-empty>
   </div>
@@ -425,43 +445,55 @@ function goContinueOutline() {
           有 {{ overview.total - overview.outline_chapters }} 章还没有大纲，做完也能写，但建议回向导补
         </div>
         <el-scrollbar max-height="560px">
-          <div
-            v-for="c in pagedChapters"
-            :key="c.no"
-            class="chapter-item"
-            :class="{ active: c.no === currentNo, today: c.no === todayNo }"
-            @click="selectChapter(c.no)"
-          >
-            <div style="display: flex; justify-content: space-between; align-items: center; gap: 6px">
-              <span>第 {{ c.no }} 章 · {{ c.title || '（未命名）' }}</span>
-              <el-tag v-if="c.finalized_at" type="success" size="small">定稿</el-tag>
+          <template v-for="g in chapterGroups" :key="g.volume || `__g${g.items[0]?.no ?? 0}`">
+            <div
+              v-if="g.volume"
+              class="volume-head"
+              :title="volumeNotes.get(g.volume) || ''"
+            >
+              {{ g.volume }}
+              <span v-if="volumeNotes.get(g.volume)" style="font-weight: 400; opacity: 0.7">
+                {{ volumeNotes.get(g.volume)!.slice(0, 24) }}…
+              </span>
             </div>
-            <div style="display: flex; gap: 4px; margin-top: 4px; align-items: center">
-              <el-tag :type="c.has_outline ? 'info' : 'warning'" size="small" effect="plain">
-                {{ c.has_outline ? '有大纲' : '无大纲' }}
-              </el-tag>
-              <el-tag :type="c.plot_done ? 'success' : 'info'" size="small" effect="plain">剧情</el-tag>
-              <el-tag :type="c.draft_done ? 'success' : 'info'" size="small" effect="plain">正文</el-tag>
-              <el-tag :type="c.polish_done ? 'success' : 'info'" size="small" effect="plain">润色</el-tag>
-              <el-tag
-                v-if="c.review_verdict"
-                :type="c.review_verdict === 'pass' ? 'success' : 'danger'"
-                size="small"
-                effect="plain"
-              >
-                审{{ c.review_verdict === 'pass' ? '过' : '卡' }}
-              </el-tag>
-              <el-tag
-                v-if="c.payoff === 'climax'"
-                type="danger"
-                size="small"
-                effect="plain"
-              >卷高潮</el-tag>
-              <el-tag v-else-if="c.payoff === 'medium'" type="warning" size="small" effect="plain">中兑现</el-tag>
-              <el-tag v-else-if="c.payoff === 'small'" type="success" size="small" effect="plain">爽</el-tag>
-              <span v-if="c.chars" style="font-size: 12px; color: #999">{{ c.chars }} 字</span>
+            <div
+              v-for="c in g.items"
+              :key="c.no"
+              class="chapter-item"
+              :class="{ active: c.no === currentNo, today: c.no === todayNo }"
+              @click="selectChapter(c.no)"
+            >
+              <div style="display: flex; justify-content: space-between; align-items: center; gap: 6px">
+                <span>第 {{ c.no }} 章 · {{ c.title || '（未命名）' }}</span>
+                <el-tag v-if="c.finalized_at" type="success" size="small">定稿</el-tag>
+              </div>
+              <div style="display: flex; gap: 4px; margin-top: 4px; align-items: center">
+                <el-tag :type="c.has_outline ? 'info' : 'warning'" size="small" effect="plain">
+                  {{ c.has_outline ? '有大纲' : '无大纲' }}
+                </el-tag>
+                <el-tag :type="c.plot_done ? 'success' : 'info'" size="small" effect="plain">剧情</el-tag>
+                <el-tag :type="c.draft_done ? 'success' : 'info'" size="small" effect="plain">正文</el-tag>
+                <el-tag :type="c.polish_done ? 'success' : 'info'" size="small" effect="plain">润色</el-tag>
+                <el-tag
+                  v-if="c.review_verdict"
+                  :type="c.review_verdict === 'pass' ? 'success' : 'danger'"
+                  size="small"
+                  effect="plain"
+                >
+                  审{{ c.review_verdict === 'pass' ? '过' : '卡' }}
+                </el-tag>
+                <el-tag
+                  v-if="c.payoff === 'climax'"
+                  type="danger"
+                  size="small"
+                  effect="plain"
+                  >卷高潮</el-tag>
+                <el-tag v-else-if="c.payoff === 'medium'" type="warning" size="small" effect="plain">中兑现</el-tag>
+                <el-tag v-else-if="c.payoff === 'small'" type="success" size="small" effect="plain">爽</el-tag>
+                <span v-if="c.chars" style="font-size: 12px; color: #999">{{ c.chars }} 字</span>
+              </div>
             </div>
-          </div>
+          </template>
         </el-scrollbar>
         <el-pagination
           v-if="totalCount > deskPageSize"

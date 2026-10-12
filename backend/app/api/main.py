@@ -48,6 +48,7 @@ from ..wizard import (
     finalize_chapter,
     generate_direction_cards,
     outline_map,
+    parse_outline,
     previous_tail,
     run_chapter_stage,
     work_text,
@@ -1378,9 +1379,11 @@ def _journal_dir(pid: str) -> Path:
 
 
 def _desk_summary(pid: str) -> dict:
-    """章台总览：章来源 = 大纲拆章 ∪ 章台记录 ∪ draft 正文拆章。"""
+    """章台总览：章来源 = 大纲拆章 ∪ 章台记录 ∪ draft 正文拆章；卷头成组。"""
     desk = _desk_for(pid)
-    o_map = outline_map(_project_store, pid)
+    v = _project_store.current(pid, "outline")
+    o_map, volumes = parse_outline(v.y) if v else ({}, [])
+    vol_of = {no: vol["title"] for vol in volumes for no in vol["chapters"]}
     draft_titles: dict[int, str] = {}
     v = _project_store.current(pid, "draft")
     if v is not None:
@@ -1395,6 +1398,7 @@ def _desk_summary(pid: str) -> dict:
             "no": no,
             "title": (w.title if w and w.title else "") or draft_titles.get(no, "")
             or chapter_title_of(body),
+            "volume": vol_of.get(no, ""),
             "has_outline": no in o_map,
             "plot_done": bool(work_text(w, "plot")),
             "draft_done": bool(work_text(w, "draft")),
@@ -1409,6 +1413,8 @@ def _desk_summary(pid: str) -> dict:
         "project": pid, "chapters": chapters, "total": len(chapters),
         "finalized": sum(1 for c in chapters if c["finalized_at"]),
         "outline_chapters": len(o_map),
+        "volumes": [{"title": x["title"], "note": x["note"],
+                     "chapters": x["chapters"]} for x in volumes],
     }
 
 

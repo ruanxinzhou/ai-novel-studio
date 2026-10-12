@@ -23,30 +23,71 @@ from app.review.markers import MarkerStore, markers_material
 from app.providers.base import Provider
 from app.wizard.store import STAGES, DeskStore, WizardStore
 
-_CHAPTER_HEAD = re.compile(r"^第\s*(\d+)\s*章", re.MULTILINE)
-_VOLUME_HEAD = re.compile(r"^第\s*[0-9一二三四五六七八九十百千]+\s*卷[^\n]*$", re.MULTILINE)
+_CHAPTER_HEAD = re.compile(r"^#{0,4}\s*第\s*(\d+)\s*章", re.MULTILINE)
+_VOLUME_HEAD = re.compile(r"^#{0,4}\s*第\s*[0-9一二三四五六七八九十百千]+\s*卷[^\n]*$", re.MULTILINE)
+_SEPARATOR_LINE = re.compile(r"^[-=]{3,}\s*$")
+
+
+def _volume_title_of(line: str) -> str:
+    return line.lstrip("#").strip()
+
+
+def _strip_separators(chunk: str) -> str:
+    """去掉 Markdown 分隔线（------ / ======），它们只是装饰不进章大纲。"""
+    return "\n".join(
+        ln for ln in chunk.splitlines() if not _SEPARATOR_LINE.match(ln)
+    ).strip()
+
+
+def parse_outline(outline_text: str) -> tuple[dict[int, str], list[dict]]:
+    """大纲拆章 + 卷分组（兼容裸格式「第1章」与 Markdown 标题「## 第1章」）。
+
+    返回 (chapters, volumes)：
+    - chapters：{章号: 章大纲正文}，不含章号头与卷头（卷头是结构不是正文）；
+    - volumes：[{title, note, chapters:[章号]}] 按出现顺序；首个卷头之前已有的章
+      归入无名首组（前端对无名组不渲染卷头）。卷头到下一章之间的零散文字记为
+      该卷 note，不丢也不污染章大纲。
+    """
+    text = outline_text or ""
+    matches = list(_CHAPTER_HEAD.finditer(text))
+    chapters: dict[int, str] = {}
+    volumes: list[dict] = []
+    current: dict | None = None
+
+    def open_volume(title: str) -> dict:
+        v = {"title": title, "note": "", "chapters": []}
+        volumes.append(v)
+        return v
+
+    pre = text[: matches[0].start()] if matches else text
+    m = _VOLUME_HEAD.search(pre)
+    if m:
+        current = open_volume(_volume_title_of(m.group(0)))
+        current["note"] = _strip_separators(pre[m.end():])
+
+    for i, cm in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        chunk = text[cm.end():end]
+        vol = _VOLUME_HEAD.search(chunk)
+        next_title, next_note = "", ""
+        if vol:
+            next_title = _volume_title_of(vol.group(0))
+            next_note = _strip_separators(chunk[vol.end():])
+            chunk = chunk[: vol.start()]
+        no = int(cm.group(1))
+        if current is None:
+            current = open_volume("")            # 卷头出现在更后面：先开无名首组
+        current["chapters"].append(no)
+        chapters[no] = _strip_separators(chunk)
+        if vol:
+            current = open_volume(next_title)    # 章归组后再开新卷，保证卷序正确
+            current["note"] = next_note
+    return chapters, volumes
 
 
 def chapter_outlines(outline_text: str) -> dict[int, str]:
-    """outline 文本按「第N章」段头拆章：{no: 该章大纲正文（不含章号头）}。
-    卷头行（如「第二卷 风起云涌」）不黏在上一章尾部，归入本卷第一章的开头。"""
-    text = outline_text or ""
-    matches = list(_CHAPTER_HEAD.finditer(text))
-    pre = text[: matches[0].start()] if matches else ""
-    vol_pre = _VOLUME_HEAD.search(pre)
-    carry = pre[vol_pre.start() :].strip() if vol_pre else ""
-    out: dict[int, str] = {}
-    for i, m in enumerate(matches):
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        chunk = text[m.end() : end].strip()
-        vol = _VOLUME_HEAD.search(chunk)
-        carry_next = ""
-        if vol:
-            carry_next = chunk[vol.start() :].strip()
-            chunk = chunk[: vol.start()].strip()
-        out[int(m.group(1))] = "\n".join(x for x in (carry, chunk) if x).strip()
-        carry = carry_next
-    return out
+    """outline 文本按「第N章」段头拆章：{no: 该章大纲正文（不含章号头）}。"""
+    return parse_outline(outline_text)[0]
 
 
 def outline_map(project_store, pid: str) -> dict[int, str]:
