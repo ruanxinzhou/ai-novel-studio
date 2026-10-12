@@ -598,7 +598,7 @@ function goContinueOutline() {
           <template #header>
             <div style="display: flex; gap: 10px; align-items: center">
               <b>定稿</b>
-              <span style="color: #999; font-size: 12px">定稿后进入保鲜飞轮：抽取实体 → 核验必现标记 → 整本合成采纳</span>
+              <span style="color: #999; font-size: 12px">定稿后进入保鲜飞轮：抽取实体 → 伏笔兑现问询 → 核验必现标记 → 整本合成采纳</span>
               <span style="flex: 1" />
               <el-button type="success" :loading="busy === 'finalize'" :disabled="!!detail.chapter.finalized_at" @click="doFinalize">
                 {{ detail.chapter.finalized_at ? '已定稿' : `定稿第 ${currentNo} 章` }}
@@ -618,6 +618,23 @@ function goContinueOutline() {
                   更新 {{ (lastFinalize.entities.updated ?? []).length }} ·
                   丢弃 {{ lastFinalize.entities.dropped ?? 0 }}
                 </template>
+              </div>
+              <div v-if="lastFinalize.foreshadow">
+                伏笔回账：
+                <template v-if="lastFinalize.foreshadow.error">
+                  <el-tag type="warning" size="small">未完成：{{ lastFinalize.foreshadow.error }}</el-tag>
+                </template>
+                <template v-else>
+                  <el-tag v-if="!lastFinalize.foreshadow.paid?.length && !lastFinalize.foreshadow.advanced?.length"
+                          type="info" size="small">本章无兑现也无推进</el-tag>
+                  <el-tag v-for="n in lastFinalize.foreshadow.paid" :key="'p' + n" type="success" size="small"
+                          style="margin-right: 6px">已兑现：{{ n }}</el-tag>
+                  <el-tag v-for="n in lastFinalize.foreshadow.advanced" :key="'a' + n" type="warning" size="small"
+                          style="margin-right: 6px">已推进：{{ n }}</el-tag>
+                </template>
+                <div v-if="lastFinalize.foreshadow.warning" style="color: #e6a23c">
+                  ⚠ {{ lastFinalize.foreshadow.warning }}
+                </div>
               </div>
               <div v-if="lastFinalize.marker_hits.length">
                 必现标记核验：

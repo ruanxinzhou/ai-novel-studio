@@ -48,6 +48,7 @@ X_HEADERS: dict[str, str] = {
     "polish": "原文",
     "review": "待审正文",
     "entities": "待抽取文本",
+    "foreshadow": "本章正文",
     "import_outline": "原文",
     "brainstorm": "种子",
     "refine": "原文",

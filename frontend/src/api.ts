@@ -665,6 +665,13 @@ export interface FinalizeResult {
     attempts?: number
     error?: string
   } | null
+  foreshadow?: {
+    paid?: string[]
+    advanced?: string[]
+    attempts?: number
+    warning?: string
+    error?: string
+  } | null
   marker_hits: { marker: MarkerInfo; hit: boolean }[]
   draft_version: number
   total_chapters: number

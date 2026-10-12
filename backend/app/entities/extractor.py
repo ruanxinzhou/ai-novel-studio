@@ -64,3 +64,95 @@ def extract_entities(
         created=merged["created"], updated=merged["updated"],
         dropped=merged["dropped"], attempts=completion.attempts,
     )
+
+
+# ---- 伏笔兑现问询（P1② 定稿回账：账上欠了什么，本章还了没有） ----
+
+FORESHADOW_RECONCILE_SYSTEM = """你是小说伏笔账房。对照【未回收伏笔清单】逐条核对【本章正文】，判断每一条在本章的状态，只输出一个 JSON 对象：
+{"paid": ["本章兑现的伏笔名", ...], "advanced": ["本章推进但未兑现的伏笔名", ...]}
+判断规则：
+1. paid=本章正文正面回收了该伏笔：谜底揭晓、伏笔物件发挥关键作用、该悬念被解决——作者顺手为之也算兑现；
+2. advanced=本章再次提及或部分推进，但尚未到兑现；
+3. 拿不准是否兑现时列 advanced，确实正面处理了就大胆列 paid——报错作者可改回，漏报账就烂了；
+4. 名字必须与清单完全一致，不要自创、缩写或改写；
+5. 两者都不是的条目直接略过；不要输出 JSON 以外的任何文字。"""
+
+
+@dataclass
+class ForeshadowReport:
+    paid: list[str] = field(default_factory=list)
+    advanced: list[str] = field(default_factory=list)
+    attempts: int = 0
+    warning: str = ""
+
+    def as_dict(self) -> dict:
+        return {"paid": self.paid, "advanced": self.advanced,
+                "attempts": self.attempts, "warning": self.warning}
+
+
+def reconcile_foreshadows(
+    provider: Provider,
+    store,                      # EntityStore
+    prompt_store: PromptStore,
+    text: str,
+    chapter: int | None = None,
+    model: str | None = None,
+) -> ForeshadowReport | None:
+    """定稿回账：对照账上未回收伏笔问询本章兑现情况（chore 通道）。
+
+    账上没有 planted 伏笔时返回 None（没有债就不问，防注意力摊薄）。
+    paid → 状态改 paid 并记本章出场；advanced → 只记出场。
+    """
+    planted = store.list(type="foreshadow", status="planted")
+    if not planted:
+        return None
+    lines = []
+    for e in planted:
+        seg = e.name
+        if e.summary:
+            seg += f"：{e.summary}"
+        if e.appearances:
+            seg += f"（第{min(e.appearances)}章埋）"
+        lines.append(f"- {seg}")
+    instruction = prompt_store.effective("foreshadow")
+    messages = [
+        {"role": "system", "content": FORESHADOW_RECONCILE_SYSTEM},
+        {"role": "user", "content": instruction
+            + "\n\n【未回收伏笔清单】\n" + "\n".join(lines)
+            + "\n\n【本章正文】\n" + text.strip()},
+    ]
+
+    def generate() -> str:
+        return provider.chat(messages, model).text
+
+    completion = complete_structured(generate)
+    if completion.data is None:
+        raise ValueError(f"伏笔问询输出连续 {completion.attempts} 次无法解析为 JSON")
+    data = completion.data if isinstance(completion.data, dict) else {}
+
+    def _names(key: str) -> set[str]:
+        raw = data.get(key)
+        return {str(n).strip() for n in raw if isinstance(n, str) and n.strip()} \
+            if isinstance(raw, list) else set()
+
+    paid, advanced = _names("paid"), _names("advanced")
+    report = ForeshadowReport(attempts=completion.attempts)
+    for e in planted:
+        if e.name in paid:
+            store.update(e.id, status="paid")
+            if chapter is not None:
+                store.record_appearance(e.id, chapter)
+            report.paid.append(e.name)
+        elif e.name in advanced:
+            if chapter is not None:
+                store.record_appearance(e.id, chapter)
+            report.advanced.append(e.name)
+
+    # 反向提醒（乌贼规则）：埋坑密而零回收，账在烂掉——宁可慢，不可假
+    paid_total = len(store.list(type="foreshadow", status="paid"))
+    planted_total = len(store.list(type="foreshadow", status="planted"))
+    ch = chapter or 0
+    if paid_total == 0 and planted_total >= 10 and ch >= 10:
+        report.warning = (f"伏笔过密：已埋 {planted_total} 个坑、零回收"
+                          f"（写到第 {ch} 章）——挖坑容易填坑难，建议尽快安排首个兑现")
+    return report

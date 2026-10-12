@@ -4,7 +4,7 @@ plot → draft → polish 全部复用 PipelineRunner（幂等收据 + 有界续
 - draft 注入本章 pending 必现标记与上一章结尾滚动锚点；
 - 方向卡作为 REFERENCE 材料随行（作者签收过的方向才注入）；
 - 审稿复用六项一致性清单；
-- finalize 转保鲜飞轮：实体抽取 + 标记核验 + 整本合成采纳 draft 版本
+- finalize 转保鲜飞轮：实体抽取 + 伏笔兑现问询 + 标记核验 + 整本合成采纳 draft 版本
   （保持 Vault 导出兼容），飞轮失败不阻断定稿，错误进校正清单。
 """
 from __future__ import annotations
@@ -14,7 +14,7 @@ from pathlib import Path
 
 from app.context import Material, MaterialFamily
 from app.context.ledger import build_chapter_checklist
-from app.entities import extract_entities
+from app.entities import extract_entities, reconcile_foreshadows
 from app.pipeline import SPECS, PipelineRunner
 from app.pipeline.engine import CONTINUATION_TAIL_CHARS
 from app.pipeline.journal import RunJournal, compute_run_key
@@ -186,13 +186,14 @@ def finalize_chapter(
     chapter: int,
     auto_entities: bool = True,
 ) -> dict:
-    """定稿 + 保鲜飞轮：实体抽取、标记核验、整本合成采纳。"""
+    """定稿 + 保鲜飞轮：实体抽取、伏笔兑现问询、标记核验、整本合成采纳。"""
     work = desk.get(chapter)
     text = work_text(work, "polish") or work_text(work, "draft")
     if not text:
         raise ValueError("本章还没有可定稿的正文，请先生成正文")
 
     entities_report: dict | None = None
+    foreshadow_report: dict | None = None
     if auto_entities and entity_store is not None:
         try:
             r = extract_entities(provider, entity_store, prompt_store, text, chapter=chapter)
@@ -200,6 +201,11 @@ def finalize_chapter(
                                "dropped": len(r.dropped), "attempts": r.attempts}
         except Exception as e:   # 飞轮失败不阻断定稿
             entities_report = {"error": str(e)[:300]}
+        try:
+            fr = reconcile_foreshadows(provider, entity_store, prompt_store, text, chapter=chapter)
+            foreshadow_report = fr.as_dict() if fr is not None else None
+        except Exception as e:   # 问询失败同样不阻断
+            foreshadow_report = {"error": str(e)[:300]}
     marker_hits = marker_store.verify(text, chapter) if marker_store is not None else []
 
     parts: list[str] = []
@@ -216,6 +222,7 @@ def finalize_chapter(
     return {
         "chapter": chapter, "chars": len(text),
         "entities": entities_report,
+        "foreshadow": foreshadow_report,
         "marker_hits": marker_hits,
         "draft_version": v.seq,
         "total_chapters": len(parts),

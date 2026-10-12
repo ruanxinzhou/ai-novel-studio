@@ -300,6 +300,33 @@ class TestFinalize:
             finalize_chapter(FakeProseProvider(), env.prompts, env.project,
                              env.pid, env.entities, env.markers, env.desk, 9)
 
+    def test_finalize_reconciles_foreshadow(self, env):
+        self._prepare(env)
+        env.entities.add("foreshadow", "青铜镜", summary="来历不明", chapter=1)
+        provider = _FinalizeProvider(reconcile='{"paid": ["青铜镜"], "advanced": []}')
+        r = finalize_chapter(provider, env.prompts, env.project, env.pid,
+                             env.entities, env.markers, env.desk, 1)
+        assert r["foreshadow"]["paid"] == ["青铜镜"]
+        f = env.entities.find("foreshadow", "青铜镜")
+        assert f.status == "paid" and provider.reconcile_calls == 1
+
+    def test_finalize_no_planted_skips_inquiry(self, env):
+        self._prepare(env)
+        provider = _FinalizeProvider()
+        r = finalize_chapter(provider, env.prompts, env.project, env.pid,
+                             env.entities, env.markers, env.desk, 1)
+        assert r["foreshadow"] is None            # 没有债就不问
+        assert provider.reconcile_calls == 0
+
+    def test_finalize_reconcile_failure_not_blocking(self, env):
+        self._prepare(env)
+        env.entities.add("foreshadow", "青铜镜", summary="来历不明", chapter=1)
+        r = finalize_chapter(_FinalizeProvider(reconcile="乱码不是JSON"),
+                             env.prompts, env.project, env.pid,
+                             env.entities, env.markers, env.desk, 1)
+        assert "error" in r["foreshadow"]
+        assert env.desk.get(1).finalized_at      # 问询失败不阻断定稿
+
 
 # ---- API ----
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from app.entities import EntityStore, extract_entities
+from app.entities import EntityStore, extract_entities, reconcile_foreshadows
 from app.entities.store import ENTITY_TYPES
 from app.pipeline.prompts import PromptStore
 from app.providers.base import LLMResponse, Usage
@@ -155,6 +155,78 @@ def test_extract_uses_prompt_store_entities_layer(tmp_path):
     extract_entities(SpyProvider(), EntityStore(tmp_path / "e.json"), prompts, "韩立")
     assert "自定义抽取规则。" in seen["user"]
     assert "设定管理员" in seen["system"]  # 合同区不可覆盖
+
+
+# ---- 伏笔兑现问询（P1② 定稿回账） ----
+
+class ReconcileProvider:
+    name = "mock"
+    default_model = "m"
+
+    def __init__(self, payload: str):
+        self.payload = payload
+        self.seen_user = ""
+
+    def chat(self, messages, model=None, max_tokens=None, extra=None):
+        self.seen_user = messages[1]["content"]
+        return LLMResponse(text=self.payload, usage=Usage(input_tokens=1, output_tokens=1))
+
+
+def _planted_store(tmp_path):
+    store = EntityStore(tmp_path / "e.json")
+    store.add("foreshadow", "青铜镜来历", summary="镜子会低语", chapter=2)
+    store.add("foreshadow", "床下的朋友", summary="布偶归位", chapter=1)
+    store.add("foreshadow", "已收的旧坑", summary="早期伏笔", chapter=1)
+    store.update(store.find("foreshadow", "已收的旧坑").id, status="paid")
+    return store
+
+
+def test_reconcile_marks_paid_and_advanced(tmp_path):
+    store = _planted_store(tmp_path)
+    p = ReconcileProvider('{"paid": ["青铜镜来历"], "advanced": ["床下的朋友"]}')
+    r = reconcile_foreshadows(p, store, PromptStore(), "本章揭晓镜子来历。", chapter=5)
+    assert r.paid == ["青铜镜来历"] and r.advanced == ["床下的朋友"]
+    mirror = store.find("foreshadow", "青铜镜来历")
+    assert mirror.status == "paid" and mirror.appearances == [2, 5]
+    buddy = store.find("foreshadow", "床下的朋友")
+    assert buddy.status == "planted" and buddy.appearances == [1, 5]
+    # 清单只含未回收伏笔，且带上埋章
+    assert "青铜镜来历：镜子会低语（第2章埋）" in p.seen_user
+    assert "已收的旧坑" not in p.seen_user
+    assert "本章正文" in p.seen_user
+
+
+def test_reconcile_none_without_planted(tmp_path):
+    store = _planted_store(tmp_path)
+    store.update(store.find("foreshadow", "青铜镜来历").id, status="dropped")
+    store.update(store.find("foreshadow", "床下的朋友").id, status="dropped")
+    assert reconcile_foreshadows(
+        ReconcileProvider("{}"), store, PromptStore(), "正文") is None
+
+
+def test_reconcile_unknown_names_ignored(tmp_path):
+    store = _planted_store(tmp_path)
+    p = ReconcileProvider('{"paid": ["不存在的伏笔"], "advanced": ["青铜镜来历 "]}')
+    r = reconcile_foreshadows(p, store, PromptStore(), "正文", chapter=3)
+    assert r.paid == [] and r.advanced == ["青铜镜来历"]
+    assert store.find("foreshadow", "青铜镜来历").status == "planted"
+    assert store.find("foreshadow", "青铜镜来历").appearances == [2, 3]
+
+
+def test_reconcile_density_warning(tmp_path):
+    store = _planted_store(tmp_path)
+    for i in range(10):
+        store.add("foreshadow", f"坑{i}", summary="待兑现", chapter=1)
+    r = reconcile_foreshadows(
+        ReconcileProvider('{"paid": [], "advanced": []}'), store, PromptStore(),
+        "正文", chapter=12)
+    assert "伏笔过密" in r.warning and "零回收" in r.warning
+
+
+def test_reconcile_bad_json_raises(tmp_path):
+    store = _planted_store(tmp_path)
+    with pytest.raises(ValueError, match="无法解析"):
+        reconcile_foreshadows(BadJsonProvider(), store, PromptStore(), "正文", chapter=2)
 
 
 # ---- API ----
