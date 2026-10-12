@@ -225,6 +225,9 @@ const deskRefMaterials = () =>
     source_id: m.source_id, family: 'reference', content: m.content, title: m.title,
   }))
 
+// 开章核对单：剧情/正文生成时自动带上实体快照 + 到期伏笔 + 本章位置
+const useChecklist = ref(true)
+
 async function runStage(stage: StageKey) {
   if (busy.value) return
   busy.value = stage
@@ -240,6 +243,7 @@ async function runStage(stage: StageKey) {
       {
         directive: directive[stage].trim() || undefined,
         force: force[stage],
+        checklist: useChecklist.value,
         materials: deskRefMaterials(),
       },
       {
@@ -261,6 +265,9 @@ async function runStage(stage: StageKey) {
       `${STAGES.find((s) => s.key === stage)!.label}已生成 ${r.y.length} 字` +
         (r.resumed_indices.length ? '（命中收据）' : ''),
     )
+    if (r.checklist_injected) {
+      stageNotes[stage].push('已带开章核对单：实体快照 + 到期伏笔（按账龄） + 本章位置')
+    }
     busy.value = '' // 先解锁再刷新，selectChapter 有 busy 守卫
     await loadOverview()
     if (currentNo.value) await selectChapter(currentNo.value)
@@ -492,6 +499,14 @@ function goContinueOutline() {
               </div>
             </el-collapse-item>
           </el-collapse>
+          <div style="margin-top: 8px; font-size: 12px">
+            <el-checkbox v-model="useChecklist" size="small">
+              生成剧情/正文时带开章核对单（实体快照 + 到期伏笔 + 本章位置）
+            </el-checkbox>
+            <span style="color: #999">
+              —— 从实体库与章台实时推导：已出场角色/地点/道具/情节线不得重设，账龄最长的未回收伏笔优先兑现
+            </span>
+          </div>
         </el-card>
 
         <!-- 三段生成：剧情 / 正文 / 润色 -->

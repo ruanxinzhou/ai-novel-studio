@@ -1484,6 +1484,7 @@ class DeskRunIn(BaseModel):
     directive: str | None = None
     force: bool = False
     materials: list[MaterialIn] | None = None   # 跨项目参考层（互为范文）
+    checklist: bool = True                      # 开章核对单（实体快照/到期伏笔/节奏位置）
 
 
 class DeskTextIn(BaseModel):
@@ -1541,7 +1542,8 @@ def desk_run(pid: str, chapter: int, body: DeskRunIn) -> dict:
             _markers_for(pid), _wizard_for(pid), _desk_for(pid),
             chapter, body.stage, directive=body.directive, force=body.force,
             journal_dir=_journal_dir(pid),
-            extra_materials=_desk_extra_materials(body))
+            extra_materials=_desk_extra_materials(body),
+            entity_store=_entities_for(pid) if body.checklist else None)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
@@ -1576,6 +1578,7 @@ def desk_run_stream(pid: str, chapter: int, body: DeskRunIn) -> StreamingRespons
                     _markers_for(pid), _wizard_for(pid), _desk_for(pid),
                     chapter, body.stage, directive=body.directive, force=body.force,
                     journal_dir=_journal_dir(pid), extra_materials=_desk_extra_materials(body),
+                    entity_store=_entities_for(pid) if body.checklist else None,
                     on_event=on_event)
                 q.put(("result", result))
             except ValueError as e:

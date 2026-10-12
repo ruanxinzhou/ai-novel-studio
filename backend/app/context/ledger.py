@@ -10,11 +10,14 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 from app.context.assembler import truncate_tail_at_sentence
 from app.context.material import Material, MaterialFamily
 from app.entities.store import TYPE_LABELS, EntityStore
-from app.wizard.store import DeskStore
+
+if TYPE_CHECKING:      # 仅类型标注；运行时由调用方传入，避免 wizard→context→wizard 环
+    from app.wizard.store import DeskStore
 
 PLOT_DIGEST_MAX_CHAPTERS = 40      # 剧情梗概最多带多少章（超出留最近段）
 PLOT_PER_CHAPTER_CHARS = 160       # 每章梗概截断
@@ -145,3 +148,101 @@ def build_state_materials(project_store, entity_store: EntityStore,
         if m is not None:
             mats.append(m)
     return mats
+
+
+# ---- 开章核对单（章台写第 N 章前的机器自检） ----
+
+CHECKLIST_SECTION_LIMITS = {"character": 20, "location": 10, "item": 12, "plotline": 8}
+CHECKLIST_FORESHADOW_LISTED = 15     # 到期伏笔最多列多少条
+FORESHADOW_DUE_AFTER = 8             # 账龄超过多少章标「重点兑现」
+
+
+def _written_nos(desk: DeskStore) -> list[int]:
+    """已有剧情或正文的章（plot 阶段算开工，draft 算成文）。"""
+    out = []
+    for no in desk.all_nos():
+        work = desk.get(no)
+        if _stage_text(work, "plot") or _stage_text(work, "draft"):
+            out.append(no)
+    return out
+
+
+def build_chapter_checklist(entity_store: EntityStore, desk: DeskStore,
+                            chapter: int, outline_total: int) -> Material | None:
+    """开章核对单：写第 N 章前的 REQUIRED 自检材料。
+
+    三块——本章位置（进度与跳章提醒）、实体快照（截至上一章的既有状态，
+    含已退场/未出场标注）、到期伏笔（按账龄排序，越老越该兑现）。
+    三块全空（开书第一章且无设定）返回 None，不注入空核对单。
+    """
+    sections: list[str] = []
+
+    # 排除本章：写完本章剧情后重跑同阶段，核对单不变才能命中幂等收据
+    written = [no for no in _written_nos(desk) if no != chapter]
+    prior_written = [no for no in written if no < chapter]
+    pos = [f"本章为第 {chapter} 章"]
+    if outline_total > 0:
+        pos.append(f"大纲已排至第 {outline_total} 章")
+        if outline_total >= chapter and chapter > 0:
+            pos.append(f"进度约 {chapter * 100 // outline_total}%")
+    if written:
+        pos.append(f"已写 {len(written)} 章（最近写到第 {max(written)} 章）")
+        if prior_written and max(prior_written) < chapter - 1:
+            pos.append(f"注意：第 {max(prior_written) + 1}-{chapter - 1} 章尚未写，本章是跳章续写")
+    if len(pos) > 1:  # 只有「本章为第 N 章」一行时不单独成节
+        sections.append("【本章位置】\n" + "；".join(pos))
+
+    for etype in ("character", "location", "item", "plotline"):
+        ents = []
+        for e in entity_store.list(type=etype):
+            prior = [a for a in e.appearances if a < chapter]
+            if not e.appearances or prior:
+                ents.append((e, prior))
+        if not ents:
+            continue
+        ents.sort(key=lambda t: (-(max(t[1]) if t[1] else 0), t[0].name))
+        lines = []
+        shown = ents[:CHECKLIST_SECTION_LIMITS[etype]]
+        for e, prior in shown:
+            seg = e.name
+            if e.summary:
+                seg += f"：{_clean(e.summary, _SUMMARY_CHARS)}"
+            if e.status == "retired":
+                seg += f"〔已退场〕（{_ch_span(prior)}）" if prior else "〔已退场，尚未出场〕"
+            elif not prior:
+                seg += "〔设定中，尚未出场〕"
+            else:
+                seg += f"（{_ch_span(prior)}）"
+            lines.append(f"- {seg}")
+        if len(ents) > CHECKLIST_SECTION_LIMITS[etype]:
+            lines.append(f"（其余 {len(ents) - CHECKLIST_SECTION_LIMITS[etype]} 个略）")
+        sections.append(f"【{TYPE_LABELS[etype]}快照】（截至上一章的既有设定，不得重设或矛盾）\n"
+                        + "\n".join(lines))
+
+    planted = [e for e in entity_store.list(type="foreshadow", status="planted")
+               if e.appearances and min(e.appearances) < chapter]
+    if planted:
+        planted.sort(key=lambda e: (min(e.appearances), e.name))
+        lines = []
+        for e in planted[:CHECKLIST_FORESHADOW_LISTED]:
+            age = chapter - min(e.appearances)
+            seg = e.name
+            if e.summary:
+                seg += f"：{_clean(e.summary, _SUMMARY_CHARS)}"
+            seg += f"（第{min(e.appearances)}章埋，已欠 {age} 章"
+            if age >= FORESHADOW_DUE_AFTER:
+                seg += "，重点兑现"
+            seg += "）"
+            lines.append(f"- {seg}")
+        if len(planted) > CHECKLIST_FORESHADOW_LISTED:
+            lines.append(f"（其余 {len(planted) - CHECKLIST_FORESHADOW_LISTED} 条略）")
+        sections.append("【到期伏笔】（按账龄排序，本章应安排推进或兑现其一）\n" + "\n".join(lines))
+
+    if not sections:
+        return None
+    head = (f"【开章核对单·第{chapter}章】写本章前机器自检。新章必须与下列既有状态一致："
+            "已出场角色/地点/道具/情节线沿用既有设定，不得重设或自相矛盾；"
+            "到期伏笔是本章的待办债务，应在剧情中安排推进或兑现。")
+    return Material(source_id=f"checklist:ch{chapter}", family=MaterialFamily.REQUIRED,
+                    content=head + "\n\n" + "\n\n".join(sections),
+                    title=f"开章核对单（第{chapter}章）")

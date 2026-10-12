@@ -681,7 +681,7 @@ export const deskApi = {
     pid: string,
     chapter: number,
     stage: string,
-    opts: { directive?: string; force?: boolean; materials?: { source_id: string; family: string; content: string; title?: string }[] } = {},
+    opts: { directive?: string; force?: boolean; checklist?: boolean; materials?: { source_id: string; family: string; content: string; title?: string }[] } = {},
   ) =>
     req<DeskRunResult>(`/api/projects/${pid}/desk/${chapter}/run`, {
       method: 'POST',
@@ -689,6 +689,7 @@ export const deskApi = {
         stage,
         directive: opts.directive || null,
         force: opts.force || false,
+        checklist: opts.checklist !== false,
         materials: opts.materials?.length ? opts.materials : null,
       }),
     }),
@@ -697,7 +698,7 @@ export const deskApi = {
     pid: string,
     chapter: number,
     stage: string,
-    opts: { directive?: string; force?: boolean; materials?: { source_id: string; family: string; content: string; title?: string }[] } = {},
+    opts: { directive?: string; force?: boolean; checklist?: boolean; materials?: { source_id: string; family: string; content: string; title?: string }[] } = {},
     h: SSEHandlers,
   ): Promise<DeskRunResult> =>
     fetch(`/api/projects/${pid}/desk/${chapter}/run/stream`, {
@@ -707,6 +708,7 @@ export const deskApi = {
         stage,
         directive: opts.directive || null,
         force: opts.force || false,
+        checklist: opts.checklist !== false,
         materials: opts.materials?.length ? opts.materials : null,
       }),
     }).then((r) => consumeSSE<DeskRunResult>(r, h)),

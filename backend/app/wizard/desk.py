@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 
 from app.context import Material, MaterialFamily
+from app.context.ledger import build_chapter_checklist
 from app.entities import extract_entities
 from app.pipeline import SPECS, PipelineRunner
 from app.pipeline.engine import CONTINUATION_TAIL_CHARS
@@ -97,10 +98,12 @@ def run_chapter_stage(
     force: bool = False,
     journal_dir: Path | str | None = None,
     extra_materials: list[Material] | None = None,
+    entity_store=None,
     on_event=None,
 ) -> dict:
     """单章单层生成：plot/draft/polish；同输入幂等回收据，force 绕过。
-    extra_materials：作者勾选的跨项目参考层（REFERENCE 族，互为范文）。"""
+    extra_materials：作者勾选的跨项目参考层（REFERENCE 族，互为范文）。
+    entity_store：给定时为 plot/draft 注入开章核对单（实体快照/到期伏笔/节奏位置）。"""
     if stage not in STAGES:
         raise ValueError(f"未知阶段：{stage}")
     spec = SPECS[stage]
@@ -137,6 +140,13 @@ def run_chapter_stage(
         materials.append(direction_mat)
     if extra_materials:
         materials.extend(extra_materials)
+    checklist_injected = False
+    if entity_store is not None and stage in ("plot", "draft"):
+        checklist = build_chapter_checklist(
+            entity_store, desk, chapter, max(o_map) if o_map else 0)
+        if checklist is not None:
+            materials.append(checklist)
+            checklist_injected = True
     anchor = ""
     if stage == "draft":
         if marker_store is not None:
@@ -159,6 +169,7 @@ def run_chapter_stage(
     return {
         "chapter": chapter, "stage": stage, "y": result.y, "run_id": run_key,
         "resumed_indices": result.resumed_indices,
+        "checklist_injected": checklist_injected,
         "calls": [{"completion_status": c.completion_status, "attempts": c.attempts}
                   for c in result.calls],
     }
