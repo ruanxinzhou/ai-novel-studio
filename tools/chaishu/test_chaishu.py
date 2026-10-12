@@ -153,6 +153,35 @@ class TestReceipts(unittest.TestCase):
             self.assertEqual(list(done), [1])
 
 
+class TestParseEntities(unittest.TestCase):
+    def test_full_json(self):
+        raw = ('{"characters":[{"name":"林奇","note":"主角"}],'
+               '"locations":[{"name":"纸扎铺","note":"老店"}],'
+               '"items":[{"name":"怀表","note":"遗物"}]}')
+        obj = chaishu._parse_entities(raw)
+        self.assertEqual(obj["characters"][0]["name"], "林奇")
+        self.assertEqual(obj["locations"][0]["name"], "纸扎铺")
+        self.assertEqual(obj["items"][0]["name"], "怀表")
+
+    def test_fenced_json(self):
+        raw = ('```json\n{"characters":[{"name":"林奇","note":"主角"}],'
+               '"locations":[],"items":[]}\n```')
+        obj = chaishu._parse_entities(raw)
+        self.assertEqual(len(obj["characters"]), 1)
+
+    def test_truncated_salvage(self):
+        # 截断在 locations 数组中间：characters 已完整，locations 抢救出已出现的
+        raw = ('{"characters":[{"name":"林奇","note":"主角"},{"name":"老陈","note":"店主"}],'
+               '"locations":[{"name":"纸扎铺","note":"老店"},{"name":"怀')
+        obj = chaishu._parse_entities(raw)
+        self.assertEqual([c["name"] for c in obj["characters"]], ["林奇", "老陈"])
+        self.assertEqual(obj["locations"][0]["name"], "纸扎铺")
+
+    def test_garbage_raises(self):
+        with self.assertRaises(ValueError):
+            chaishu._parse_entities("完全无关的输出")
+
+
 def _median_int(values):
     return render._median(values)
 

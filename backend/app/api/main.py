@@ -1070,6 +1070,7 @@ class ChaishuImportIn(BaseModel):
     dir: str                          # 拆书 CLI 输出目录（拆书-书名/）
     title: str = ""                   # 书名（缺省从目录名「拆书-」之后推断）
     tags: list[str] = []              # 附加标签：题材/类型等
+    source_txt: str = ""              # 原书 txt 路径（旧版底料无正文时按章号补齐）
 
 
 _CHAISHU_EVENT_CN = {"shuangdian": "爽点", "foreshadow": "伏笔",
@@ -1109,6 +1110,41 @@ def corpus_import_chaishu(body: ChaishuImportIn) -> dict:
     if not chapters:
         raise HTTPException(status_code=422,
                             detail="目录中没有 chapters.jsonl（或为空），请确认是拆书工具的输出目录")
+
+    # 旧版底料只存元数据不存 body：给了原书 txt 就按章号切章补正文（剧情/正文层/实体抽取都靠它）
+    has_body = any(str(c.get("body", "")).strip() for c in chapters)
+    if not has_body:
+        src = body.source_txt.strip()
+        if not src:
+            raise HTTPException(status_code=422, detail=(
+                "旧版拆书底料不含正文（chapters.jsonl 无 body）：请填写原书 txt 路径补齐正文，"
+                "或重跑 `python chaishu.py 原书.txt --skip-label` 重建底料后再导入"))
+        sp = Path(src)
+        if not sp.is_file():
+            raise HTTPException(status_code=422, detail=f"原书 txt 不存在：{src}")
+        try:
+            raw = sp.read_bytes()
+            text = ""
+            for enc in ("utf-8-sig", "utf-8", "gb18030"):
+                try:
+                    text = raw.decode(enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if not text:
+                raise ValueError("解码失败")
+        except Exception:
+            raise HTTPException(status_code=422, detail=f"无法读取原书 txt：{src}")
+        by_no = {c["no"]: c for c in split_import(text) if str(c.get("body", "")).strip()}
+        merged = 0
+        for c in chapters:
+            src_ch = by_no.get(int(c.get("no", -1)))
+            if src_ch is not None:
+                c["body"] = src_ch["body"]
+                merged += 1
+        if merged == 0:
+            raise HTTPException(status_code=422, detail="原书 txt 切章后无法与底料章号对齐，请检查是否同一本书")
+
     labels = {int(o["no"]): o for o in _load_jsonl(d / "labels.jsonl") if "no" in o}
     report_text = ""
     rp = d / "report.md"
@@ -1186,16 +1222,20 @@ def corpus_import_chaishu(body: ChaishuImportIn) -> dict:
         by_type[r["excerpt_type"]] = by_type.get(r["excerpt_type"], 0) + 1
 
     # ---- 同步建参考项目：与自己的小说项目平行，互相可作范文 ----
-    pid = _ensure_reference_project(title, body, chapters, labels, labeled_n, report_text)
+    pid, ent_counts, has_entities = _ensure_reference_project(
+        d, title, body, chapters, labels, labeled_n, report_text)
 
     return {"added": n, "by_type": by_type, "title": title, "article_id": slug,
-            "chapters_total": len(chapters), "labeled": labeled_n, "project_id": pid}
+            "chapters_total": len(chapters), "labeled": labeled_n, "project_id": pid,
+            "entities": ent_counts, "entities_preextracted": has_entities}
 
 
-def _ensure_reference_project(title: str, body: ChaishuImportIn, chapters: list[dict],
+def _ensure_reference_project(d: Path, title: str, body: ChaishuImportIn, chapters: list[dict],
                               labels: dict[int, dict], labeled_n: int,
                               report_text: str) -> str:
-    """拆书产物项目化：复用同书名参考项目（重复导入=层版本更新），intro 放体检表、outline 放全书脉络。"""
+    """拆书产物项目化：复用同书名参考项目（重复导入=层版本更新）。
+    五层全摆：intro=体检表、outline=全书脉络、plot=已标注章概要、draft=全书原文；
+    实体库：entities.jsonl 直转角色/地点/物品，labels 伏笔事件直转（均零 LLM）。"""
     existing = _project_store.find_by_title(title, kind="reference")
     meta = existing if existing else _project_store.create(
         title=title, intro=(body.tags[0] if body.tags else "拆书参考项目"), kind="reference")
@@ -1229,7 +1269,74 @@ def _ensure_reference_project(title: str, body: ChaishuImportIn, chapters: list[
         lines.append(line)
     _project_store.adopt(meta.id, "outline", [], "\n".join(lines),
                          note=f"拆书导入：全书 {len(chapters)} 章脉络")
-    return meta.id
+
+    # 剧情层：已标注章的概要（未标注章无概要，不硬凑）
+    plot_lines = [f"《{title}》剧情概要（来自拆书标签，已标注 {labeled_n}/{len(chapters)} 章）", ""]
+    vol = None
+    for c in chapters:
+        no = c.get("no", 0)
+        if no not in labels:
+            continue
+        if c.get("volume") != vol:
+            vol = c.get("volume")
+            plot_lines.append(f"【{vol}】")
+        lb = labels.get(no) or {}
+        events = "；".join(
+            f"{e.get('note', '')}（{_CHAISHU_EVENT_CN.get(e.get('type', ''), e.get('type', ''))}）"
+            for e in lb.get("events", []))
+        plot_lines.append(f"{ch_name(no)} {c.get('title', '')}：{lb.get('summary', '')}"
+                          + (f"｜事件：{events}" if events else ""))
+    _project_store.adopt(meta.id, "plot", [], "\n".join(plot_lines),
+                         note=f"拆书导入：{labeled_n} 章剧情概要")
+
+    # 正文层：全书原文（章号+标题+body），创作导航按章浏览不卡
+    parts = [f"{ch_name(c.get('no', 0))} {c.get('title', '')}\n{c.get('body', '')}"
+             for c in chapters if str(c.get("body", "")).strip()]
+    total_chars = sum(len(str(c.get("body", ""))) for c in chapters)
+    _project_store.adopt(meta.id, "draft", [], "\n\n".join(parts),
+                         note=f"拆书导入：全书原文 {len(parts)} 章约 {total_chars // 10000} 万字")
+
+    # 实体库：工具实体层（entities.jsonl）直转角色/地点/物品 + labels 伏笔直转。
+    # 同名幂等：只补出场章，不覆盖既有内容；导入零 LLM 调用（提取已在拆书夜跑完成）。
+    ent_counts = {"character": 0, "location": 0, "item": 0, "foreshadow": 0}
+    store = _entities_for(meta.id)
+    ent_rows = _load_jsonl(d / "entities.jsonl")
+    ent_key_type = {"characters": "character", "locations": "location", "items": "item"}
+    for row in ent_rows:
+        try:
+            no = int(row.get("no", 0))
+        except (TypeError, ValueError):
+            continue
+        for key, etype in ent_key_type.items():
+            for e in row.get(key) or []:
+                if not isinstance(e, dict):
+                    continue
+                name = str(e.get("name", "")).strip()[:24]
+                if not name:
+                    continue
+                existing_e = store.find(etype, name)
+                if existing_e is None:
+                    store.add(etype, name, summary=str(e.get("note", "")).strip()[:60],
+                              details="拆书工具提取", chapter=no)
+                    ent_counts[etype] += 1
+                elif no not in existing_e.appearances:
+                    store.record_appearance(existing_e.id, no)
+    for no in sorted(labels):
+        for e in (labels[no].get("events") or []):
+            if e.get("type") != "foreshadow":
+                continue
+            note = str(e.get("note", "")).strip()
+            if not note:
+                continue
+            name = note[:16]
+            existing_e = store.find("foreshadow", name)
+            if existing_e is None:
+                store.add("foreshadow", name, summary=note,
+                          details=f"拆书标签：第{no}章伏笔事件", chapter=no)
+                ent_counts["foreshadow"] += 1
+            elif no not in existing_e.appearances:
+                store.record_appearance(existing_e.id, no)
+    return meta.id, ent_counts, bool(ent_rows)
 
 
 # ---- M5 引导式写作：主路向导 + 今日章台 ----

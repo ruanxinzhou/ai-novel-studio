@@ -37,17 +37,29 @@ def client(tmp_path, monkeypatch):
     return TestClient(app)
 
 
-def _make_chaishu_dir(tmp_path, n_chapters=5, labeled=(1, 3)):
+def _make_chaishu_dir(tmp_path, n_chapters=5, labeled=(1, 3), with_body=True,
+                      with_entities=True):
     d = tmp_path / "拆书-测试参考书"
     d.mkdir()
     with open(d / "chapters.jsonl", "w", encoding="utf-8") as f:
         for i in range(1, n_chapters + 1):
-            f.write(json.dumps({"no": i, "title": f"测试章{i}", "volume": "正文",
-                                "chars": 2000}, ensure_ascii=False) + "\n")
+            row = {"no": i, "title": f"测试章{i}", "volume": "正文", "chars": 2000}
+            if with_body:
+                row["body"] = f"第{i}章正文内容。" * 100
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
     with open(d / "labels.jsonl", "w", encoding="utf-8") as f:
         for no in labeled:
             f.write(json.dumps({"no": no, "summary": f"第{no}章概要", "hook": True,
-                                "events": [{"type": "shuangdian", "note": "打脸"}]},
+                                "events": [{"type": "shuangdian", "note": "打脸"},
+                                           {"type": "foreshadow", "note": "神秘怀表"}]},
+                               ensure_ascii=False) + "\n")
+    if with_entities:
+        with open(d / "entities.jsonl", "w", encoding="utf-8") as f:
+            f.write(json.dumps({"no": 1, "characters": [{"name": "林奇", "note": "主角，摄影师"}],
+                                "locations": [{"name": "纸扎铺", "note": "城南老店"}],
+                                "items": []}, ensure_ascii=False) + "\n")
+            f.write(json.dumps({"no": 3, "characters": [{"name": "林奇", "note": "主角，摄影师"}],
+                                "locations": [], "items": [{"name": "怀表", "note": "神秘遗物"}]},
                                ensure_ascii=False) + "\n")
     (d / "report.md").write_text("# 节奏体检表\n\n总章数 5 章，爽点章距中位 3 章。", encoding="utf-8")
     return d
@@ -98,3 +110,47 @@ class TestChaishuReferenceProject:
         store_list = client.get("/api/projects").json()["projects"]
         kinds = {p["title"]: p["kind"] for p in store_list}
         assert kinds["我的书"] == "own" and kinds["测试参考书"] == "reference"
+
+    def test_import_populates_plot_draft_and_entities(self, client, tmp_path):
+        d = _make_chaishu_dir(tmp_path)
+        r = client.post("/api/corpus/import_chaishu", json={"dir": str(d)}).json()
+        pid = r["project_id"]
+
+        # 剧情层：已标注章概要（未标注章不硬凑）
+        plot = client.get(f"/api/projects/{pid}/layers/plot").json()["version"]
+        assert "第1章 测试章1：第1章概要" in plot["y"]
+        assert "第2章" not in plot["y"]
+        # 正文层：全书原文
+        draft = client.get(f"/api/projects/{pid}/layers/draft").json()["version"]
+        assert "第1章正文内容。" in draft["y"] and "第5章正文内容。" in draft["y"]
+        # 实体库：entities.jsonl 直转 + labels 伏笔直转；同名幂等只补出场章
+        ents = client.get(f"/api/projects/{pid}/entities").json()["entities"]
+        by_name = {e["name"]: e for e in ents}
+        assert by_name["林奇"]["appearances"] == [1, 3]
+        assert by_name["纸扎铺"]["appearances"] == [1]
+        assert by_name["怀表"]["appearances"] == [3]
+        assert by_name["神秘怀表"]["type"] == "foreshadow"
+        assert r["entities"]["character"] == 1 and r["entities"]["foreshadow"] == 1
+        assert r["entities_preextracted"] is True
+
+    def test_legacy_dir_requires_source_txt(self, client, tmp_path):
+        d = _make_chaishu_dir(tmp_path, with_body=False)
+        # 旧版底料无 body 且未给原书 txt → 明确报错
+        r = client.post("/api/corpus/import_chaishu", json={"dir": str(d)})
+        assert r.status_code == 422
+        assert "原书 txt" in r.json()["detail"]
+        # 给了原书 txt → 切章按章号补齐正文层
+        src = tmp_path / "测试参考书.txt"
+        src.write_text("第1章 测试章1\n第1章正文内容。\n\n第2章 测试章2\n第2章正文内容。",
+                       encoding="utf-8")
+        r2 = client.post("/api/corpus/import_chaishu",
+                         json={"dir": str(d), "source_txt": str(src)}).json()
+        draft = client.get(f"/api/projects/{r2['project_id']}/layers/draft").json()["version"]
+        assert "第1章正文内容。" in draft["y"] and "第2章正文内容。" in draft["y"]
+
+    def test_missing_entities_jsonl_flags_warning(self, client, tmp_path):
+        d = _make_chaishu_dir(tmp_path, with_entities=False)
+        r = client.post("/api/corpus/import_chaishu", json={"dir": str(d)}).json()
+        assert r["entities_preextracted"] is False
+        # 伏笔仍从 labels 直转
+        assert r["entities"]["foreshadow"] == 1 and r["entities"]["character"] == 0

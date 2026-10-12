@@ -20,7 +20,7 @@ python tools/chaishu/chaishu.py 我的书.txt
 python tools/chaishu/chaishu.py 我的书.txt --limit 20
 
 # 只出统计层（切章+卷结构+章长节奏，秒出，不调 LLM）
-python tools/chaishu/chaishu.py 我的书.txt --skip-label
+python tools/chaishu/chaishu.py 我的书.txt --skip-label --skip-entities
 
 # 实测稳定后加并发
 python tools/chaishu/chaishu.py 我的书.txt --workers 4
@@ -37,19 +37,22 @@ Get-Content "拆书-我的书\chaishu.log" -Wait -Tail 10
 |---|---|---|
 | `report.md` | 节奏体检表：总量体格 / 卷结构 / 爽点章距 / 事件密度 / 断章钩子率 / 升级间隔 / 蓄力段 / 蓄爆距离 / 伏笔周期 / 一句话诊断 | **人读**（只印聚合数，不印情节——防洗稿红线） |
 | `arc.md` | 全书脉络：每章一行（概要/钩子/事件），对照手感用 | 人读（自用研究，含情节） |
-| `chapters.jsonl` | 底料：每章 章号/卷/字数 | 机器（未来任何渲染器的原料） |
-| `labels.jsonl` | 底料：每章 LLM 标签（概要/钩子/事件/升级） | 机器（**原子收据，重跑自动续传**） |
+| `chapters.jsonl` | 底料：每章 章号/卷/字数/**正文全文**（导入端摆正文层靠它） | 机器（未来任何渲染器的原料） |
+| `labels.jsonl` | 底料：每章 LLM 标签（概要/钩子/事件/升级） | 机器（**原子收据，重跑自动续传**；导入端摆剧情层+伏笔实体） |
+| `entities.jsonl` | 底料：每章 LLM 实体（角色/地点/物品） | 机器（**原子收据，重跑自动续传**；导入端直转实体库） |
 | `chaishu.log` | 运行日志 | tail 看进度 |
 
 ## 断点续跑（幂等）
 
 第 250 章崩了？**重跑同一条命令**，前 250 章的收据还在，一秒不重花，自动从第 251 章续。
-失败章也会在下次重跑时自动补。
+失败章也会在下次重跑时自动补。语义层与实体层是**两套独立收据**（labels.jsonl / entities.jsonl），
+`--skip-label` 只跳标签不打扰实体，反之亦然。
 
 ## 分层管线的成本账
 
 - **统计层**（章长/卷结构/字数节奏）：纯 Python，秒出，零成本
 - **语义层**（逐章标签）：LLM 每章约 200 字输出，300 章 ≈ 120 万 token，本地 trae-exec 零边际成本
+- **实体层**（逐章角色/地点/物品）：LLM 每章一次调用，输出更短；导入实体库全靠它，**研究工作全在工具里夜跑，导入端零 LLM**
 - **诊断**（report 第 10 行）：全书标签汇总后第二次 LLM 调用，一次搞定
 
 ## 参数
@@ -60,9 +63,16 @@ Get-Content "拆书-我的书\chaishu.log" -Wait -Tail 10
 | `--workers N` | 2 | 并发数。保守起步，日志吞吐稳了再加 |
 | `--model NAME` | GLM-5.3 | trae-exec 模型 |
 | `--timeout SEC` | 300 | 单章调用超时（超时自动杀进程树） |
-| `--limit N` | 0（全量） | 试点抽样 N 章 |
-| `--skip-label` | – | 跳过语义层，只出统计 |
+| `--limit N` | 0（全量） | 试点抽样 N 章（语义层与实体层共用此范围） |
+| `--skip-label` | – | 跳过语义层（已有标签收据不重打） |
+| `--skip-entities` | – | 跳过实体层（不提取角色/地点/物品） |
 | `--skip-diagnose` | – | 跳过 report 第 10 行的总评调用 |
+
+## 导入主系统
+
+语料库页「导入拆书目录」填输出目录：生成三类语料条目 + **参考项目**（简介=体检表 / 大纲=全书脉络 /
+剧情=已标注章概要 / 正文=全书原文 / 实体库=角色·地点·道具·伏笔），与你的小说项目平行、互相可作范文。
+旧版底料（chapters.jsonl 无正文）导入时在弹窗里补填原书 txt 路径即可。
 
 ## 设计决策（圆桌 2026-10-10）
 
@@ -75,5 +85,5 @@ Get-Content "拆书-我的书\chaishu.log" -Wait -Tail 10
 ## 测试
 
 ```bash
-python tools/chaishu/test_chaishu.py   # 17 项单测：切章/卷归属/抽样/解析容错/聚合/渲染/收据幂等
+python tools/chaishu/test_chaishu.py   # 21 项单测：切章/卷归属/抽样/标签解析/实体解析容错/聚合/渲染/收据幂等
 ```

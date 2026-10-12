@@ -249,6 +249,74 @@ def label_chapter(ch: dict, model: str, timeout: int) -> dict:
             "ts": datetime.now().isoformat(timespec="seconds"), **obj}
 
 
+# ---------------------------------------------------------------- 实体层（LLM 逐章提取，独立收据 entities.jsonl）
+
+ENTITY_PROMPT = """你是网文拆书助手。阅读下面这一章正文，提取出现的实体，只输出一个 JSON object（不要 markdown 代码块，不要任何解释文字）：
+{{"characters": [{{"name": "角色名", "note": "一句话身份/状态，≤15字"}}],
+ "locations": [{{"name": "地点名", "note": "一句话说明，≤15字"}}],
+ "items": [{{"name": "物品/组织/能力名", "note": "一句话说明，≤15字"}}]}}
+
+提取规则：
+- characters：本章有名有姓且对剧情有作用的人物（主角必收，无名群演不收）
+- locations：本章实际发生的关键场景（泛称「街上」「房间里」不收）
+- items：关键物品、组织、能力、称号（一次性提及的普通物件不收）
+- name 用原文出现的写法，不自创缩写；note 不重复 name；本章无该类实体就给空数组
+
+【第{no}章 {title}】
+{body}"""
+
+
+def _parse_entities(raw: str) -> dict:
+    """解析实体提取输出。三级容错与 _parse_label 同法：完整 JSON → 花括号截取 → 逐类字段级抢救。"""
+    t = _strip_fence(raw)
+    obj: dict | None = None
+    m = re.search(r"\{.*\}", t, re.S)
+    if m:
+        try:
+            cand = json.loads(m.group(0))
+            if isinstance(cand, dict) and any(
+                    k in cand for k in ("characters", "locations", "items")):
+                obj = cand
+        except json.JSONDecodeError:
+            pass
+    if obj is None:
+        obj = {}
+        for key in ("characters", "locations", "items"):
+            km = re.search(rf'"{key}"\s*:\s*\[', t)
+            if not km:
+                continue
+            seg = t[km.end():]
+            stop = re.search(r'"(?:characters|locations|items)"\s*:', seg)
+            if stop:
+                seg = seg[: stop.start()]
+            pairs = re.findall(
+                r'"name"\s*:\s*"([^"]*)"(?:\s*,\s*"note"\s*:\s*"([^"]*)")?', seg)
+            obj[key] = [{"name": n, "note": nt or ""} for n, nt in pairs]
+    out: dict[str, list] = {}
+    for key in ("characters", "locations", "items"):
+        cleaned: list[dict] = []
+        for e in obj.get(key) or []:
+            if not isinstance(e, dict):
+                continue
+            name = str(e.get("name", "")).strip()[:24]
+            if not name:
+                continue
+            cleaned.append({"name": name, "note": str(e.get("note", "")).strip()[:30]})
+        out[key] = cleaned[:12]
+    if not any(out.values()):
+        raise ValueError(f"输出不含任何实体字段：{t[:80]!r}")
+    return out
+
+
+def extract_chapter_entities(ch: dict, model: str, timeout: int) -> dict:
+    body = ch["body"][:12000]
+    prompt = ENTITY_PROMPT.format(no=ch["no"], title=ch["title"], body=body)
+    raw = trae_exec(prompt, model=model, timeout_sec=timeout)
+    obj = _parse_entities(raw)
+    return {"no": ch["no"], "model": model,
+            "ts": datetime.now().isoformat(timespec="seconds"), **obj}
+
+
 # ---------------------------------------------------------------- 收据（幂等续跑）
 
 def load_receipts(labels_file: Path) -> dict[int, dict]:
@@ -288,7 +356,8 @@ def main() -> None:
     ap.add_argument("--model", default="GLM-5.3", help="trae-exec 模型")
     ap.add_argument("--timeout", type=int, default=300, help="单章调用超时秒数")
     ap.add_argument("--limit", type=int, default=0, help="试点：分层抽样 N 章（0=全量）")
-    ap.add_argument("--skip-label", action="store_true", help="只出统计层与底料，不调 LLM")
+    ap.add_argument("--skip-label", action="store_true", help="跳过语义层（标签收据仍在，不重打）")
+    ap.add_argument("--skip-entities", action="store_true", help="跳过实体层（不提取角色/地点/物品）")
     ap.add_argument("--skip-diagnose", action="store_true", help="跳过第二次 LLM 总评（report 第 10 行）")
     args = ap.parse_args()
 
@@ -315,8 +384,9 @@ def main() -> None:
     chapters_file = out_dir / "chapters.jsonl"
     with chapters_file.open("w", encoding="utf-8") as f:
         for ch in chapters:
-            f.write(json.dumps({k: ch[k] for k in ("no", "title", "volume", "chars")},
-                               ensure_ascii=False) + "\n")
+            # 全字段含 body：导入端凭此摆正文层/剧情层/实体抽取（旧版只存元数据，
+            # 导入时需另传原书 txt；重跑 --skip-label 可秒级重建带正文的底料）
+            f.write(json.dumps(ch, ensure_ascii=False) + "\n")
     log(f"切章完成：{len(chapters)} 章 / {total_chars} 字 → {chapters_file.name}")
 
     # 2. 统计层（秒出，先落一份无标签报告）
@@ -326,11 +396,8 @@ def main() -> None:
                  "sampled": None, "skip_diagnose": True}
     render.render_all(out_dir, **base_meta)
     log(f"统计层完成：report.md / arc.md（无标签版）已生成")
-    if args.skip_label:
-        log(f"--skip-label：跳过语义层，收工。底料 {chapters_file.name}，报告 report.md")
-        return
 
-    # 3. 试点抽样
+    # 3. 试点抽样（语义层与实体层共用此范围）
     targets = chapters
     sampled_idx: list[int] | None = None
     if args.limit and args.limit < len(chapters):
@@ -340,34 +407,67 @@ def main() -> None:
 
     # 4. 语义层：并发打标签，收据续跑
     done = load_receipts(labels_file)
-    todo = [ch for ch in targets if ch["no"] not in done]
-    log(f"语义层：{len(targets)} 章中待打标签 {len(todo)} 章（已有收据 {len(targets) - len(todo)}，跳过）")
-    lock = threading.Lock()
-    ok, fail = 0, 0
-    t0 = time.time()
-    if todo:
-        with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
-            futures = {pool.submit(label_chapter, ch, args.model, args.timeout): ch for ch in todo}
-            for i, fut in enumerate(as_completed(futures), 1):
-                ch = futures[fut]
-                try:
-                    obj = fut.result()
-                    with lock:
-                        append_receipt(labels_file, obj)
-                        done[obj["no"]] = obj
-                        ok += 1
-                    log(f"第{ch['no']}章 完成（{i}/{len(todo)}，累计 {time.time()-t0:.0f}s）")
-                except Exception as e:
-                    with lock:
-                        fail += 1
-                    log(f"第{ch['no']}章 失败：{e}")
-    log(f"语义层结束：成功 {ok}，失败 {fail}（失败章重跑本命令即自动补）")
+    if args.skip_label:
+        log("--skip-label：跳过语义层（已有收据不重打）")
+    else:
+        todo = [ch for ch in targets if ch["no"] not in done]
+        log(f"语义层：{len(targets)} 章中待打标签 {len(todo)} 章（已有收据 {len(targets) - len(todo)}，跳过）")
+        lock = threading.Lock()
+        ok, fail = 0, 0
+        t0 = time.time()
+        if todo:
+            with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
+                futures = {pool.submit(label_chapter, ch, args.model, args.timeout): ch for ch in todo}
+                for i, fut in enumerate(as_completed(futures), 1):
+                    ch = futures[fut]
+                    try:
+                        obj = fut.result()
+                        with lock:
+                            append_receipt(labels_file, obj)
+                            done[obj["no"]] = obj
+                            ok += 1
+                        log(f"第{ch['no']}章 完成（{i}/{len(todo)}，累计 {time.time()-t0:.0f}s）")
+                    except Exception as e:
+                        with lock:
+                            fail += 1
+                        log(f"第{ch['no']}章 失败：{e}")
+        log(f"语义层结束：成功 {ok}，失败 {fail}（失败章重跑本命令即自动补）")
 
-    # 5. 渲染最终报告（含标签 + 诊断）
+    # 5. 实体层：逐章提取角色/地点/物品，独立收据 entities.jsonl 续跑
+    entities_file = out_dir / "entities.jsonl"
+    if args.skip_entities:
+        log("--skip-entities：跳过实体层")
+    else:
+        done_e = load_receipts(entities_file)
+        todo_e = [ch for ch in targets if ch["no"] not in done_e]
+        log(f"实体层：{len(targets)} 章中待提取 {len(todo_e)} 章（已有收据 {len(targets) - len(todo_e)}，跳过）")
+        lock_e = threading.Lock()
+        ok_e, fail_e = 0, 0
+        t1 = time.time()
+        if todo_e:
+            with ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
+                futures = {pool.submit(extract_chapter_entities, ch, args.model, args.timeout): ch
+                           for ch in todo_e}
+                for i, fut in enumerate(as_completed(futures), 1):
+                    ch = futures[fut]
+                    try:
+                        obj = fut.result()
+                        with lock_e:
+                            append_receipt(entities_file, obj)
+                            ok_e += 1
+                        if i % 10 == 0 or i == len(todo_e):
+                            log(f"实体层进度：{i}/{len(todo_e)}，累计 {time.time()-t1:.0f}s")
+                    except Exception as e:
+                        with lock_e:
+                            fail_e += 1
+                        log(f"第{ch['no']}章 实体失败：{e}")
+        log(f"实体层结束：成功 {ok_e}，失败 {fail_e}（失败章重跑本命令即自动补）")
+
+    # 6. 渲染最终报告（含标签 + 诊断）
     labels = {no: obj for no, obj in done.items()}
     render.render_all(out_dir, book=book.stem, chapters=chapters, labels=labels,
                       sampled=sampled_idx, skip_diagnose=args.skip_diagnose)
-    log("收工。产出：report.md（节奏决策表）/ arc.md（全书脉络）/ chapters.jsonl + labels.jsonl（底料）")
+    log("收工。产出：report.md / arc.md / chapters.jsonl / labels.jsonl / entities.jsonl（导入端一并读取）")
 
 
 def _import_render():

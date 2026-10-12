@@ -231,7 +231,7 @@ export const corpusApi = {
     }
     return req<{ total: number; excerpts: Excerpt[] } & PageMeta>(`/api/corpus/search?${p}`)
   },
-  importChaishu: (dir: string, title?: string, tags?: string[]) =>
+  importChaishu: (dir: string, title?: string, tags?: string[], sourceTxt?: string) =>
     req<{
       added: number
       by_type: Record<string, number>
@@ -242,7 +242,7 @@ export const corpusApi = {
       project_id: string
     }>('/api/corpus/import_chaishu', {
       method: 'POST',
-      body: JSON.stringify({ dir, title: title ?? '', tags: tags ?? [] }),
+      body: JSON.stringify({ dir, title: title ?? '', tags: tags ?? [], source_txt: sourceTxt ?? '' }),
     }),
 }
 

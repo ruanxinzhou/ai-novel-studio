@@ -18,13 +18,15 @@ const pageSize = 10
 // 导入拆书目录（tools/chaishu 产物）
 const impVisible = ref(false)
 const impLoading = ref(false)
-const impForm = reactive({ dir: '', title: '', tags: '' })
+const impForm = reactive({ dir: '', title: '', tags: '', sourceTxt: '' })
 const impResult = ref<{
   added: number
   by_type: Record<string, number>
   title: string
   chapters_total: number
   labeled: number
+  entities?: Record<string, number>
+  entities_preextracted?: boolean
 } | null>(null)
 
 onMounted(async () => {
@@ -69,7 +71,8 @@ async function doImport() {
   impResult.value = null
   try {
     const extra = impForm.tags.split(/[,，\s]+/).filter(Boolean)
-    const r = await corpusApi.importChaishu(impForm.dir.trim(), impForm.title.trim(), extra)
+    const r = await corpusApi.importChaishu(
+      impForm.dir.trim(), impForm.title.trim(), extra, impForm.sourceTxt.trim())
     impResult.value = r
     ElMessage.success(`已导入《${r.title}》${r.added} 条`)
     const [t, g] = await Promise.all([corpusApi.types(), corpusApi.tags()])
@@ -133,12 +136,15 @@ async function doImport() {
 
     <el-dialog v-model="impVisible" title="导入拆书目录" width="580px">
       <div style="color: #888; font-size: 12px; line-height: 1.8; margin-bottom: 10px">
-        导入独立拆书工具（tools/chaishu）的输出目录，生成三类条目：节奏体检表、全书脉络（每 100 章一块）、单章大纲。
-        同书重复导入 = 覆盖更新（先试点后全量可直接重导）。
+        导入独立拆书工具（tools/chaishu）的输出目录：生成三类语料条目 + 参考项目（简介/大纲/剧情/正文四层 + 实体库），
+        与你的小说项目平行，互相可作范文。同书重复导入 = 覆盖更新。
       </div>
       <el-form label-width="80px">
         <el-form-item label="目录路径" required>
           <el-input v-model="impForm.dir" placeholder="拆书 CLI 的输出目录，如 C:\Users\你\Downloads\拆书-书名" />
+        </el-form-item>
+        <el-form-item label="原书 txt">
+          <el-input v-model="impForm.sourceTxt" placeholder="可选；旧版底料无正文时按它补齐（新版工具已自带正文）" />
         </el-form-item>
         <el-form-item label="书名">
           <el-input v-model="impForm.title" placeholder="留空则从目录名「拆书-」之后推断" />
@@ -152,7 +158,14 @@ async function doImport() {
           《{{ impResult.title }}》共导入 {{ impResult.added }} 条（已标注 {{ impResult.labeled }}/{{ impResult.chapters_total }} 章）
         </template>
         <el-tag v-for="(n, t) in impResult.by_type" :key="t" size="small" style="margin: 4px 6px 0 0">{{ t }} ×{{ n }}</el-tag>
+        <div v-if="impResult.entities" style="margin-top: 6px; font-size: 12px">
+          实体库：{{ impResult.entities.character || 0 }} 角色 / {{ impResult.entities.location || 0 }} 地点 /
+          {{ impResult.entities.item || 0 }} 道具 / {{ impResult.entities.foreshadow || 0 }} 伏笔
+        </div>
       </el-alert>
+      <el-alert v-if="impResult && impResult.entities_preextracted === false" type="warning" :closable="false"
+        title="产物中无 entities.jsonl：实体库只导入了伏笔。重跑拆书工具（默认已含实体层）后重新导入即可补齐角色/地点/道具"
+        style="margin-top: 8px" />
       <template #footer>
         <el-button @click="impVisible = false">关闭</el-button>
         <el-button type="primary" :loading="impLoading" @click="doImport">导入</el-button>
