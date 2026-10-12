@@ -130,6 +130,7 @@ export interface ChapterReview {
   summary: string
   unstable_count: number
   attempts: number
+  rhythm_warning?: string // 审稿附带的节奏饥饿提示（纯数据检查，不参与 blocked 判定）
 }
 
 // ---- 必现标记（M2）----
@@ -618,6 +619,7 @@ export interface DeskChapter {
   polish_done: boolean
   review_verdict: string | null
   finalized_at: string
+  payoff: string
   chars: number
   outline_preview: string
 }
@@ -641,6 +643,7 @@ export interface DeskChapterFull {
   polish: DeskWorkText
   review: ChapterReview | null
   finalized_at: string
+  payoff: string // 本章兑现规模：none/small/medium/climax，空=未记录
 }
 export interface DeskChapterDetail {
   project: string
@@ -728,9 +731,15 @@ export const deskApi = {
     req<ChapterReview & { chapter: number }>(`/api/projects/${pid}/desk/${chapter}/review`, {
       method: 'POST',
     }),
-  finalize: (pid: string, chapter: number, autoEntities = true) =>
+  // 兑现四选一：随手记录/修改本章兑现规模（未定稿可先记，定稿后可改）
+  setPayoff: (pid: string, chapter: number, payoff: string) =>
+    req<{ chapter: number; payoff: string; payoff_label: string }>(
+      `/api/projects/${pid}/desk/${chapter}/payoff`,
+      { method: 'PUT', body: JSON.stringify({ payoff }) },
+    ),
+  finalize: (pid: string, chapter: number, autoEntities = true, payoff?: string) =>
     req<FinalizeResult>(`/api/projects/${pid}/desk/${chapter}/finalize`, {
       method: 'POST',
-      body: JSON.stringify({ auto_entities: autoEntities }),
+      body: JSON.stringify({ auto_entities: autoEntities, payoff: payoff ?? null }),
     }),
 }

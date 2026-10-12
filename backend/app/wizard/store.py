@@ -26,6 +26,10 @@ STATION_LABELS = {
 }
 STAGES = ("plot", "draft", "polish")
 
+# 兑现四选一（P2③ 天蚕土豆：定稿时顺手点选，攒出自家节奏量纲）
+PAYOFF_SCALES = ("none", "small", "medium", "climax")
+PAYOFF_LABELS = {"none": "无", "small": "小爽点", "medium": "中兑现", "climax": "卷高潮"}
+
 
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -170,6 +174,7 @@ class ChapterWork:
     polish: dict = field(default_factory=dict)
     review: dict | None = None                   # review_chapter().as_dict()
     finalized_at: str = ""
+    payoff: str = ""                             # 本章兑现规模：none/small/medium/climax，空=未记录
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -181,6 +186,7 @@ class ChapterWork:
             plot=dict(d.get("plot") or {}), draft=dict(d.get("draft") or {}),
             polish=dict(d.get("polish") or {}), review=d.get("review"),
             finalized_at=str(d.get("finalized_at", "") or ""),
+            payoff=str(d.get("payoff", "") or ""),
         )
 
 
@@ -240,5 +246,14 @@ class DeskStore:
     def mark_finalized(self, no: int) -> ChapterWork:
         work = self.ensure(no)
         work.finalized_at = _now()
+        self._flush()
+        return work
+
+    def record_payoff(self, no: int, payoff: str) -> ChapterWork:
+        """记录/修改本章兑现规模（四选一）；正文改动不清除，作者随时可改。"""
+        if payoff not in PAYOFF_SCALES:
+            raise ValueError(f"未知兑现规模：{payoff}（可选 {PAYOFF_SCALES}）")
+        work = self.ensure(no)
+        work.payoff = payoff
         self._flush()
         return work

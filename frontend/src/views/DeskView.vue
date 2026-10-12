@@ -37,6 +37,26 @@ const busy = ref('')
 const review = ref<ChapterReview | null>(null)
 const lastFinalize = ref<FinalizeResult | null>(null)
 
+// 兑现四选一（P2③）：本章兑现规模，作者点选攒出自家节奏量纲
+const PAYOFF_OPTIONS = [
+  { value: 'none', label: '无' },
+  { value: 'small', label: '小爽点' },
+  { value: 'medium', label: '中兑现' },
+  { value: 'climax', label: '卷高潮' },
+] as const
+const payoffChoice = ref('')
+
+async function onPayoffChange(val: string | number | boolean | undefined) {
+  if (typeof val !== 'string') return
+  payoffChoice.value = val
+  if (!currentProjectId.value || !currentNo.value) return
+  try {
+    await deskApi.setPayoff(currentProjectId.value, currentNo.value, val)
+  } catch (e) {
+    ElMessage.error(`兑现记录失败：${(e as Error).message}`)
+  }
+}
+
 // 生成中的正文框自动滚到底
 const stagePanes = reactive<Record<StageKey, HTMLElement | null>>({ plot: null, draft: null, polish: null })
 watch(text, () => {
@@ -102,6 +122,7 @@ async function selectChapter(no: number) {
     directive.draft = ''
     directive.polish = ''
     review.value = ch.review
+    payoffChoice.value = ch.payoff ?? ''
     lastFinalize.value = null
   } catch (e) {
     ElMessage.error(`章节加载失败：${(e as Error).message}`)
@@ -306,9 +327,11 @@ async function runReview() {
 
 async function doFinalize() {
   if (busy.value) return
+  const payoff = payoffChoice.value || 'none'
   try {
     await ElMessageBox.confirm(
-      `定稿第 ${currentNo.value} 章？将自动执行保鲜飞轮：抽取实体、核验必现标记、整本合成采纳为新版本。`,
+      `定稿第 ${currentNo.value} 章？将自动执行保鲜飞轮：抽取实体、伏笔兑现问询、核验必现标记、整本合成采纳为新版本。` +
+        `本章兑现将记为「${PAYOFF_OPTIONS.find((p) => p.value === payoff)!.label}」（可在上方四选一里改）。`,
       '定稿确认',
       { confirmButtonText: '定稿', cancelButtonText: '再改改', type: 'info' },
     )
@@ -317,7 +340,8 @@ async function doFinalize() {
   }
   busy.value = 'finalize'
   try {
-    lastFinalize.value = await deskApi.finalize(currentProjectId.value, currentNo.value)
+    lastFinalize.value = await deskApi.finalize(currentProjectId.value, currentNo.value, true, payoff)
+    payoffChoice.value = payoff
     ElMessage.success(`第 ${currentNo.value} 章已定稿，飞轮运转完成`)
     await loadOverview()
     const next = overview.value?.chapters.find((c) => !c.finalized_at)
@@ -427,6 +451,14 @@ function goContinueOutline() {
               >
                 审{{ c.review_verdict === 'pass' ? '过' : '卡' }}
               </el-tag>
+              <el-tag
+                v-if="c.payoff === 'climax'"
+                type="danger"
+                size="small"
+                effect="plain"
+              >卷高潮</el-tag>
+              <el-tag v-else-if="c.payoff === 'medium'" type="warning" size="small" effect="plain">中兑现</el-tag>
+              <el-tag v-else-if="c.payoff === 'small'" type="success" size="small" effect="plain">爽</el-tag>
               <span v-if="c.chars" style="font-size: 12px; color: #999">{{ c.chars }} 字</span>
             </div>
           </div>
@@ -501,10 +533,10 @@ function goContinueOutline() {
           </el-collapse>
           <div style="margin-top: 8px; font-size: 12px">
             <el-checkbox v-model="useChecklist" size="small">
-              生成剧情/正文时带开章核对单（实体快照 + 到期伏笔 + 本章位置）
+              生成剧情/正文时带开章核对单（实体快照 + 到期伏笔 + 节奏位置）
             </el-checkbox>
             <span style="color: #999">
-              —— 从实体库与章台实时推导：已出场角色/地点/道具/情节线不得重设，账龄最长的未回收伏笔优先兑现
+              —— 从实体库与章台实时推导：已出场角色/地点/道具/情节线不得重设，账龄最长的未回收伏笔优先兑现，距上次兑现过远会提醒安排
             </span>
           </div>
         </el-card>
@@ -586,6 +618,9 @@ function goContinueOutline() {
               <el-tag :type="it.status === '稳' ? 'success' : 'danger'" size="small" effect="plain">{{ it.name }}：{{ it.status }}</el-tag>
               <span style="margin-left: 8px; color: #666">{{ it.problem }}</span>
             </div>
+            <div v-if="review.rhythm_warning" style="margin-top: 8px; font-size: 12px; color: #e6a23c">
+              ⚠ {{ review.rhythm_warning }}
+            </div>
             <div v-if="review.verdict !== 'pass'" style="margin-top: 8px; font-size: 12px; color: #e6a23c">
               处理方式：改完正文/润色后重新审稿；或到「审稿与标记」页把问题转成下一章必现标记
             </div>
@@ -596,7 +631,7 @@ function goContinueOutline() {
         <!-- 定稿 -->
         <el-card shadow="never">
           <template #header>
-            <div style="display: flex; gap: 10px; align-items: center">
+            <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap">
               <b>定稿</b>
               <span style="color: #999; font-size: 12px">定稿后进入保鲜飞轮：抽取实体 → 伏笔兑现问询 → 核验必现标记 → 整本合成采纳</span>
               <span style="flex: 1" />
@@ -605,6 +640,17 @@ function goContinueOutline() {
               </el-button>
             </div>
           </template>
+          <div style="margin-bottom: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap">
+            <span style="font-size: 13px"><b>本章兑现：</b></span>
+            <el-radio-group :model-value="payoffChoice" size="small" @update:model-value="onPayoffChange">
+              <el-radio-button v-for="p in PAYOFF_OPTIONS" :key="p.value" :value="p.value">
+                {{ p.label }}
+              </el-radio-button>
+            </el-radio-group>
+            <span style="font-size: 12px; color: #999">
+              顺手点选，攒 20 章即有自家节奏量纲——开章核对单的「节奏位置」与审稿的「节奏饥饿」都吃这份账
+            </span>
+          </div>
           <template v-if="lastFinalize">
             <div style="font-size: 13px; line-height: 2">
               <div>正文版本：v{{ lastFinalize.draft_version }}（全 {{ lastFinalize.total_chapters }} 章）</div>

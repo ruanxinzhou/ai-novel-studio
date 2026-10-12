@@ -214,13 +214,21 @@ def test_reconcile_unknown_names_ignored(tmp_path):
 
 
 def test_reconcile_density_warning(tmp_path):
-    store = _planted_store(tmp_path)
+    store = EntityStore(tmp_path / "dense.json")   # 全新店：10 个坑全部 planted、零回收
     for i in range(10):
         store.add("foreshadow", f"坑{i}", summary="待兑现", chapter=1)
     r = reconcile_foreshadows(
         ReconcileProvider('{"paid": [], "advanced": []}'), store, PromptStore(),
         "正文", chapter=12)
     assert "伏笔过密" in r.warning and "零回收" in r.warning
+    # 写得还不够长（第 9 章）不报；已有一条回收不报
+    assert reconcile_foreshadows(
+        ReconcileProvider('{"paid": [], "advanced": []}'), store, PromptStore(),
+        "正文", chapter=9).warning == ""
+    store.update(store.find("foreshadow", "坑0").id, status="paid")
+    assert reconcile_foreshadows(
+        ReconcileProvider('{"paid": [], "advanced": []}'), store, PromptStore(),
+        "正文", chapter=12).warning == ""
 
 
 def test_reconcile_bad_json_raises(tmp_path):

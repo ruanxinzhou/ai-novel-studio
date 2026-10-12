@@ -63,6 +63,22 @@ _ENTITIES_JSON = json.dumps({
 }, ensure_ascii=False)
 
 
+class _FinalizeProvider:
+    """定稿飞轮假通道：区分实体抽取与伏笔问询两种调用，分别返回固定 payload。"""
+    default_model = None
+
+    def __init__(self, extract: str = _ENTITIES_JSON, reconcile: str = "{}"):
+        self.extract = extract
+        self.reconcile = reconcile
+        self.reconcile_calls = 0
+
+    def chat(self, messages, model=None, max_tokens=None, extra=None):
+        if any("未回收伏笔清单" in m["content"] for m in messages):
+            self.reconcile_calls += 1
+            return LLMResponse(text=self.reconcile, usage=Usage(input_tokens=1, output_tokens=1))
+        return LLMResponse(text=self.extract, usage=Usage(input_tokens=1, output_tokens=1))
+
+
 @pytest.fixture
 def env(tmp_path):
     from types import SimpleNamespace
@@ -190,6 +206,20 @@ class TestDeskStore:
         d.record_review(3, {"verdict": "pass"})
         assert d.get(3).review["verdict"] == "pass"
         assert d.all_nos() == [3]
+
+    def test_payoff_record_roundtrip_and_rejects(self, tmp_path):
+        d = DeskStore(tmp_path / "desk.json")
+        d.record(1, "draft", "正文")
+        d.record_payoff(1, "small")
+        assert d.get(1).payoff == "small"
+        d.record_payoff(1, "climax")            # 随时改
+        d2 = DeskStore(tmp_path / "desk.json")  # 盘上回读
+        assert d2.get(1).payoff == "climax"
+        # 改动正文不清除兑现记录
+        d.record(1, "draft", "改后的正文")
+        assert d.get(1).payoff == "climax"
+        with pytest.raises(ValueError, match="未知兑现规模"):
+            d.record_payoff(1, "big")
 
 
 # ---- 单章微循环 ----
@@ -326,6 +356,14 @@ class TestFinalize:
                              env.entities, env.markers, env.desk, 1)
         assert "error" in r["foreshadow"]
         assert env.desk.get(1).finalized_at      # 问询失败不阻断定稿
+
+    def test_finalize_records_payoff(self, env):
+        self._prepare(env)
+        r = finalize_chapter(FakeProseProvider(), env.prompts, env.project,
+                             env.pid, env.entities, env.markers, env.desk, 1,
+                             auto_entities=False, payoff="medium")
+        assert r["chapter"] == 1
+        assert env.desk.get(1).payoff == "medium"   # 定稿顺手点选落账
 
 
 # ---- API ----
@@ -513,3 +551,47 @@ class TestDeskApi:
         # 审稿输出坏 JSON → 502
         monkeypatch.setattr("app.api.main.get_router", lambda: FakeRouter("乱码"))
         assert client.post(f"/api/projects/{pid}/desk/1/review").status_code == 502
+
+    def test_payoff_endpoint_and_finalize_with_payoff(self, client, monkeypatch):
+        pid = self._setup_book(client, monkeypatch)
+        client.post(f"/api/projects/{pid}/desk/1/run", json={"stage": "plot"})
+        client.post(f"/api/projects/{pid}/desk/1/run", json={"stage": "draft"})
+
+        # 未定稿可先记、可改
+        r = client.put(f"/api/projects/{pid}/desk/1/payoff", json={"payoff": "small"})
+        assert r.status_code == 200 and r.json()["payoff_label"] == "小爽点"
+        client.put(f"/api/projects/{pid}/desk/1/payoff", json={"payoff": "medium"})
+        assert client.get(f"/api/projects/{pid}/desk/1").json()["chapter"]["payoff"] == "medium"
+        # 章节总览也带 payoff
+        assert client.get(f"/api/projects/{pid}/desk").json()["chapters"][0]["payoff"] == "medium"
+        # 非法值 422
+        assert client.put(f"/api/projects/{pid}/desk/1/payoff",
+                          json={"payoff": "big"}).status_code == 422
+
+        # 定稿时改选 → 以定稿提交为准
+        fz = client.post(f"/api/projects/{pid}/desk/1/finalize",
+                         json={"auto_entities": False, "payoff": "climax"})
+        assert fz.status_code == 200
+        assert client.get(f"/api/projects/{pid}/desk/1").json()["chapter"]["payoff"] == "climax"
+
+    def test_review_rhythm_warning(self, client, monkeypatch):
+        """连续 4 章无兑现 → 审稿附带节奏饥饿提示（不改 verdict）。"""
+        pid = client.post("/api/projects", json={"title": "节奏书"}).json()["id"]
+        client.post(f"/api/projects/{pid}/layers/outline",
+                    json={"y": "第1章\n一。\n\n第2章\n二。\n\n第3章\n三。\n\n第4章\n四。", "x_pairs": []})
+        monkeypatch.setattr("app.api.main.get_router", lambda: FakeRouter("正文。"))
+        for no in range(1, 5):
+            client.post(f"/api/projects/{pid}/desk/{no}/run", json={"stage": "plot"})
+            client.post(f"/api/projects/{pid}/desk/{no}/run", json={"stage": "draft"})
+
+        monkeypatch.setattr("app.api.main.get_router", lambda: FakeRouter(_REVIEW_PASS))
+        r3 = client.post(f"/api/projects/{pid}/desk/3/review").json()   # 连续 3 章无兑现：不报
+        assert "rhythm_warning" not in r3
+        r4 = client.post(f"/api/projects/{pid}/desk/4/review").json()   # 连续 4 章：报
+        assert "节奏饥饿" in r4["rhythm_warning"]
+        assert r4["verdict"] == "pass"                                  # 提示不拦稿
+
+        # 第 2 章补记小爽点后，第 4 章再审只算 2 章无兑现：不报
+        client.put(f"/api/projects/{pid}/desk/2/payoff", json={"payoff": "small"})
+        r4b = client.post(f"/api/projects/{pid}/desk/4/review").json()
+        assert "rhythm_warning" not in r4b

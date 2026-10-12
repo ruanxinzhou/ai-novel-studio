@@ -185,12 +185,18 @@ def finalize_chapter(
     desk: DeskStore,
     chapter: int,
     auto_entities: bool = True,
+    payoff: str | None = None,
 ) -> dict:
-    """定稿 + 保鲜飞轮：实体抽取、伏笔兑现问询、标记核验、整本合成采纳。"""
+    """定稿 + 保鲜飞轮：实体抽取、伏笔兑现问询、标记核验、整本合成采纳。
+
+    payoff：定稿时顺手点选的兑现规模四选一（none/small/medium/climax），
+    供开章核对单的节奏位置与审稿的节奏饥饿检查消费。"""
     work = desk.get(chapter)
     text = work_text(work, "polish") or work_text(work, "draft")
     if not text:
         raise ValueError("本章还没有可定稿的正文，请先生成正文")
+    if payoff is not None:
+        desk.record_payoff(chapter, payoff)
 
     entities_report: dict | None = None
     foreshadow_report: dict | None = None

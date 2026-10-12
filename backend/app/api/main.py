@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from ..config import REPO
 from ..context import Material, MaterialFamily
-from ..context.ledger import build_state_materials
+from ..context.ledger import build_state_materials, rhythm_hunger
 from ..corpus import add_excerpts as corpus_add_excerpts
 from ..corpus import article_exists as corpus_article_exists
 from ..corpus import count as corpus_count
@@ -40,6 +40,7 @@ from ..review import STATUS_PENDING, MarkerStore, review_chapter
 from ..review.markers import markers_material
 from ..skills import MODULES, available_modules, module_rules, skill_materials
 from ..wizard import (
+    PAYOFF_LABELS,
     STATIONS,
     DeskStore,
     WizardStore,
@@ -1398,6 +1399,7 @@ def _desk_summary(pid: str) -> dict:
             "polish_done": bool(work_text(w, "polish")),
             "review_verdict": (w.review or {}).get("verdict") if w and w.review else None,
             "finalized_at": w.finalized_at if w else "",
+            "payoff": w.payoff if w else "",
             "chars": len(latest),
             "outline_preview": body[:80],
         })
@@ -1493,6 +1495,11 @@ class DeskTextIn(BaseModel):
 
 class DeskFinalizeIn(BaseModel):
     auto_entities: bool = True
+    payoff: Literal["none", "small", "medium", "climax"] | None = None   # 定稿时顺手点选兑现规模
+
+
+class DeskPayoffIn(BaseModel):
+    payoff: Literal["none", "small", "medium", "climax"]
 
 
 @app.get("/api/projects/{pid}/desk")
@@ -1514,9 +1521,22 @@ def desk_chapter(pid: str, chapter: int) -> dict:
         "project": pid,
         "chapter": work.as_dict() if work else {"no": chapter, "title": "", "plot": {},
                                                 "draft": {}, "polish": {}, "review": None,
-                                                "finalized_at": ""},
+                                                "finalized_at": "", "payoff": ""},
         "outline": outline_map(_project_store, pid).get(chapter, ""),
     }
+
+
+@app.put("/api/projects/{pid}/desk/{chapter}/payoff")
+def desk_set_payoff(pid: str, chapter: int, body: DeskPayoffIn) -> dict:
+    """记录/修改本章兑现规模四选一（未定稿可先记，定稿后可改——节奏数据自家生长）。
+    注意：必须先于 PUT /{stage} 泛型路由注册，否则 "payoff" 会被当作 stage 吃掉。"""
+    _require_project(pid)
+    try:
+        work = _desk_for(pid).record_payoff(chapter, body.payoff)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"chapter": chapter, "payoff": work.payoff,
+            "payoff_label": PAYOFF_LABELS.get(work.payoff, "")}
 
 
 @app.put("/api/projects/{pid}/desk/{chapter}/{stage}")
@@ -1601,7 +1621,7 @@ def desk_run_stream(pid: str, chapter: int, body: DeskRunIn) -> StreamingRespons
 
 @app.post("/api/projects/{pid}/desk/{chapter}/review")
 def desk_review(pid: str, chapter: int) -> dict:
-    """单章六项一致性审稿，结果入章台记录。"""
+    """单章六项一致性审稿，结果入章台记录；附节奏饥饿检查（纯数据，不走 LLM）。"""
     _require_project(pid)
     desk = _desk_for(pid)
     prose = work_text(desk.get(chapter), "polish") or work_text(desk.get(chapter), "draft")
@@ -1612,8 +1632,12 @@ def desk_review(pid: str, chapter: int) -> dict:
         review = review_chapter(_router_provider("review"), _prompt_store, outline, prose)
     except ValueError as e:
         raise HTTPException(status_code=502, detail=str(e))
-    desk.record_review(chapter, review.as_dict())
-    return {"chapter": chapter, **review.as_dict()}
+    record = review.as_dict()
+    hunger = rhythm_hunger(desk, chapter)
+    if hunger:
+        record["rhythm_warning"] = hunger
+    desk.record_review(chapter, record)
+    return {"chapter": chapter, **record}
 
 
 @app.post("/api/projects/{pid}/desk/{chapter}/finalize")
@@ -1621,10 +1645,11 @@ def desk_finalize(pid: str, chapter: int, body: DeskFinalizeIn | None = None) ->
     """定稿 + 保鲜飞轮：实体抽取、标记核验、整本合成采纳 draft 版本。"""
     _require_project(pid)
     auto = body.auto_entities if body else True
+    payoff = body.payoff if body else None
     try:
         return finalize_chapter(
             _chore_provider(), _prompt_store, _project_store, pid,
             _entities_for(pid), _markers_for(pid), _desk_for(pid),
-            chapter, auto_entities=auto)
+            chapter, auto_entities=auto, payoff=payoff)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))

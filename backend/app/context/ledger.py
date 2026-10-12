@@ -156,6 +156,64 @@ CHECKLIST_SECTION_LIMITS = {"character": 20, "location": 10, "item": 12, "plotli
 CHECKLIST_FORESHADOW_LISTED = 15     # 到期伏笔最多列多少条
 FORESHADOW_DUE_AFTER = 8             # 账龄超过多少章标「重点兑现」
 
+# 兑现节奏（P2③）：空账期用拆书经验目标线垫底，攒了自家数据用自家的
+PAYOFF_TARGET_SMALL = 3              # 小爽点目标章距（天蚕土豆：2-3 章一次）
+PAYOFF_TARGET_MEDIUM = 12            # 中兑现目标章距（10-15 章一次取中值）
+PAYOFF_HUNGER_AFTER = 4              # 连续多少章无兑现报「节奏饥饿」
+_PAID_SCALES = ("small", "medium", "climax")
+
+
+def _payoff_records(desk: DeskStore, chapter: int) -> list[tuple[int, str]]:
+    """截至上一章的兑现记录 [(章号, 规模)]，按章号升序；排除本章保证幂等。"""
+    out = []
+    for no in desk.all_nos():
+        if no >= chapter:
+            continue
+        w = desk.get(no)
+        if w is not None and w.payoff:
+            out.append((no, w.payoff))
+    return out
+
+
+def _rhythm_section(desk: DeskStore, chapter: int, written: bool) -> str | None:
+    """节奏位置块：距上次兑现几章、该蓄还是该爆；无自家数据退化为目标线。"""
+    records = _payoff_records(desk, chapter)
+    if records:
+        last_no, last_scale = max(records)
+        gap = chapter - last_no
+        seg = f"距上次兑现已 {gap} 章（第 {last_no} 章"
+        if last_scale in ("medium", "climax"):
+            seg += "，中兑现以上"
+        seg += "）"
+        if gap >= PAYOFF_HUNGER_AFTER:
+            seg += f"——超过 {PAYOFF_HUNGER_AFTER} 章未喂，本章宜安排小爽点及以上兑现"
+        medium_last = max((no for no, s in records if s in ("medium", "climax")), default=0)
+        if medium_last:
+            seg += f"；距上次中兑现 {chapter - medium_last} 章"
+        return "【节奏位置】\n" + seg
+    if not written:
+        return None
+    return ("【节奏位置】（本书尚无兑现记录，先用目标线垫底：小爽点约 "
+            f"{PAYOFF_TARGET_SMALL} 章一次、中兑现约 {PAYOFF_TARGET_MEDIUM} 章一次；"
+            "定稿时点选「本章兑现」四选一，攒 20 章即有自家量纲）")
+
+
+def rhythm_hunger(desk: DeskStore, chapter: int) -> str | None:
+    """节奏饥饿（审稿附加项，纯数据推导不走 LLM）：从本章往回数连续无兑现的
+    已写章数（none 或未记录都算无兑现），≥ PAYOFF_HUNGER_AFTER 报警。"""
+    streak = 0
+    for no in range(chapter, 0, -1):
+        w = desk.get(no)
+        if w is None or not (_stage_text(w, "plot") or _stage_text(w, "draft")):
+            break                       # 未写的章不算
+        if w.payoff in _PAID_SCALES:
+            break
+        streak += 1
+    if streak >= PAYOFF_HUNGER_AFTER:
+        return (f"节奏饥饿：已连续 {streak} 章无兑现"
+                f"（目标线：小爽点约 {PAYOFF_TARGET_SMALL} 章一次），本章宜安排兑现")
+    return None
+
 
 def _written_nos(desk: DeskStore) -> list[int]:
     """已有剧情或正文的章（plot 阶段算开工，draft 算成文）。"""
@@ -171,9 +229,10 @@ def build_chapter_checklist(entity_store: EntityStore, desk: DeskStore,
                             chapter: int, outline_total: int) -> Material | None:
     """开章核对单：写第 N 章前的 REQUIRED 自检材料。
 
-    三块——本章位置（进度与跳章提醒）、实体快照（截至上一章的既有状态，
+    四块——本章位置（进度与跳章提醒）、节奏位置（距上次兑现几章，
+    无自家记录退化为目标线）、实体快照（截至上一章的既有状态，
     含已退场/未出场标注）、到期伏笔（按账龄排序，越老越该兑现）。
-    三块全空（开书第一章且无设定）返回 None，不注入空核对单。
+    四块全空（开书第一章且无设定）返回 None，不注入空核对单。
     """
     sections: list[str] = []
 
@@ -191,6 +250,10 @@ def build_chapter_checklist(entity_store: EntityStore, desk: DeskStore,
             pos.append(f"注意：第 {max(prior_written) + 1}-{chapter - 1} 章尚未写，本章是跳章续写")
     if len(pos) > 1:  # 只有「本章为第 N 章」一行时不单独成节
         sections.append("【本章位置】\n" + "；".join(pos))
+
+    rhythm = _rhythm_section(desk, chapter, bool(written))
+    if rhythm is not None:
+        sections.append(rhythm)
 
     for etype in ("character", "location", "item", "plotline"):
         ents = []

@@ -11,6 +11,8 @@ from app.wizard.desk import (
     work_text,
 )
 from app.wizard.store import (
+    PAYOFF_LABELS,
+    PAYOFF_SCALES,
     STAGES,
     STATIONS,
     STATION_LABELS,
@@ -21,6 +23,7 @@ from app.wizard.store import (
 )
 
 __all__ = [
+    "PAYOFF_LABELS", "PAYOFF_SCALES",
     "STAGES", "STATIONS", "STATION_LABELS",
     "ChapterWork", "DeskStore", "WizardData", "WizardStore",
     "DirectionCards", "generate_direction_cards",

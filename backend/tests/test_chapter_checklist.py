@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.context import MaterialFamily
-from app.context.ledger import build_chapter_checklist
+from app.context.ledger import build_chapter_checklist, rhythm_hunger
 from app.entities import EntityStore
 from app.pipeline.prompts import PromptStore
 from app.projects import ProjectStore
@@ -104,6 +104,64 @@ def test_section_limits(env):
         env.entities.add("character", f"角色{i:02d}", summary="路人", chapter=1)
     m = build_chapter_checklist(env.entities, env.desk, 5, 30)
     assert "其余 5 个略" in m.content
+
+
+# ---- 节奏位置（P2③ 兑现四选一） ----
+
+def test_rhythm_gap_from_own_records(env):
+    """有自家兑现记录：显示距上次兑现章距；隔太久提醒安排。"""
+    env.desk.record(1, "draft", "一")
+    env.desk.record(2, "draft", "二")
+    env.desk.record_payoff(2, "small")
+    env.desk.record(3, "draft", "三")
+    env.desk.record_payoff(3, "medium")
+    m = build_chapter_checklist(env.entities, env.desk, 6, 30)
+    assert "【节奏位置】" in m.content
+    assert "距上次兑现已 3 章（第 3 章" in m.content
+    assert "距上次中兑现 3 章" in m.content
+    assert "未喂" not in m.content           # 3 章未到饥饿线
+
+    m2 = build_chapter_checklist(env.entities, env.desk, 8, 30)   # 距第 3 章 5 章
+    assert "距上次兑现已 5 章" in m2.content
+    assert "本章宜安排小爽点及以上兑现" in m2.content
+
+
+def test_rhythm_falls_back_to_target_line(env):
+    """无自家记录：空账期用拆书目标线垫底；空书不出现节奏块。"""
+    env.desk.record(1, "draft", "一")
+    env.desk.record(2, "draft", "二")
+    m = build_chapter_checklist(env.entities, env.desk, 3, 30)
+    assert "尚无兑现记录" in m.content and "小爽点约 3 章一次" in m.content
+
+    # 一章没写（空书）→ 核对单整体为 None，不含节奏块
+    empty = DeskStore(env.tmp / "empty" / "desk.json")
+    assert build_chapter_checklist(env.entities, empty, 1, 0) is None
+
+
+def test_rhythm_excludes_current_chapter(env):
+    """本章自己已点选的兑现不算「上次兑现」——重跑同阶段核对单不变。"""
+    env.desk.record(1, "draft", "一")
+    env.desk.record_payoff(1, "small")
+    env.desk.record(2, "draft", "二")
+    env.desk.record_payoff(2, "small")
+    m = build_chapter_checklist(env.entities, env.desk, 2, 30)
+    assert "距上次兑现已 1 章（第 1 章" in m.content
+
+
+def test_rhythm_hunger_streak(env):
+    """连续 4 章无兑现报饥饿；有兑现即断开；未写的章不算。"""
+    for no in range(1, 4):
+        env.desk.record(no, "draft", f"第{no}章")
+    assert rhythm_hunger(env.desk, 3) is None       # 3 章：未到线
+    env.desk.record(4, "draft", "四")
+    warning = rhythm_hunger(env.desk, 4)
+    assert warning is not None and "连续 4 章无兑现" in warning
+    # 第 2 章有兑现 → 第 4 章只算 2 章连续
+    env.desk.record_payoff(2, "small")
+    assert rhythm_hunger(env.desk, 4) is None
+    # 未写的章不算：第 10 章写完，前面只有第 4 章 → streak=2
+    env.desk.record(10, "draft", "十")
+    assert rhythm_hunger(env.desk, 10) is None
 
 
 # ---- 章台注入 ----
