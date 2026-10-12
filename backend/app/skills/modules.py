@@ -28,12 +28,12 @@ MODULES: dict[str, dict] = {
         "default_for": [],
     },
     "volume_outline": {
-        "title": "分卷与章纲：黄金三章/分卷设计/前10-20章章纲/卷末兑现",
+        "title": "分卷与章纲：黄金三章/卷目标兑现日程/前10-20章章纲",
         "stages": ["intro", "outline", "plot"],
         "default_for": ["outline"],
     },
     "plot_logic": {
-        "title": "因果链：动机→触发→决策→后果→兑现",
+        "title": "欲望接力：开篇接棒/欲望升级/章末交棒 + 章内因果五层",
         "stages": ["outline", "plot", "draft", "polish"],
         "default_for": ["plot"],
     },
@@ -63,7 +63,7 @@ MODULES: dict[str, dict] = {
         "default_for": ["draft", "polish"],
     },
     "consistency_review": {
-        "title": "完稿审查：六项一致性逐项稳/不稳，两项不稳不交稿",
+        "title": "完稿审查：七项一致性逐项稳/不稳（含跨章联结），两项不稳不交稿",
         "stages": ["plot", "draft", "polish"],
         "default_for": [],
     },

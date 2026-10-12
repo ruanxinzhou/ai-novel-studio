@@ -1,6 +1,7 @@
 """逐项目标审稿（M2，清单源自 Chinese-WebNovel-Skill consistency_review 模块）。
 
-六项一致性逐项给出 稳/不稳 + 问题；任意两项不稳 → blocked（不交稿）。
+七项一致性逐项给出 稳/不稳 + 问题；任意两项不稳 → blocked（不交稿）。
+第七项「跨章联结」对照上一章结尾审查欲望接力；无前章材料（第一章/无上下文）判稳。
 结构化输出走 complete_structured + 词法修复 JSON；审稿指令存 PromptStore
 "review" 层，可在工坊编辑。
 
@@ -15,14 +16,16 @@ from app.pipeline.prompts import PromptStore
 from app.providers.base import Provider
 
 REVIEW_SYSTEM = """你是中文网文交稿前的终审编辑。你只做一致性审查，不改写正文。
-对给定章节，按六项清单逐项审查，每项给出"稳"或"不稳"，不稳时写明问题与证据句。
+对给定章节，按七项清单逐项审查，每项给出"稳"或"不稳"，不稳时写明问题与证据句。
 只输出一个 JSON 对象，格式：
-{"items": [{"name": "剧情逻辑", "status": "稳", "problem": ""}, ...共六项],
+{"items": [{"name": "剧情逻辑", "status": "稳", "problem": ""}, ...共七项],
  "summary": "一句话总评"}
-六项 name 依次为：剧情逻辑、人物目标、情绪关系、身体信息、场景转场、章末承接。
+七项 name 依次为：剧情逻辑、人物目标、情绪关系、身体信息、场景转场、章末承接、跨章联结。
+跨章联结的审法：对照【上一章结尾】——本章开篇是否接住其变化、主角欲望是否比之前更具体或更急、章末是否留有下一章去向。
+若未提供【上一章结尾】（如第一章），该项判"稳"并在 problem 里注明"无上一章可比"。
 不要输出 JSON 以外的任何文字。"""
 
-ITEM_NAMES = ["剧情逻辑", "人物目标", "情绪关系", "身体信息", "场景转场", "章末承接"]
+ITEM_NAMES = ["剧情逻辑", "人物目标", "情绪关系", "身体信息", "场景转场", "章末承接", "跨章联结"]
 BLOCK_THRESHOLD = 2  # 任意两项不稳 → 不交稿
 
 
@@ -59,7 +62,7 @@ class ChapterReview:
 
 
 def _normalize(data: object) -> list[ReviewItem] | None:
-    """模型输出 → 六项 ReviewItem；缺项/坏名补不稳，防静默放水。"""
+    """模型输出 → 七项 ReviewItem；缺项/坏名补不稳，防静默放水。"""
     if not isinstance(data, dict):
         return None
     raw_items = data.get("items")
@@ -89,14 +92,17 @@ def review_chapter(
     outline: str,
     prose: str,
     model: str | None = None,
+    prev_tail: str = "",
 ) -> ChapterReview:
-    """审一章：outline 为本章大纲/剧情（x），prose 为正文。"""
+    """审一章：outline 为本章大纲/剧情（x），prose 为正文。
+    prev_tail 为上一章结尾（滚动锚点），给定时作为第七项「跨章联结」的对照材料。"""
     instruction = store.effective("review")
-    user = (
-        f"{instruction}\n\n"
-        f"【本章大纲】\n{outline or '（无大纲，按上下文自洽审查）'}\n\n"
-        f"【待审正文】\n{prose}"
-    )
+    parts = [instruction]
+    if prev_tail.strip():
+        parts.append(f"【上一章结尾】\n{prev_tail.strip()}")
+    parts.append(f"【本章大纲】\n{outline or '（无大纲，按上下文自洽审查）'}")
+    parts.append(f"【待审正文】\n{prose}")
+    user = "\n\n".join(parts)
     messages = [
         {"role": "system", "content": REVIEW_SYSTEM},
         {"role": "user", "content": user},

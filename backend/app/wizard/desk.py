@@ -3,7 +3,7 @@
 plot → draft → polish 全部复用 PipelineRunner（幂等收据 + 有界续写）：
 - draft 注入本章 pending 必现标记与上一章结尾滚动锚点；
 - 方向卡作为 REFERENCE 材料随行（作者签收过的方向才注入）；
-- 审稿复用六项一致性清单；
+- 审稿复用七项一致性清单（第七项跨章联结对照上一章结尾）；
 - finalize 转保鲜飞轮：实体抽取 + 伏笔兑现问询 + 标记核验 + 整本合成采纳 draft 版本
   （保持 Vault 导出兼容），飞轮失败不阻断定稿，错误进校正清单。
 """
@@ -64,8 +64,8 @@ def work_text(work, stage: str) -> str:
     return (d.get("text", "") if d else "").strip()
 
 
-def _previous_tail(desk: DeskStore, chapter: int) -> str:
-    """上一章结尾 500 字作为滚动锚点（润色 > 正文）。"""
+def previous_tail(desk: DeskStore, chapter: int) -> str:
+    """上一章结尾 500 字作为滚动锚点（润色 > 正文）；审稿第七项「跨章联结」也用它对照。"""
     for no in sorted((n for n in desk.all_nos() if n < chapter), reverse=True):
         for stage in ("polish", "draft"):
             t = work_text(desk.get(no), stage)
@@ -153,7 +153,7 @@ def run_chapter_stage(
             pending = marker_store.pending_for(chapter)
             if pending:
                 materials.insert(0, markers_material(pending, chapter))
-        anchor = _previous_tail(desk, chapter)
+        anchor = previous_tail(desk, chapter)
 
     run_key = compute_run_key(stage, [x],
                               [(m.source_id, m.family.value, m.content) for m in materials],

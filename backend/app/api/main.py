@@ -48,6 +48,7 @@ from ..wizard import (
     finalize_chapter,
     generate_direction_cards,
     outline_map,
+    previous_tail,
     run_chapter_stage,
     work_text,
 )
@@ -549,11 +550,12 @@ class ChapterReviewIn(BaseModel):
     outline: str = ""
     prose: str
     model: str | None = None
+    prev_tail: str = ""      # 上一章结尾：给定时作为第七项「跨章联结」的对照材料
 
 
 @app.post("/api/review/chapter")
 def review_chapter_api(body: ChapterReviewIn) -> dict:
-    """六项一致性逐项审查；不稳 >= 2 判 blocked（不交稿）。"""
+    """七项一致性逐项审查；不稳 >= 2 判 blocked（不交稿）。"""
     router: Router = get_router()
 
     class _Adapter:
@@ -566,7 +568,7 @@ def review_chapter_api(body: ChapterReviewIn) -> dict:
 
     try:
         review = review_chapter(_Adapter(), _prompt_store, body.outline, body.prose,
-                                model=body.model)
+                                model=body.model, prev_tail=body.prev_tail)
     except ValueError as e:
         raise HTTPException(status_code=502, detail=str(e))
     return review.as_dict()
@@ -1621,7 +1623,8 @@ def desk_run_stream(pid: str, chapter: int, body: DeskRunIn) -> StreamingRespons
 
 @app.post("/api/projects/{pid}/desk/{chapter}/review")
 def desk_review(pid: str, chapter: int) -> dict:
-    """单章六项一致性审稿，结果入章台记录；附节奏饥饿检查（纯数据，不走 LLM）。"""
+    """单章七项一致性审稿（第七项跨章联结对照上一章结尾），结果入章台记录；
+    附节奏饥饿检查（纯数据，不走 LLM）。"""
     _require_project(pid)
     desk = _desk_for(pid)
     prose = work_text(desk.get(chapter), "polish") or work_text(desk.get(chapter), "draft")
@@ -1629,7 +1632,8 @@ def desk_review(pid: str, chapter: int) -> dict:
         raise HTTPException(status_code=422, detail="本章还没有正文，请先生成正文")
     outline = outline_map(_project_store, pid).get(chapter, "")
     try:
-        review = review_chapter(_router_provider("review"), _prompt_store, outline, prose)
+        review = review_chapter(_router_provider("review"), _prompt_store, outline, prose,
+                                prev_tail=previous_tail(desk, chapter))
     except ValueError as e:
         raise HTTPException(status_code=502, detail=str(e))
     record = review.as_dict()

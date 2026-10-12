@@ -7,6 +7,7 @@ from app.wizard.desk import (
     chapter_title_of,
     finalize_chapter,
     outline_map,
+    previous_tail,
     run_chapter_stage,
     work_text,
 )
@@ -28,5 +29,5 @@ __all__ = [
     "ChapterWork", "DeskStore", "WizardData", "WizardStore",
     "DirectionCards", "generate_direction_cards",
     "chapter_outlines", "chapter_title_of", "finalize_chapter", "outline_map",
-    "run_chapter_stage", "work_text",
+    "previous_tail", "run_chapter_stage", "work_text",
 ]

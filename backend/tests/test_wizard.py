@@ -43,7 +43,7 @@ def _cards_json() -> str:
 
 _REVIEW_PASS = json.dumps({
     "items": [{"name": n, "status": "稳", "problem": ""}
-              for n in ["剧情逻辑", "人物目标", "情绪关系", "身体信息", "场景转场", "章末承接"]],
+              for n in ["剧情逻辑", "人物目标", "情绪关系", "身体信息", "场景转场", "章末承接", "跨章联结"]],
     "summary": "全稳",
 }, ensure_ascii=False)
 
@@ -53,7 +53,8 @@ _REVIEW_BLOCKED = json.dumps({
               {"name": "情绪关系", "status": "稳", "problem": ""},
               {"name": "身体信息", "status": "稳", "problem": ""},
               {"name": "场景转场", "status": "稳", "problem": ""},
-              {"name": "章末承接", "status": "稳", "problem": ""}],
+              {"name": "章末承接", "status": "稳", "problem": ""},
+              {"name": "跨章联结", "status": "稳", "problem": ""}],
     "summary": "两项不稳",
 }, ensure_ascii=False)
 
@@ -595,3 +596,31 @@ class TestDeskApi:
         client.put(f"/api/projects/{pid}/desk/2/payoff", json={"payoff": "small"})
         r4b = client.post(f"/api/projects/{pid}/desk/4/review").json()
         assert "rhythm_warning" not in r4b
+
+    def test_desk_review_injects_prev_tail(self, client, monkeypatch):
+        """第七项跨章联结：章台审稿自动带上一章结尾作对照（第一章无前章不注入）。"""
+        pid = client.post("/api/projects", json={"title": "接力书"}).json()["id"]
+        client.post(f"/api/projects/{pid}/layers/outline",
+                    json={"y": "第1章\n一。\n\n第2章\n二。", "x_pairs": []})
+        monkeypatch.setattr("app.api.main.get_router", lambda: FakeRouter("正文。"))
+        for no in (1, 2):
+            client.post(f"/api/projects/{pid}/desk/{no}/run", json={"stage": "plot"})
+            client.post(f"/api/projects/{pid}/desk/{no}/run", json={"stage": "draft"})
+
+        captured: list[list[dict]] = []
+
+        class CaptureRouter:
+            def chat(self, step, messages, model=None, max_tokens=None):
+                assert step == "review"
+                captured.append(messages)
+                return LLMResponse(text=_REVIEW_PASS, usage=Usage(input_tokens=1, output_tokens=1))
+
+        monkeypatch.setattr("app.api.main.get_router", lambda: CaptureRouter())
+        assert client.post(f"/api/projects/{pid}/desk/1/review").json()["verdict"] == "pass"
+        # 第一章无前章：user 消息只在 review 指令里出现 2 处「【上一章结尾】」
+        assert captured[0][1]["content"].count("【上一章结尾】") == 2
+        assert client.post(f"/api/projects/{pid}/desk/2/review").json()["verdict"] == "pass"
+        # 第二章：指令 2 处 + 注入块 1 处，注入的是第 1 章正文结尾
+        user2 = captured[1][1]["content"]
+        assert user2.count("【上一章结尾】") == 3
+        assert "正文" in user2.split("【上一章结尾】", 3)[3]

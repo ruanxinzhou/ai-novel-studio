@@ -600,7 +600,7 @@ function goContinueOutline() {
           <template #header>
             <div style="display: flex; gap: 10px; align-items: center">
               <b>审稿</b>
-              <span style="color: #999; font-size: 12px">六项一致性检查：情节逻辑 / 人物目标 / 情感关系 / 物理信息 / 场景过渡 / 章尾钩子</span>
+              <span style="color: #999; font-size: 12px">七项一致性检查：情节逻辑 / 人物目标 / 情感关系 / 物理信息 / 场景过渡 / 章尾钩子 / 跨章联结</span>
               <span style="flex: 1" />
               <el-button size="small" :loading="busy === 'review'" :disabled="!text.draft && !text.polish" @click="runReview">
                 运行审稿

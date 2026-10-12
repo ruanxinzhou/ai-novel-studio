@@ -41,27 +41,27 @@ class JsonProvider(Provider):
                               "text": "", "meta": {}})()
 
 
-def _six(all_stable: bool = True) -> list[tuple[str, str, str]]:
-    names = ["剧情逻辑", "人物目标", "情绪关系", "身体信息", "场景转场", "章末承接"]
+def _items(all_stable: bool = True) -> list[tuple[str, str, str]]:
+    names = ["剧情逻辑", "人物目标", "情绪关系", "身体信息", "场景转场", "章末承接", "跨章联结"]
     return [(n, "稳" if all_stable else "不稳", "" if all_stable else f"{n}有问题") for n in names]
 
 
 def test_review_all_stable_passes():
-    p = JsonProvider([_review_json(_six(True), "可以交稿")])
+    p = JsonProvider([_review_json(_items(True), "可以交稿")])
     r = review_chapter(p, PromptStore(), "大纲", "正文")
-    assert r.verdict == "pass" and len(r.items) == 6
+    assert r.verdict == "pass" and len(r.items) == 7
     assert r.summary == "可以交稿"
 
 
 def test_review_one_unstable_still_passes():
-    items = _six(True)
+    items = _items(True)
     items[2] = ("情绪关系", "不稳", "转折无铺垫")
     r = review_chapter(JsonProvider([_review_json(items)]), PromptStore(), "o", "p")
     assert r.verdict == "pass" and len(r.unstable_items) == 1
 
 
 def test_review_two_unstable_blocks():
-    items = _six(True)
+    items = _items(True)
     items[0] = ("剧情逻辑", "不稳", "因果断裂")
     items[5] = ("章末承接", "不稳", "结尾平淡")
     r = review_chapter(JsonProvider([_review_json(items)]), PromptStore(), "o", "p")
@@ -69,30 +69,46 @@ def test_review_two_unstable_blocks():
 
 
 def test_review_missing_item_counts_as_unstable():
-    # 模型只回了 5 项：缺的第 6 项必须判不稳，防静默放水（1 项不稳仍放行）
-    items = _six(True)[:5]
+    # 模型只回了 6 项：缺的第 7 项必须判不稳，防静默放水（1 项不稳仍放行）
+    items = _items(True)[:6]
     r = review_chapter(JsonProvider([_review_json(items)]), PromptStore(), "o", "p")
-    missing = [i for i in r.items if i.name == "章末承接"][0]
+    missing = [i for i in r.items if i.name == "跨章联结"][0]
     assert missing.status == "不稳"
     assert r.verdict == "pass"
     # 缺两项 → 两项不稳 → blocked
-    r2 = review_chapter(JsonProvider([_review_json(_six(True)[:4])]), PromptStore(), "o", "p")
+    r2 = review_chapter(JsonProvider([_review_json(_items(True)[:5])]), PromptStore(), "o", "p")
     assert r2.verdict == "blocked"
 
 
 def test_review_repairs_truncated_json():
-    good = _review_json(_six(True))
+    good = _review_json(_items(True))
     truncated = good[: len(good) // 2]  # 截断（可词法修复：补闭合）
     r = review_chapter(JsonProvider([truncated, good]), PromptStore(), "o", "p")
     assert r.verdict == "pass" and r.attempts == 2
 
 
 def test_review_uses_store_instruction_and_review_system():
-    p = JsonProvider([_review_json(_six(True))])
+    p = JsonProvider([_review_json(_items(True))])
     review_chapter(p, PromptStore(), "本章大纲文", "正文文")
     assert "终审编辑" in p.calls[0][0]["content"]
-    assert "六项清单" in p.calls[0][1]["content"]
+    assert "七项清单" in p.calls[0][1]["content"]
+    assert "跨章联结" in p.calls[0][0]["content"]
     assert "本章大纲文" in p.calls[0][1]["content"]
+
+
+def test_review_prev_tail_injected():
+    """prev_tail 给定时作为第七项对照材料注入；不给时不硬造。
+    注意：review 指令文本自身含两处「【上一章结尾】」字样，故用计数断言。"""
+    p = JsonProvider([_review_json(_items(True))])
+    review_chapter(p, PromptStore(), "o", "p", prev_tail="上一章结尾五百字。")
+    user = p.calls[0][1]["content"]
+    assert user.count("【上一章结尾】") == 3      # 指令 2 处 + 注入块 1 处
+    assert "上一章结尾五百字" in user
+    assert user.rindex("【上一章结尾】") < user.rindex("【待审正文】")
+
+    p2 = JsonProvider([_review_json(_items(True))])
+    review_chapter(p2, PromptStore(), "o", "p", prev_tail="   ")
+    assert p2.calls[0][1]["content"].count("【上一章结尾】") == 2   # 只剩指令里那两处
 
 
 def test_review_store_layer_editable():
@@ -175,16 +191,18 @@ def test_api_review_endpoint(client, monkeypatch):
     class FakeRouter:
         def chat(self, step, messages, model=None, max_tokens=None):
             assert step == "review"
-            names = ["剧情逻辑", "人物目标", "情绪关系", "身体信息", "场景转场", "章末承接"]
+            names = ["剧情逻辑", "人物目标", "情绪关系", "身体信息", "场景转场", "章末承接", "跨章联结"]
             items = ",".join(f'{{"name": "{n}", "status": "稳", "problem": ""}}' for n in names)
             return LLMResponse(text=f'{{"items": [{items}], "summary": "ok"}}',
                                usage=Usage(input_tokens=1, output_tokens=1))
 
     monkeypatch.setattr("app.api.main.get_router", lambda: FakeRouter())
-    r = client.post("/api/review/chapter", json={"prose": "正文", "outline": "大纲"})
+    r = client.post("/api/review/chapter",
+                    json={"prose": "正文", "outline": "大纲", "prev_tail": "上一章结尾。"})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["verdict"] == "pass" and body["unstable_count"] == 0
+    assert len(body["items"]) == 7 and body["items"][-1]["name"] == "跨章联结"
 
 
 def test_api_run_injects_pending_markers(client, monkeypatch):

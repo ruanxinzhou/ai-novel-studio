@@ -1113,7 +1113,7 @@ async function saveXToProject() {
                   <el-table-column prop="problem" label="问题与证据" show-overflow-tooltip />
                 </el-table>
               </template>
-              <el-empty v-else description="点「六项一致性审稿」逐项检查当前成文（不稳 ≥2 项不能交稿）" />
+              <el-empty v-else description="点「七项一致性审稿」逐项检查当前成文（不稳 ≥2 项不能交稿；第七项跨章联结对照上一章结尾）" />
             </el-tab-pane>
           </el-tabs>
         </el-card>

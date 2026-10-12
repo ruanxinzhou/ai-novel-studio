@@ -56,7 +56,7 @@ backend/data/projects/{pid}/desk.json      # chapters{no: {title, plot{...}, dra
 | polish | desk 中本章正文 | — | — |
 
 幂等：`compute_run_key` + `RunJournal`（项目隔离）；`force=True` 时 journal=None 绕过收据重生成。
-审稿：复用 `review_chapter`（六项清单），结果入 desk。
+审稿：复用 `review_chapter`（七项清单，第七项跨章联结对照上一章结尾），结果入 desk。
 `finalize_chapter()`（保鲜飞轮）：
 1. 定稿文本 = polish 优先，否则 draft；
 2. 飞轮：`extract_entities`（LLM 抽取实体，可关）+ `markers.verify` 标记核验；
@@ -87,7 +87,7 @@ backend/data/projects/{pid}/desk.json      # chapters{no: {title, plot{...}, dra
   - architecture：章数 → 生成大纲 → 编辑 → 采纳；
   - plotplan/writing/polish：显示首章进度 + 「去今日章台」按钮；
   - 毕业：完成面板 + 进入章台。
-- **DeskView.vue**（今日章台）：左侧章列表（四态标签：剧情/正文/审稿/定稿），右侧单章工作区：逐步生成按钮 + 每步编辑框 + 审稿六项结果 + 定稿飞轮报告；定稿后自动定位下一章（明日章）；
+- **DeskView.vue**（今日章台）：左侧章列表（四态标签：剧情/正文/审稿/定稿），右侧单章工作区：逐步生成按钮 + 每步编辑框 + 审稿七项结果 + 定稿飞轮报告；定稿后自动定位下一章（明日章）；
 - **ProjectsView.vue**：项目卡进度条改为六站进度 + 章台定稿进度（x/y 章）；
 - **api.ts**：新增 `wizardApi` + `deskApi`。
 

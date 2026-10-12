@@ -149,10 +149,11 @@ export interface MarkersSummary {
 }
 
 export const reviewApi = {
-  chapter: (outline: string, prose: string) =>
+  // prev_tail：上一章结尾，给定时作为第七项「跨章联结」的对照材料
+  chapter: (outline: string, prose: string, prevTail = '') =>
     req<ChapterReview>('/api/review/chapter', {
       method: 'POST',
-      body: JSON.stringify({ outline, prose }),
+      body: JSON.stringify({ outline, prose, prev_tail: prevTail }),
     }),
 }
 
