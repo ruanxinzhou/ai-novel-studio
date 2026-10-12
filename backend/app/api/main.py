@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from ..config import REPO
 from ..context import Material, MaterialFamily
+from ..context.ledger import build_state_materials
 from ..corpus import add_excerpts as corpus_add_excerpts
 from ..corpus import article_exists as corpus_article_exists
 from ..corpus import count as corpus_count
@@ -264,6 +265,7 @@ class LayerRunIn(BaseModel):
     corpus_query: CorpusQueryIn | None = None
     chapter_no: int | None = None         # 提供时自动注入该章 pending 必现标记
     project: str | None = None            # 提供时收据与标记按项目隔离
+    project_state: bool = False           # 注入项目状态账本（已写剧情/正文近况/实体账本）
 
 
 _FAMILIES = {"required": MaterialFamily.REQUIRED, "finalized": MaterialFamily.FINALIZED,
@@ -327,10 +329,17 @@ def _prepare_layer(layer: str, body: LayerRunIn) -> dict:
     marker_mat = None
     if body.project:
         _require_project(body.project)
+    state_mats: list[Material] = []
+    if body.project_state:
+        if not body.project:
+            raise HTTPException(status_code=422, detail="project_state 需要同时提供 project")
+        state_mats = build_state_materials(
+            _project_store, _entities_for(body.project), _desk_for(body.project), body.project)
     if body.chapter_no is not None:
         marker_mat = markers_material(
             _markers_for(body.project).pending_for(body.chapter_no), body.chapter_no)
-    all_mats = ([marker_mat] if marker_mat else []) + injected_skills + mats + corpus_mats
+    all_mats = (([marker_mat] if marker_mat else []) + injected_skills
+                + state_mats + mats + corpus_mats)
     x_list = [x for x, _ in body.x_pairs]
     run_key = compute_run_key(layer, x_list,
                               [(m.source_id, m.family.value, m.content) for m in all_mats],
@@ -338,7 +347,8 @@ def _prepare_layer(layer: str, body: LayerRunIn) -> dict:
     journal = RunJournal(_journal_path(run_key, body.project), layer, run_key)
     runner = PipelineRunner(_router_provider(layer), prompt_store=_prompt_store)
     return {"spec": spec, "mats": all_mats, "run_key": run_key, "journal": journal,
-            "runner": runner, "skills": injected_skills, "corpus": corpus_mats}
+            "runner": runner, "skills": injected_skills, "corpus": corpus_mats,
+            "state": state_mats}
 
 
 def _layer_response(prep: dict, result) -> dict:
@@ -353,6 +363,7 @@ def _layer_response(prep: dict, result) -> dict:
         "resumed_indices": result.resumed_indices,
         "skills_injected": [m.source_id for m in prep["skills"]],
         "corpus_injected": [m.source_id for m in prep["corpus"]],
+        "state_injected": [m.title for m in prep["state"]],
         "markers_injected": [m.as_dict() for m in markers.pending_for(chapter_no or 0)]
         if chapter_no is not None else [],
         "calls": [{"completion_status": c.completion_status, "attempts": c.attempts}

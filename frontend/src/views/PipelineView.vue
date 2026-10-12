@@ -45,7 +45,7 @@ const TASKS: TaskCard[] = [
     key: 'outline',
     layer: 'outline',
     title: '全书大纲',
-    desc: '给一段创作方向 + 章数直接排大纲；也可逐章写要点，或在大纲后续写新章',
+    desc: '给方向 + 章数排大纲；也可逐章写要点，或在已写章节后续写新段（自动带已写剧情、正文近况与实体账本）',
     inputHint: '每行一个「第N章」+ 这一章发生什么。前几章是黄金三章，建议写细。',
     example: '例：第1章 主角加班夜归，捡到会低语的青铜镜，被拉入第一场试炼',
   },
@@ -140,12 +140,19 @@ const outlineMode = ref<'fresh' | 'direction' | 'continue'>('fresh')
 const contStart = ref<number>(1)
 const contCount = ref<number>(30)
 const contVolume = ref('')
+// 续写参照项目状态：已写剧情梗概 + 正文近况 + 实体账本（角色/伏笔/地点/道具/情节线）
+const useStateLedger = ref(true)
 const isContinueRun = computed(() => task.value.key === 'outline' && outlineMode.value === 'continue')
 const isDirectionRun = computed(() => task.value.key === 'outline' && outlineMode.value === 'direction')
 
 // 方向创作：给一段方向（新故事构思 / 改编再创作思路 / 整体约束文档）+ 章数 → 直接排大纲
 const directionDoc = ref('')
 const dirCount = ref<number>(30)
+
+const directivePlaceholder = computed(() =>
+  isContinueRun.value
+    ? '本段的故事剧情走向（可空但强烈建议写），例：\n接下来 30 章进入第二卷，主角带队进诡异片场拍电影，重点是「床下的朋友」伏笔的兑现；中期引入新对手剪辑师组织，第 50 章前完成第一次正面冲突'
+    : '例：多写对话、结尾留悬念（可空）')
 
 watch(outlineMaxChapter, (v) => {
   // 载入大纲/切项目后，起点默认落在已有最后一章的下一章
@@ -373,6 +380,7 @@ const body = () => ({
     : undefined,
   chapter_no: chapterNo.value || undefined,
   project: currentProjectId.value || undefined,
+  project_state: (isContinueRun.value && useStateLedger.value) || undefined,
 })
 
 async function doRun() {
@@ -402,7 +410,13 @@ async function doRun() {
     directive =
       `已有大纲 ${outlineMaxChapter.value} 章见材料。本次从第 ${contStart.value} 续写到第 ${end} 章，共 ${contCount.value} 章` +
       (contVolume.value.trim() ? `，新卷首行写「${contVolume.value.trim()}」` : '') +
-      '。衔接已有剧情、伏笔与文风，不得改动已有章节。'
+      '。衔接已有剧情、伏笔与文风，不得改动已有章节。' +
+      (userDirective.value.trim()
+        ? `\n本段创作方向与要求：${userDirective.value.trim()}`
+        : '') +
+      (useStateLedger.value
+        ? '已写剧情梗概、正文近况与实体账本（角色/地点/道具/情节线/未回收伏笔）见材料：新章必须延续已出场角色与既有设定，未回收伏笔优先安排推进或兑现。'
+        : '')
     chunkLength = 40
   } else if (isDirectionRun.value) {
     if (!directionDoc.value.trim()) {
@@ -799,6 +813,17 @@ async function saveXToProject() {
               <el-form-item label="新卷名">
                 <el-input v-model="contVolume" placeholder="可空。如：第二卷 风起云涌（会写在新章开头）" />
               </el-form-item>
+              <el-form-item label="参照状态">
+                <div style="width: 100%">
+                  <el-checkbox v-model="useStateLedger">
+                    带项目已写状态续写（已写剧情梗概 + 正文近况 + 实体账本）
+                  </el-checkbox>
+                  <div style="font-size: 12px; color: #888; margin-top: 4px">
+                    从章台已写内容与实体库实时推导：已出场角色、地点、道具、情节线与未回收伏笔清单一并注入，
+                    机器按实际进度衔接，不另起炉灶
+                  </div>
+                </div>
+              </el-form-item>
             </template>
 
             <el-form-item v-if="!isContinueRun && !isDirectionRun" :label="isAdvanced ? '输入块' : '要点'">
@@ -842,8 +867,16 @@ async function saveXToProject() {
               <div style="font-size: 12px; color: #888">写正文时填写：自动注入该章待兑现的必现情节标记</div>
             </el-form-item>
 
-            <el-form-item label="附加要求">
-              <el-input v-model="userDirective" type="textarea" :rows="2" placeholder="例：多写对话、结尾留悬念（可空）" />
+            <el-form-item :label="isContinueRun ? '本段方向' : '附加要求'">
+              <el-input
+                v-model="userDirective"
+                type="textarea"
+                :rows="isContinueRun ? 4 : 2"
+                :placeholder="directivePlaceholder"
+              />
+              <div v-if="isContinueRun" style="font-size: 12px; color: #999; margin-top: 4px">
+                只约束本段新章：剧情走向、要兑现的伏笔、要引入的角色/冲突；已有章不会改动
+              </div>
             </el-form-item>
 
             <el-form-item v-if="isAdvanced" label="运行目标">

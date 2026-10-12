@@ -85,6 +85,7 @@ export interface LayerRunBody {
   corpus_query?: { excerpt_type?: string; tag?: string; keyword?: string; limit?: number }
   chapter_no?: number
   project?: string
+  project_state?: boolean
 }
 export interface Receipt {
   index: number
@@ -104,6 +105,7 @@ export interface LayerRunResult {
   resumed_indices: number[]
   skills_injected: string[]
   corpus_injected: string[]
+  state_injected?: string[]
   markers_injected: MarkerInfo[]
   calls: { completion_status: string; attempts: number }[]
   journal: {
@@ -240,6 +242,8 @@ export const corpusApi = {
       chapters_total: number
       labeled: number
       project_id: string
+      entities?: Record<string, number>
+      entities_preextracted?: boolean
     }>('/api/corpus/import_chaishu', {
       method: 'POST',
       body: JSON.stringify({ dir, title: title ?? '', tags: tags ?? [], source_txt: sourceTxt ?? '' }),
