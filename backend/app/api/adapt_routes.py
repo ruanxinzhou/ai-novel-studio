@@ -77,7 +77,12 @@ def register_adapt_routes(
         "/api/projects/{pid}/workbench/volumes/{vol_no}/adapt/pick",
         _pick_adapt, methods=["POST"],
     )
-    # 2f. 阶段完成标记
+    # 2f. 保存自定义改编（不依赖 job，直接写入）
+    router.add_api_route(
+        "/api/projects/{pid}/workbench/volumes/{vol_no}/adapt/save-custom",
+        _save_custom_adapt, methods=["POST"],
+    )
+    # 2g. 阶段完成标记
     router.add_api_route(
         "/api/projects/{pid}/workbench/volumes/{vol_no}/stage-complete",
         _stage_complete, methods=["POST"],
@@ -97,6 +102,10 @@ class _PickIn(BaseModel):
     job_id: str
     pick_index: int
     extra_edits: str = ""
+
+
+class _SaveCustomAdaptIn(BaseModel):
+    adaptation: dict  # 自定义 adaptation 对象，含 adapted_premise 等字段
 
 
 class _StageCompleteIn(BaseModel):
@@ -306,6 +315,19 @@ def _pick_adapt(pid: str, vol_no: int, body: _PickIn) -> dict:
         raise HTTPException(status_code=422, detail="选版结果为空")
 
     v.adapted_module = picked.get("adapted_premise", "")
+    v.stage_completed["adapt"] = True
+    vs.save(v)
+    return {"ok": True, "volume": v.as_dict()}
+
+
+def _save_custom_adapt(pid: str, vol_no: int, body: _SaveCustomAdaptIn) -> dict:
+    """POST 直接保存作者自定义的改编版本（跳过 job 选版流程）。"""
+    vs, v = _get_volume_or_404(pid, vol_no)
+    adapt = body.adaptation or {}
+    premise = adapt.get("adapted_premise") or adapt.get("content") or ""
+    if not premise:
+        raise HTTPException(status_code=422, detail="adaptation.adapted_premise 不能为空")
+    v.adapted_module = premise
     v.stage_completed["adapt"] = True
     vs.save(v)
     return {"ok": True, "volume": v.as_dict()}

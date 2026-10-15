@@ -1,36 +1,58 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { Setting } from '@element-plus/icons-vue'
 import {
   currentPhase,
+  currentProjectId,
   currentVolumeNo,
   currentChapterNo,
   currentIsLastChapter,
   drawerOpen,
 } from '../state'
+import { PHASE_TITLES, protagonistApi } from '../api'
 
 const props = defineProps<{
   bookTitle?: string
-  /** 污染值 0-100，Task 11 接 protagonist API，这里先写死 */
+  /** 污染值 0-100；若显式传非零值则优先使用，否则组件自动拉 protagonist */
   contamination?: number
+  /** 外部强制刷新触发键 */
+  refreshKey?: number
 }>()
 
-const PHASE_LABELS: Record<string, string> = {
-  setup: '开书设定',
-  adapt: '剧本改编',
-  adapt_empty: '新卷',
-  simulate: '模拟跑团',
-  embody: '魂穿设计',
-  scaffold: '卷内详设',
-  rhythm: '节奏骨架',
-  briefing: '章前规划',
-  desk: '日更',
-  settle: '杀青',
-  interlude: '蓝星间章',
+const autoContamination = ref(0)
+
+async function refreshContamination() {
+  const pid = currentProjectId.value
+  if (!pid) {
+    autoContamination.value = 0
+    return
+  }
+  try {
+    const res = await protagonistApi.get(pid)
+    autoContamination.value = res.protagonist?.contamination_level ?? 0
+  } catch (err: any) {
+    // 新项目可能还没有 protagonist，404 时显示 0
+    if (err?.status === 404 || err?.response?.status === 404) {
+      autoContamination.value = 0
+    } else {
+      console.debug('[StatusBar] fetch contamination failed', err)
+      autoContamination.value = 0
+    }
+  }
 }
 
-const contaminationVal = computed(() => props.contamination ?? 12)
-const phaseLabel = computed(() => (PHASE_LABELS[currentPhase.value] ?? currentPhase.value) || '—')
+onMounted(refreshContamination)
+watch(() => currentProjectId.value, refreshContamination)
+watch(() => currentPhase.value, refreshContamination)
+watch(() => currentChapterNo.value, refreshContamination)
+watch(() => props.refreshKey, () => refreshContamination())
+
+const contaminationVal = computed(() => {
+  if (props.contamination && props.contamination > 0) return props.contamination
+  return autoContamination.value
+})
+
+const phaseLabel = computed(() => (PHASE_TITLES[currentPhase.value] ?? currentPhase.value) || '—')
 const locationText = computed(() => {
   if (!currentVolumeNo.value) return '—'
   const ch = currentChapterNo.value ? `· 第${currentChapterNo.value}章` : ''
@@ -51,7 +73,7 @@ function openDrawer() {
       <span class="sb-loc">{{ locationText }}</span>
     </div>
     <div class="sb-center">
-      <el-tag size="small" type="primary" effect="plain" round>{{ phaseLabel }}</el-tag>
+      <el-tag size="small" effect="plain" round class="sb-phase-tag">{{ phaseLabel }}</el-tag>
     </div>
     <div class="sb-right">
       <span class="sb-contam-label">污染</span>
@@ -76,10 +98,11 @@ function openDrawer() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: #fff;
-  border-bottom: 1px solid #ebeef5;
+  background: #1a1a1a;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   font-size: 13px;
   flex-shrink: 0;
+  color: #e4e7ed;
 }
 .sb-left,
 .sb-right {
@@ -94,19 +117,38 @@ function openDrawer() {
 }
 .sb-title {
   font-weight: 600;
-  color: #303133;
+  color: #e4e7ed;
 }
 .sb-loc {
-  color: #606266;
+  color: #909399;
 }
 .sb-contam-label {
   color: #909399;
   font-size: 12px;
 }
 .sb-contam-val {
-  color: #606266;
+  color: #e4e7ed;
   font-size: 12px;
   min-width: 32px;
   text-align: right;
+}
+.sb-phase-tag {
+  color: #e4e7ed;
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+/* 深色主题下分隔线颜色覆盖 */
+:deep(.el-divider--vertical) {
+  border-color: rgba(255, 255, 255, 0.1);
+}
+:deep(.el-button.is-circle) {
+  color: #e4e7ed;
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+:deep(.el-button.is-circle:hover) {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #fff;
 }
 </style>

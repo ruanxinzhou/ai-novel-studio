@@ -1082,19 +1082,24 @@ export const jobsApi = {
   },
 }
 
-export const JOB_KIND_LABELS: Record<JobKind, string> = {
-  pdf5: 'PDF 5版改编',
+export const JOB_KIND_LABELS: Record<string, string> = {
+  pdf_adapt5: 'PDF 5版改编',
   coc_batch: 'COC 三场模拟',
   outline5: '唐迟大纲 5版',
 }
 
 export const PHASE_TITLES: Record<string, string> = {
-  settle_up: '杀青间章',
-  kindle: '副本点火',
-  scaffold: '跑团与大纲',
-  walkthrough: '章节细纲',
-  schedule: '章节分配',
-  daily_write: '日更',
+  setup: '开书设定',
+  adapt: '剧本改编',
+  adapt_empty: '新卷待改',
+  simulate: '模拟跑团',
+  embody: '魂穿设计',
+  scaffold: '卷内详设',
+  rhythm: '节奏骨架',
+  briefing: '章前规划',
+  desk: '日更',
+  settle: '杀青归账',
+  interlude: '蓝星间章',
 }
 export const AI_MODE_LABELS: Record<string, string> = {
   review: '列账',
@@ -1408,6 +1413,13 @@ export const adaptApi = {
       { method: 'POST', body: JSON.stringify({ job_id: jobId, pick_index: pickIndex, extra_edits: extraEdits }) },
     ),
 
+  /** 直接保存自定义改编（不走 job 选版） */
+  saveCustomAdapt: (pid: string, volNo: number, adaptation: Record<string, unknown>) =>
+    req<{ ok: boolean; volume: any }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/adapt/save-custom`,
+      { method: 'POST', body: JSON.stringify({ adaptation }) },
+    ),
+
   /** 通用阶段完成标记 */
   markStageComplete: (pid: string, volNo: number, stage: string) =>
     req<{ ok: boolean; volume: any }>(
@@ -1518,6 +1530,13 @@ export const simulateApi = {
     req<{ ok: boolean; volume: any }>(
       `/api/projects/${pid}/workbench/volumes/${volNo}/simulate/collage`,
       { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  /** 直接保存自定义跑团 variant（不走 job 选版） */
+  saveCustomVariant: (pid: string, volNo: number, variant: Record<string, unknown>) =>
+    req<{ ok: boolean; volume: any }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/simulate/save-custom`,
+      { method: 'POST', body: JSON.stringify({ variant }) },
     ),
 }
 
@@ -1647,11 +1666,12 @@ export const embodyApi = {
     pid: string,
     volNo: number,
     body: {
-      job_id: string
-      pick_index: number
+      job_id?: string
+      pick_index?: number
       candidate?: EmbodyCandidate | null
       entry_point?: EmbodyEntryPoint | null
       stance?: EmbodyStance | null
+      custom_data?: Record<string, unknown> | null
     },
   ) =>
     req<{ ok: boolean; volume: any; picked: EmbodyOutline }>(
@@ -1696,10 +1716,10 @@ export const scaffoldApi = {
   getVolume: adaptApi.getVolume,
   patchVolume: adaptApi.patchVolume,
 
-  prefill: (pid: string, volNo: number, opts?: { force?: boolean }) =>
+  prefill: (pid: string, volNo: number, opts?: { force?: boolean; directive?: string }) =>
     req<{ ok: boolean; job_id: string; job: Job }>(
       `/api/projects/${pid}/workbench/volumes/${volNo}/scaffold/prefill`,
-      { method: 'POST', body: JSON.stringify({ force: !!opts?.force }) },
+      { method: 'POST', body: JSON.stringify({ force: !!opts?.force, directive: opts?.directive || '' }) },
     ),
 
   listJobs: (pid: string, volNo: number) =>
@@ -1732,10 +1752,10 @@ export const scaffoldApi = {
     return { close: () => { es.close() } }
   },
 
-  lockCard: (pid: string, volNo: number, card_key: string, pick_index: number) =>
+  lockCard: (pid: string, volNo: number, card_key: string, opts: { pick_index?: number; custom_value?: unknown[] | string | null }) =>
     req<{ ok: boolean; card_key: string; picked_idx: number; locked_at: string; all_locked?: boolean; volume?: any }>(
       `/api/projects/${pid}/workbench/volumes/${volNo}/scaffold/lock-card`,
-      { method: 'POST', body: JSON.stringify({ card_key, pick_index }) },
+      { method: 'POST', body: JSON.stringify({ card_key, pick_index: opts.pick_index ?? -1, custom_value: opts.custom_value ?? null }) },
     ),
 
   finalize: (pid: string, volNo: number) =>
@@ -1743,5 +1763,291 @@ export const scaffoldApi = {
       `/api/projects/${pid}/workbench/volumes/${volNo}/scaffold/finalize`,
       { method: 'POST', body: JSON.stringify({}) },
     ),
+}
+
+// ============================================================
+// 节奏骨架（rhythm）
+// ============================================================
+export interface RhythmBeat {
+  day: number
+  intensity: number
+  label: string
+}
+export interface RhythmWarning {
+  type: 'dearth' | 'cluster' | 'front_load' | 'back_load' | string
+  day?: number
+  msg: string
+}
+export interface RhythmChapterPlan {
+  chapter: number
+  day: number
+  focus: string
+  words: number
+  beat_type: string
+}
+export interface RhythmBlueprint {
+  pacing_ratio: Record<string, number>
+  key_beats_progress: RhythmBeat[]
+  warnings: RhythmWarning[]
+  suggested_length: number
+  suggested_chapter_range: [number, number]
+  chapter_plan: RhythmChapterPlan[]
+  notes: string
+}
+export interface DensityMap {
+  // day(1~7) → { death, climax, clue, total }
+  [day: number]: { death: number; climax: number; clue: number; total: number }
+}
+
+export const rhythmApi = {
+  getVolume: adaptApi.getVolume,
+  analyze: (pid: string, volNo: number, opts?: { rhythm_directive?: string }) =>
+    req<{ ok: boolean; blueprint: RhythmBlueprint; density_map: DensityMap; is_mock?: boolean }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/rhythm/analyze`,
+      { method: 'POST', body: JSON.stringify({ rhythm_directive: opts?.rhythm_directive || '' }) },
+    ),
+  get: (pid: string, volNo: number) =>
+    req<{ volume: any; blueprint: RhythmBlueprint | null; density_map: DensityMap }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/rhythm`,
+    ),
+  finalize: (pid: string, volNo: number) =>
+    req<{ ok: boolean; stage_completed: Record<string, boolean>; volume: any }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/rhythm/finalize`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+}
+
+// ============================================================
+// 章前 5 分钟方向卡（brief）
+// ============================================================
+export interface BriefOption {
+  id: string
+  title: string
+  summary: string
+  hooks?: string
+  day?: number
+  beat_type?: string
+  foreshadow_advance?: string[]
+  entities_on_stage?: string[]
+  is_custom?: boolean
+}
+
+export const briefApi = {
+  options: (
+    pid: string,
+    volNo: number,
+    cno: number,
+    body: { directive?: string | null; base_index?: number | null; custom_writing?: string | null },
+  ) =>
+    req<{ options: BriefOption[]; day: number; chapter_words_estimate: number; is_mock?: boolean }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/chapters/${cno}/brief/options`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  select: (
+    pid: string,
+    volNo: number,
+    cno: number,
+    body: { option_index: number; extra_edits?: string | null; custom_text?: string | null },
+  ) =>
+    req<{ ok: boolean; brief: any; chapter_no: number }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/chapters/${cno}/brief/select`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  advance: (pid: string, volNo: number, cno: number) =>
+    req<{ next_chapter: number | null; phase: string }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/chapters/${cno}/brief/advance`,
+      { method: 'POST', body: JSON.stringify({ finalized: true }) },
+    ),
+  patch: (pid: string, volNo: number, cno: number, body: Record<string, unknown>) =>
+    req<{ ok: boolean; brief: any }>(
+      `/api/projects/${pid}/volumes/${volNo}/chapters/${cno}/brief`,
+      { method: 'PATCH', body: JSON.stringify(body) },
+    ),
+  // 向后兼容旧接口
+  nextChapterBrief: (pid: string, volNo: number, prev_chapter_no?: number) =>
+    req<any>(
+      `/api/projects/${pid}/volumes/${volNo}/next-chapter-brief`,
+      { method: 'POST', body: JSON.stringify({ prev_chapter_no }) },
+    ),
+}
+
+// ============================================================
+// 杀青归账（settle）6 步面板
+// ============================================================
+export interface SettleForeshadow {
+  id: string
+  chapter_no: number
+  planted_text: string
+  status: 'paid' | 'dropped' | 'carried'
+  resolution?: string
+}
+
+export interface SettleEntityCheck {
+  entity_id: string
+  name: string
+  status_after: string
+  san_delta: number
+  note: string
+}
+
+export interface SettleCostSummary {
+  cost_summary: string
+  suggested_contamination_delta: number
+  san_loss_note: string
+  new_echo?: string
+  kill_add?: string
+}
+
+export interface SettleBlueStarHook {
+  id: string
+  title: string
+  detail: string
+  summary?: string
+}
+
+export interface SettleNextVolumeHint {
+  id: string
+  title: string
+  entry_point: string
+  info_gap: string
+  summary?: string
+}
+
+export interface SettleOverview {
+  volume: any
+  foreshadows: SettleForeshadow[]
+  chapters_written: number
+  total_words: number
+  death_count: number
+  current_contamination: number
+  is_mock: boolean
+}
+
+export interface SettleEntityUpdate {
+  id: string
+  status?: string
+  san_delta?: number
+  note?: string
+}
+
+export interface SettleApplyBody {
+  contamination_delta: number
+  foreshadow_decisions: Record<string, { status: string; resolution?: string }>
+  entity_updates?: SettleEntityUpdate[]
+  cost_summary?: Partial<SettleCostSummary>
+  blue_star_hook?: SettleBlueStarHook | null
+  next_volume_hint?: SettleNextVolumeHint | null
+}
+
+export const settleApi = {
+  overview: (pid: string, volNo: number) =>
+    req<SettleOverview>(`/api/projects/${pid}/volumes/${volNo}/settle/overview`),
+
+  detect: (pid: string, volNo: number) =>
+    req<{ foreshadows: SettleForeshadow[] }>(`/api/projects/${pid}/volumes/${volNo}/settle/detect`),
+
+  aiSuggest: (pid: string, volNo: number, step: string, context?: Record<string, unknown>) =>
+    req<Record<string, any>>(
+      `/api/projects/${pid}/volumes/${volNo}/settle/ai-suggest`,
+      { method: 'POST', body: JSON.stringify({ step, context: context || {} }) },
+    ),
+
+  apply: (pid: string, volNo: number, body: SettleApplyBody) =>
+    req<any>(
+      `/api/projects/${pid}/volumes/${volNo}/settle/apply`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  finalize: (pid: string, volNo: number) =>
+    req<{ ok: boolean; volume: any; next_action_options: string[] }>(
+      `/api/projects/${pid}/volumes/${volNo}/settle/finalize`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+
+  // 落锤后的后续动作
+  createInterlude: (pid: string) =>
+    req<{ ok: boolean; volume_no: number; volume: any }>(
+      `/api/projects/${pid}/workbench/volumes/interlude`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+
+  createNextDungeon: (pid: string, title: string) =>
+    req<{ ok: boolean; volume_no: number; volume: any }>(
+      `/api/projects/${pid}/workbench/volumes`,
+      { method: 'POST', body: JSON.stringify({ title }) },
+    ),
+}
+
+// ============================================================
+// 蓝星间章（Interlude）API
+// ============================================================
+export interface InterludeOption {
+  id?: string
+  title: string
+  content: string
+  [k: string]: any
+}
+
+export interface InterludeZhangshu {
+  suggested_chapters: number
+  words_per_chapter: number
+  reason: string
+}
+
+export interface InterludePlan {
+  weihedian?: InterludeOption
+  houchiyizheng?: InterludeOption
+  xiajuangouzi?: InterludeOption
+  zhangshu?: InterludeZhangshu
+  steps_done?: number
+  updated_at?: string
+  finalized_at?: string
+}
+
+export interface InterludeGetResp {
+  volume: any
+  plan: InterludePlan
+  can_start_writing: boolean
+}
+
+export type InterludeStep = 'weihedian' | 'houchiyizheng' | 'xiajuangouzi' | 'zhangshu'
+
+export const interludeApi = {
+  getVolume: adaptApi.getVolume,
+
+  get: (pid: string, volNo: number) =>
+    req<InterludeGetResp>(`/api/projects/${pid}/workbench/volumes/${volNo}/interlude`),
+
+  aiSuggest: (
+    pid: string,
+    volNo: number,
+    step: InterludeStep,
+    context?: Record<string, unknown>,
+    selected?: Record<string, any> | null,
+  ) =>
+    req<{ options?: InterludeOption[]; zhangshu?: InterludeZhangshu; is_mock: boolean }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/interlude/ai-suggest`,
+      { method: 'POST', body: JSON.stringify({ step, context: context || {}, selected: selected || null }) },
+    ),
+
+  savePlan: (pid: string, volNo: number, step: InterludeStep, picked: InterludeOption | InterludeZhangshu) =>
+    req<{ ok: boolean; plan: InterludePlan }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/interlude/save-plan`,
+      { method: 'POST', body: JSON.stringify({ step, picked }) },
+    ),
+
+  finalize: (pid: string, volNo: number) =>
+    req<{ ok: boolean; volume: any; created_chapters: number[]; first_chapter_no: number }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/interlude/finalize`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+}
+
+// ---- volumesApi 快捷封装 ----
+export const volumesApi = {
+  list: (pid: string) => req<{ volumes: any[]; total: number }>(`/api/projects/${pid}/volumes`),
+  latest: (pid: string) => req<{ volume: any | null }>(`/api/projects/${pid}/volumes/latest`),
+  get: (pid: string, volNo: number) => adaptApi.getVolume(pid, volNo),
+  createDungeon: (pid: string, title = '') => adaptApi.createVolume(pid, title),
 }
 

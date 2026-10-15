@@ -5,10 +5,10 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   LAYER_LABELS,
   LAYERS,
+  briefApi,
   deskApi,
   projectsApi,
   refineApi,
-  sessionsApi,
   skillsApi,
   type ChapterReview,
   type DeskChapterDetail,
@@ -17,7 +17,18 @@ import {
   type ProjectMeta,
   type SkillModule,
 } from '../api'
-import { activeTab, currentProjectId } from '../state'
+import { activeTab, currentChapterNo, currentProjectId, currentVolumeNo } from '../state'
+
+const props = defineProps<{
+  /** 指定章节号；不传则自动选 todayNo */
+  chapterNo?: number
+}>()
+
+const emit = defineEmits<{
+  (e: 'reopen-brief'): void
+  (e: 'next-chapter', no: number): void
+  (e: 'to-settle'): void
+}>()
 
 const loading = ref(false)
 const overview = ref<DeskDetail | null>(null)
@@ -109,6 +120,12 @@ const totalCount = computed(() => overview.value?.total ?? 0)
 const todayNo = computed(
   () => overview.value?.chapters.find((c) => !c.finalized_at)?.no ?? 0,
 )
+// 当前章的章前卡（brief）
+const currentBrief = computed(() => {
+  const b = (detail.value?.chapter as any)?.brief
+  return b && typeof b === 'object' ? b : null
+})
+const currentBriefSelected = computed(() => currentBrief.value?.selected || null)
 
 // 分页：章节列表按 30/页切，全量拉取保证「今日应写」跨页计算正确
 const deskPage = ref(1)
@@ -143,10 +160,10 @@ async function loadOverview(keepSelection = true) {
   try {
     overview.value = await deskApi.detail(currentProjectId.value)
     if (!keepSelection || !currentNo.value) {
-      currentNo.value = todayNo.value || overview.value.chapters[0]?.no || 0
+      currentNo.value = props.chapterNo || currentChapterNo.value || todayNo.value || overview.value.chapters[0]?.no || 0
     }
     if (currentNo.value && !overview.value.chapters.some((c) => c.no === currentNo.value)) {
-      currentNo.value = overview.value.chapters[0]?.no || 0
+      currentNo.value = props.chapterNo || currentChapterNo.value || overview.value.chapters[0]?.no || 0
     }
   } catch (e) {
     ElMessage.error(`章台加载失败：${(e as Error).message}`)
@@ -239,7 +256,7 @@ const refLayer = ref('')
 const refLayerOptions = ref<string[]>([])
 const addingRef = ref(false)
 const injectedProjectLayers = ref<{ source_id: string; title: string; content: string; chars: number }[]>([])
-const showRefs = ref(['outline'])   // 本章大纲默认展开，参考资料默认收起
+const showRefs = ref<string[]>([])   // 参考资料默认收起
 
 const refProjectOptions = computed(() =>
   refProjects.value.filter((p) => p.id !== currentProjectId.value))
@@ -435,9 +452,23 @@ async function doFinalize() {
     lastFinalize.value = await deskApi.finalize(currentProjectId.value, currentNo.value, true, payoff)
     payoffChoice.value = payoff
     ElMessage.success(`第 ${currentNo.value} 章已定稿，飞轮运转完成`)
-    await loadOverview()
-    const next = overview.value?.chapters.find((c) => !c.finalized_at)
-    if (next) await selectChapter(next.no)
+    // 调 briefApi.advance 判断下一章 / 杀青
+    try {
+      const adv = await briefApi.advance(currentProjectId.value, currentVolumeNo.value, currentNo.value)
+      await loadOverview()
+      if (adv.next_chapter != null) {
+        currentChapterNo.value = adv.next_chapter
+        emit('next-chapter', adv.next_chapter)
+      } else if (adv.phase === 'settle') {
+        emit('to-settle')
+      } else {
+        const next = overview.value?.chapters.find((c) => !c.finalized_at)
+        if (next) await selectChapter(next.no)
+      }
+    } catch (advE: any) {
+      console.warn('advance 失败，停留本章：', advE)
+      await loadOverview()
+    }
   } catch (e) {
     ElMessage.error(`定稿失败：${(e as Error).message}`)
   } finally {
@@ -445,30 +476,8 @@ async function doFinalize() {
   }
 }
 
-async function summonDaily() {
-  /** 卡壳时召唤 AI：找一个本章的 active daily_write 会话；没有就新建。然后切到副本对话。*/
-  if (!currentProjectId.value || !currentNo.value) return
-  try {
-    const list = await sessionsApi.list(currentProjectId.value, { scope: 'chapter', chapter: currentNo.value })
-    let sid = list.sessions.find(s => s.status === 'active')?.id
-    if (!sid) {
-      const r = await sessionsApi.create(currentProjectId.value, { scope: 'chapter', chapter: currentNo.value })
-      sid = r.session.id
-    }
-    ;(window as any).__sessionFocus = sid
-    activeTab.value = 'session'
-  } catch (e) {
-    ElMessage.error(`打开对话失败：${(e as Error).message}`)
-  }
-}
-
 onMounted(async () => {
-  const focus = (window as unknown as { __deskFocus?: { value: number } }).__deskFocus
   await loadOverview(false)
-  if (focus?.value) {
-    await selectChapter(focus.value)
-    focus.value = 0
-  }
   loadRefProjects()
   loadModules()
 })
@@ -481,30 +490,10 @@ watch(currentProjectId, () => {
   loadOverview(false)
 })
 
-// 支持从外部（App 自动路由/副本对话 schedule 锁定后）跳转到指定章
-watch(
-  () => (window as unknown as { __deskFocus?: { value: number } }).__deskFocus?.value,
-  async (n) => {
-    if (!n || !currentProjectId.value) return
-    if (!overview.value) await loadOverview(false)
-    await selectChapter(n)
-    const f = (window as unknown as { __deskFocus?: { value: number } }).__deskFocus
-    if (f) f.value = 0
-  },
-)
-
-// tab 用 v-show 常驻：在别处改了大纲（向导/创作导航），切回章台要重拉总览
+// tab 用 v-show 常驻：切回章台要重拉总览
 watch(activeTab, (tab) => {
   if (tab === 'desk' && currentProjectId.value && !busy.value) loadOverview()
 })
-
-// 跳运行台续写大纲：置位标志，PipelineView 读取后进入续写模式并清零
-function goContinueOutline() {
-  const w = window as unknown as { __pipelineContinue?: { value: boolean } }
-  if (w.__pipelineContinue) w.__pipelineContinue.value = true
-  else (window as unknown as { __pipelineContinue: { value: boolean } }).__pipelineContinue = { value: true }
-  activeTab.value = 'pipeline'
-}
 </script>
 
 <template>
@@ -521,8 +510,8 @@ function goContinueOutline() {
   </div>
 
   <div v-else-if="!overview.chapters.length">
-    <el-empty description="还没有章节可写——先在创作向导的「故事架构」站生成大纲（章头单独一行「第N章」，支持 # 标题；分卷写「第N卷 卷名」行），章台才有章可做">
-      <el-button type="primary" @click="activeTab = 'wizard'">去创作向导</el-button>
+    <el-empty description="还没有章节——请先完成节奏骨架推演，系统会自动创建第一章">
+      <p style="font-size:12px;color:#999;margin-top:6px">若节奏蓝图已完成但仍看不到章节，请刷新页面</p>
     </el-empty>
   </div>
 
@@ -538,18 +527,6 @@ function goContinueOutline() {
         </template>
         <div v-if="todayNo" style="margin-bottom: 10px; font-size: 13px; color: #666">
           今天写到第 <b style="color: var(--el-color-primary)">{{ todayNo }}</b> 章
-          <el-button
-            size="small"
-            type="primary"
-            plain
-            style="margin-left: 10px"
-            @click="goContinueOutline"
-          >
-            续写 / 补新章
-          </el-button>
-        </div>
-        <div v-if="overview && overview.outline_chapters < overview.total" style="margin-bottom: 10px; font-size: 12px; color: #e6a23c">
-          有 {{ overview.total - overview.outline_chapters }} 章还没有大纲，做完也能写，但建议回向导补
         </div>
         <el-scrollbar max-height="560px">
           <template v-for="g in chapterGroups" :key="g.volume || `__g${g.items[0]?.no ?? 0}`">
@@ -575,9 +552,6 @@ function goContinueOutline() {
                 <el-tag v-if="c.finalized_at" type="success" size="small">定稿</el-tag>
               </div>
               <div style="display: flex; gap: 4px; margin-top: 4px; align-items: center">
-                <el-tag :type="c.has_outline ? 'info' : 'warning'" size="small" effect="plain">
-                  {{ c.has_outline ? '有大纲' : '无大纲' }}
-                </el-tag>
                 <el-tag :type="c.plot_done ? 'success' : 'info'" size="small" effect="plain">剧情</el-tag>
                 <el-tag :type="c.draft_done ? 'success' : 'info'" size="small" effect="plain">正文</el-tag>
                 <el-tag :type="c.polish_done ? 'success' : 'info'" size="small" effect="plain">润色</el-tag>
@@ -620,21 +594,46 @@ function goContinueOutline() {
     <!-- 右栏：单章微循环 -->
     <el-col :span="17">
       <template v-if="detail">
+        <!-- 章前卡摘要条 -->
+        <el-card v-if="currentBriefSelected" shadow="never" style="margin-bottom: 14px" class="brief-summary-card">
+          <div style="display: flex; align-items: flex-start; gap: 10px">
+            <div style="flex-shrink: 0">
+              <el-tag type="warning" effect="dark" size="small">章前方向</el-tag>
+            </div>
+            <div style="flex: 1; min-width: 0">
+              <div style="font-weight: 600; color: #e6a23c; margin-bottom: 4px">
+                {{ currentBriefSelected.title || '方向已定' }}
+                <el-tag v-if="currentBriefSelected.beat_type" size="small" type="info" effect="plain" style="margin-left: 6px">
+                  {{ { hook:'钩子', sell:'卖设定', engine:'推进', climax:'高潮', cooldown:'余韵' }[currentBriefSelected.beat_type] || currentBriefSelected.beat_type }}
+                </el-tag>
+                <el-tag v-if="currentBrief.is_custom" size="small" type="warning" effect="plain" style="margin-left: 4px">自编</el-tag>
+              </div>
+              <div style="font-size: 13px; color: #606266; line-height: 1.7; white-space: pre-wrap">
+                {{ currentBriefSelected.summary }}
+              </div>
+              <div v-if="currentBriefSelected.hooks" style="font-size: 12px; color: #e6a23c; margin-top: 4px">
+                🪝 {{ currentBriefSelected.hooks }}
+              </div>
+            </div>
+            <el-button size="small" plain @click="emit('reopen-brief')">✏️ 换方向</el-button>
+          </div>
+        </el-card>
+        <el-card v-else shadow="never" style="margin-bottom: 14px">
+          <div style="display: flex; align-items: center; gap: 10px">
+            <el-tag type="warning" effect="plain">尚未选定本章方向</el-tag>
+            <span style="font-size: 12px; color: #999">先花 5 分钟选好方向再动笔，效率更高</span>
+            <div style="flex: 1" />
+            <el-button size="small" type="primary" @click="emit('reopen-brief')">📝 选方向卡</el-button>
+          </div>
+        </el-card>
+
         <el-card shadow="never" style="margin-bottom: 14px">
           <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap">
             <h3 style="margin: 0">第 {{ detail.chapter.no }} 章 · {{ detail.chapter.title || '（未命名）' }}</h3>
             <el-tag v-if="detail.chapter.finalized_at" type="success">已定稿 {{ detail.chapter.finalized_at.slice(0, 16) }}</el-tag>
             <el-tag v-else-if="currentNo === todayNo" type="primary" effect="plain">今日目标</el-tag>
-            <div style="flex: 1" />
-            <el-button size="small" type="warning" plain :disabled="!!detail.chapter.finalized_at"
-                       @click="summonDaily">
-              💬 召唤 AI（卡壳时聊聊这章）
-            </el-button>
           </div>
           <el-collapse v-model="showRefs" style="margin-top: 10px">
-            <el-collapse-item title="本章大纲" name="outline">
-              <div class="outline-preview">{{ detail.outline || '（本章暂无大纲，可直接写，建议之后回向导补齐）' }}</div>
-            </el-collapse-item>
             <el-collapse-item :name="'refs'">
               <template #title>
                 参考资料注入（其他项目 / 拆书参考书）

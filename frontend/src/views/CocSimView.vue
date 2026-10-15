@@ -21,6 +21,8 @@ const volume = ref<any>(null)
 const job = ref<Job | null>(null)
 const running = ref(false)
 const pickedVariantId = ref<string | null>(null)
+// 本地追加的自定义/编辑变体（不来自 job 结果）
+const extraVariants = ref<any[]>([])
 
 // ---- 启动参数 ----
 const userDirective = ref('')
@@ -48,15 +50,28 @@ const collageSelections = ref<Record<string, number>>({})
 const collageNotes = ref<Record<string, string>>({})
 const collageUserNote = ref('')
 
+// ---- 自定义/编辑 dialog ----
+const dialogVisible = ref(false)
+const dialogMode = ref<'custom' | 'edit'>('custom')
+const dialogLabel = ref('')
+const dialogText = ref('')
+const dialogEditIndex = ref<number>(-1)  // index within allVariants; -1 for custom
+
 let sse: { close: () => void } | null = null
 
-const variants = computed<any[]>(() => {
+/** job 返回的 AI 版本 */
+const jobVariants = computed<any[]>(() => {
   if (!job.value) return []
   if (job.value.result && typeof job.value.result === 'object' && Array.isArray((job.value.result as any).variants)) {
     return (job.value.result as any).variants
   }
   if (Array.isArray(job.value.sub_results)) return job.value.sub_results as any[]
   return []
+})
+
+/** 包含自定义卡的全部可选项（自定义卡追加在尾部） */
+const allVariants = computed<any[]>(() => {
+  return [...jobVariants.value, ...extraVariants.value]
 })
 
 const completed = computed(() => volume.value?.simulated_run ?? null)
@@ -117,6 +132,7 @@ function applyJob(j: Job) {
   job.value = j
   if (j.status === 'done') {
     running.value = false
+    extraVariants.value = []
     uiState.value = 'result'
     pickedVariantId.value = null
     // 默认拼贴 base = 0；selections 默认每段从 base
@@ -135,13 +151,14 @@ function applyJob(j: Job) {
   }
 }
 
-async function onStart() {
+async function onStart(directive = '') {
   const pid = currentProjectId.value
   if (!pid) return
   running.value = true
+  extraVariants.value = []
   try {
     const r = await simulateApi.startSim(pid, props.volNo, {
-      user_directive: userDirective.value,
+      user_directive: directive || userDirective.value,
       max_pairs_per_session: maxPairs.value,
       max_turns_per_session: maxTurns.value,
       tangchi_replace_idx: tangchiReplace.value,
@@ -160,7 +177,23 @@ async function onPickOne(id: string | null, idx?: number) {
   if (id == null || idx == null) return
   pickedVariantId.value = id
   const pid = currentProjectId.value
-  if (!pid || !job.value) return
+  if (!pid) return
+  const picked = allVariants.value[idx]
+  if (!picked) return
+  // 自定义/编辑卡 → 走 save-custom
+  if (picked.is_custom) {
+    try {
+      const r = await simulateApi.saveCustomVariant(pid, props.volNo, picked)
+      volume.value = r.volume
+      uiState.value = 'completed'
+      ElMessage.success('已保存自定义跑团走向')
+      emit('done')
+    } catch (e: any) {
+      ElMessage.error('保存失败：' + (e?.message ?? e))
+    }
+    return
+  }
+  if (!job.value) return
   try {
     const r = await simulateApi.pickOne(pid, props.volNo, job.value.job_id, idx)
     volume.value = r.volume
@@ -206,11 +239,73 @@ async function onReset() {
     volume.value = r.volume
     job.value = null
     pickedVariantId.value = null
+    extraVariants.value = []
     uiState.value = 'ready'
     ElMessage.success('已清空跑团结果，可以重跑')
   } catch (e: any) {
     ElMessage.error('清空失败：' + (e?.message ?? e))
   }
+}
+
+// ---- SushiCards 迭代事件 ----
+function onRerun(idx: number | null, directive: string) {
+  const extra = directive
+    ? (idx != null ? `参考第${idx + 1}场风格，调整方向：${directive}` : `重抽提示：${directive}`)
+    : ''
+  onStart(extra)
+}
+
+function onCustomWrite() {
+  dialogMode.value = 'custom'
+  dialogLabel.value = ''
+  dialogText.value = ''
+  dialogEditIndex.value = -1
+  dialogVisible.value = true
+}
+
+function onEditCard(idx: number) {
+  const it = allVariants.value[idx]
+  if (!it) return
+  dialogMode.value = 'edit'
+  dialogLabel.value = it.label || ''
+  dialogText.value = it.full_log || it.content || ''
+  dialogEditIndex.value = idx
+  dialogVisible.value = true
+}
+
+function onDialogSave() {
+  const text = dialogText.value.trim()
+  if (!text) { ElMessage.warning('跑团日志内容不能为空'); return }
+  const label = dialogLabel.value.trim() || (dialogMode.value === 'edit' ? '已编辑' : '自定义')
+  const newCard: any = {
+    is_custom: true,
+    label,
+    full_log: text,
+    content: text,
+    one_liner: text.slice(0, 80).replace(/\n/g, ' '),
+    flavor: dialogMode.value === 'edit' ? '已编辑' : '自定义',
+  }
+  if (dialogMode.value === 'edit' && dialogEditIndex.value >= 0) {
+    const jobN = jobVariants.value.length
+    if (dialogEditIndex.value < jobN) {
+      // 编辑 AI 卡 → 把修改后的版本追加到 extraVariants（原卡保留，便于对比）
+      const base = jobVariants.value[dialogEditIndex.value] || {}
+      newCard.label = `✏️ ${label}`
+      newCard._editBaseIdx = dialogEditIndex.value
+      extraVariants.value = [...extraVariants.value, { ...base, ...newCard }]
+    } else {
+      // 编辑自定义卡 → 就地替换
+      const localIdx = dialogEditIndex.value - jobN
+      const base = extraVariants.value[localIdx] || {}
+      extraVariants.value[localIdx] = { ...base, ...newCard }
+      extraVariants.value = [...extraVariants.value]
+    }
+  } else {
+    newCard.label = `✏️ ${label}`
+    extraVariants.value = [...extraVariants.value, newCard]
+  }
+  dialogVisible.value = false
+  ElMessage.success(dialogMode.value === 'edit' ? '已生成编辑版，可选定保存' : '已添加自定义版本，可选定保存')
 }
 
 onMounted(() => {
@@ -272,7 +367,7 @@ watch(() => props.volNo, () => {
           </el-collapse-item>
         </el-collapse>
         <div class="actions">
-          <el-button type="primary" size="large" :loading="running" @click="onStart">
+          <el-button type="primary" size="large" :loading="running" @click="() => onStart()">
             🎲 开跑 3 场并行 COC
           </el-button>
         </div>
@@ -305,23 +400,25 @@ watch(() => props.volNo, () => {
     <div v-else-if="uiState === 'result'" class="sim-result">
       <SushiCards
         mode="ensemble"
-        :items="variants"
+        :items="allVariants"
         :picked-id="pickedVariantId"
         axis-label="3 场 COC 并行跑团结果"
         item-title-field="label"
         item-subtitle-field="one_liner"
         item-content-field="full_log"
         item-badge-field="flavor"
-        :allow-regenerate="false"
         :plate-count="3"
         :is-active="true"
         @pick="onPickOne"
+        @rerun="onRerun"
+        @custom-write="onCustomWrite"
+        @edit-card="onEditCard"
       />
 
       <el-card shadow="never" class="collage-card">
         <h3>🧩 或：拼贴合成主跑团记录</h3>
         <p class="hint">
-          拼贴模式：从 3 场中各挑你喜欢的元素，机械合并为一份主跑团记录（智能 AI 合成后续迭代）。
+          拼贴模式：从 3 场 AI 版本中各挑你喜欢的元素，机械合并为一份主跑团记录（智能 AI 合成后续迭代）。自定义版本请用「单选」。
         </p>
         <div class="collage-row">
           <label>主线骨架：</label>
@@ -361,7 +458,7 @@ watch(() => props.volNo, () => {
       <el-card shadow="never">
         <div class="completed-head">
           <el-tag type="success" size="large">
-            {{ completed?.mode === 'collage' ? '拼贴合成' : '单选主线' }}
+            {{ completed?.mode === 'collage' ? '拼贴合成' : completed?.mode === 'custom' ? '自定义' : '单选主线' }}
           </el-tag>
           <span class="summary">{{ completed?.summary || '' }}</span>
         </div>
@@ -376,6 +473,32 @@ watch(() => props.volNo, () => {
     </div>
 
     <div v-else-if="uiState === 'loading'" class="loading">加载中…</div>
+
+    <!-- 自定义/编辑 dialog -->
+    <el-dialog
+      v-model="dialogVisible"
+      :title="dialogMode === 'custom' ? '✏️ 自写跑团版本' : '✏️ 编辑此版跑团'"
+      width="720px"
+      :close-on-click-modal="false"
+    >
+      <el-input
+        v-model="dialogLabel"
+        placeholder="版本标签（如「全员殒落·改」「我自己的线」）"
+        style="margin-bottom: 10px"
+      />
+      <el-input
+        v-model="dialogText"
+        type="textarea"
+        :rows="16"
+        placeholder="在此撰写完整跑团日志（full_log），会作为本卷的主跑团记录直接保存。"
+      />
+      <template #footer>
+        <el-button @click="dialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="onDialogSave">
+          {{ dialogMode === 'custom' ? '添加此版' : '保存为编辑版' }}
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 

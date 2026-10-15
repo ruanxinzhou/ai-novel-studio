@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 回转寿司：N 份并排候选 → 选一份 → 进入编辑 → AI 改一版 / 手动改 / 锁定
 // 支持两种模式：
-//   - diverge（默认）：编辑流程（出 N 盘→选一盘→进入 AI 改稿→锁定），向后兼容 SessionView
+//   - diverge（默认）：编辑流程（出 N 盘→选一盘→进入 AI 改稿→锁定），向后兼容旧 diverge 编辑流
 //   - ensemble        ：通用 N 选 1 只读对比面板（pdf5/coc/outline5 等批量产出展示）
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
@@ -35,6 +35,10 @@ interface Props {
   allowRegenerate?: boolean
   regenerateLabel?: string
   emptyLabel?: string
+  // ensemble 迭代能力（T10+）
+  allowCustom?: boolean
+  customLabel?: string
+  rerunLabel?: string
 }
 const props = withDefaults(defineProps<Props>(), {
   // 通用默认
@@ -62,6 +66,10 @@ const props = withDefaults(defineProps<Props>(), {
   allowRegenerate: true,
   regenerateLabel: '换一拨',
   emptyLabel: '暂无可选项',
+  // ensemble 迭代默认
+  allowCustom: true,
+  customLabel: '✏️ 我自己写一版',
+  rerunLabel: '🔄 再抽一版',
 })
 
 const emit = defineEmits<{
@@ -74,6 +82,14 @@ const emit = defineEmits<{
   (e: 'aiSuggest', instruction: string, apply: boolean): void
   (e: 'lock'): void
   (e: 'endEditing'): void
+
+  // === ensemble 迭代（T10+）===
+  // index=null 整盘重抽；index=数字 基于该版微调
+  (e: 'rerun', index: number | null, directive: string): void
+  // 作者要自己写一版（父组件弹输入框）
+  (e: 'custom-write'): void
+  // 作者要就地编辑某一版文本
+  (e: 'edit-card', index: number): void
 }>()
 
 // ==================== diverge 模式逻辑（保持原行为）====================
@@ -156,6 +172,16 @@ function applySuggestion(m: SessionMessage) {
 // ==================== ensemble 模式逻辑 ====================
 
 const ensembleItems = computed(() => props.items || [])
+const rerunDirective = ref('')
+
+function doRerunAll() {
+  emit('rerun', null, rerunDirective.value.trim())
+  rerunDirective.value = ''
+}
+function doRerunOne(idx: number) {
+  emit('rerun', idx, rerunDirective.value.trim())
+  rerunDirective.value = ''
+}
 
 function getField(it: any, field: string): string {
   if (!it || !field) return ''
@@ -311,21 +337,71 @@ const sushiCardsGridClass = computed(() => {
       <!-- 空态 -->
       <div v-if="!ensembleItems.length" class="sushi-empty">
         <div class="sushi-axis-simple">{{ emptyLabel }}</div>
-        <el-button v-if="allowRegenerate && isActive" type="primary" size="small" @click="emit('generate')">
-          {{ regenerateLabel }}
-        </el-button>
+        <div v-if="allowRegenerate && isActive" style="display: flex; gap: 6px; align-items: center; justify-content: center; flex-wrap: wrap; margin-bottom: 6px">
+          <el-input
+            v-model="rerunDirective"
+            size="small"
+            placeholder="可选：重抽提示词（方向/风格/雷点）"
+            style="width: 260px"
+            @keydown.enter.exact.prevent="doRerunAll"
+          />
+          <el-button type="primary" size="small" @click="doRerunAll">
+            {{ rerunLabel }}
+          </el-button>
+        </div>
+        <div v-if="allowCustom && isActive">
+          <el-button size="small" @click="emit('custom-write')">{{ customLabel }}</el-button>
+        </div>
       </div>
 
       <!-- N 张卡 -->
       <template v-else>
+        <!-- 顶部工具栏：提示词 + 全部重抽 + 自己写 -->
+        <div v-if="(allowRegenerate || allowCustom) && isActive" class="sushi-ensemble-toolbar">
+          <el-input
+            v-model="rerunDirective"
+            size="small"
+            placeholder="💡 重抽提示词（方向/风格/雷点），留空则随机重抽"
+            class="sushi-ensemble-directive"
+            @keydown.enter.exact.prevent="doRerunAll"
+          />
+          <el-button
+            v-if="allowRegenerate"
+            size="small"
+            :disabled="!isActive"
+            @click="doRerunAll"
+          >{{ rerunLabel }}</el-button>
+          <el-button
+            v-if="allowCustom"
+            size="small"
+            plain
+            :disabled="!isActive"
+            @click="emit('custom-write')"
+          >{{ customLabel }}</el-button>
+        </div>
+
         <div class="sushi-cards" :class="sushiCardsGridClass">
           <div
             v-for="(it, idx) in ensembleItems"
             :key="itemId(it, idx)"
             class="sushi-cand"
-            :class="{ 'sushi-cand--picked': pickedId === itemId(it, idx) }"
+            :class="{ 'sushi-cand--picked': pickedId === itemId(it, idx), 'sushi-cand--custom': it.is_custom }"
           >
             <div v-if="showIndex" class="sushi-cand-idx">#{{ idx + 1 }}</div>
+
+            <!-- 每张卡右上角：🔄 基于此版微调 / ✏️ 编辑此版 -->
+            <div v-if="isActive && !it.is_custom" class="sushi-cand-actions">
+              <el-tooltip content="基于这版微调（换角度出新 3 版）" placement="top">
+                <button class="sushi-cand-icon-btn" @click="doRerunOne(idx)" :disabled="!isActive">🔄</button>
+              </el-tooltip>
+              <el-tooltip content="编辑这版内容" placement="top">
+                <button class="sushi-cand-icon-btn" @click="emit('edit-card', idx)" :disabled="!isActive">✏️</button>
+              </el-tooltip>
+            </div>
+            <div v-else-if="it.is_custom" class="sushi-cand-actions">
+              <el-tag size="small" type="warning" effect="plain">自编</el-tag>
+            </div>
+
             <div v-if="getField(it, itemBadgeField)" class="sushi-cand-axis">{{ getField(it, itemBadgeField) }}</div>
             <div v-if="getField(it, itemTitleField)" class="sushi-cand-title">{{ getField(it, itemTitleField) }}</div>
             <div v-if="getField(it, itemSubtitleField)" class="sushi-cand-subtitle">{{ getField(it, itemSubtitleField) }}</div>
@@ -350,8 +426,8 @@ const sushiCardsGridClass = computed(() => {
           </div>
         </div>
 
-        <div v-if="ensembleItems.length && allowRegenerate" class="sushi-plate-actions sushi-plate-actions--center">
-          <el-button size="small" :disabled="!isActive" @click="emit('generate')">{{ regenerateLabel }}</el-button>
+        <div v-if="allowRegenerate" class="sushi-plate-actions sushi-plate-actions--center">
+          <el-button size="small" :disabled="!isActive" @click="doRerunAll">{{ rerunLabel }}</el-button>
         </div>
       </template>
     </div>
@@ -440,6 +516,10 @@ const sushiCardsGridClass = computed(() => {
   border-color: #67c23a;
   box-shadow: 0 0 0 2px rgba(103,194,58,0.18);
 }
+.sushi-cand--custom {
+  border-color: #e6a23c;
+  background: #fdf6ec;
+}
 .sushi-cand-idx {
   position: absolute;
   top: 6px;
@@ -447,6 +527,54 @@ const sushiCardsGridClass = computed(() => {
   font-size: 11px;
   color: #c0c4cc;
   font-weight: 600;
+}
+.sushi-cand-actions {
+  position: absolute;
+  top: 6px;
+  left: 8px;
+  display: flex;
+  gap: 4px;
+  opacity: 0.45;
+  transition: opacity .2s;
+  z-index: 2;
+}
+.sushi-cand:hover .sushi-cand-actions {
+  opacity: 1;
+}
+.sushi-cand-icon-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid #dcdfe6;
+  background: white;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all .15s;
+}
+.sushi-cand-icon-btn:hover:not(:disabled) {
+  border-color: #409eff;
+  color: #409eff;
+  transform: scale(1.08);
+}
+.sushi-cand-icon-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.sushi-ensemble-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.sushi-ensemble-directive {
+  flex: 1;
+  min-width: 240px;
 }
 .sushi-cand-axis {
   font-size: 12px;

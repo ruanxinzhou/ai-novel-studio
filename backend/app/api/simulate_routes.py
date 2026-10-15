@@ -81,6 +81,10 @@ def register_simulate_routes(
         "/api/projects/{pid}/workbench/volumes/{vol_no}/simulate/collage",
         _collage, methods=["POST"],
     )
+    router.add_api_route(
+        "/api/projects/{pid}/workbench/volumes/{vol_no}/simulate/save-custom",
+        _save_custom_variant, methods=["POST"],
+    )
     app.include_router(router)
 
 
@@ -113,6 +117,10 @@ class _CollageSelection(BaseModel):
 class _CollageIn(BaseModel):
     job_id: str
     collage: dict  # {base_index, selections:[...], user_note}
+
+
+class _SaveCustomVariantIn(BaseModel):
+    variant: dict  # 自定义 variant 对象，含 full_log/one_liner/label 等字段
 
 
 # ---- 帮助函数 ----
@@ -369,6 +377,27 @@ def _pick_one(pid: str, vol_no: int, body: _PickOneIn) -> dict:
         "summary": picked.get("one_liner", ""),
         "full_log": full_log,
         "selected_variant": picked,
+        "collage": None,
+    }
+    v.simulated_run = main_record
+    v.stage_completed["simulate"] = True
+    vs.save(v)
+    return {"ok": True, "volume": v.as_dict()}
+
+
+def _save_custom_variant(pid: str, vol_no: int, body: _SaveCustomVariantIn) -> dict:
+    """POST 直接保存作者自定义的跑团 variant，跳过 job 选版。"""
+    vs, v = _get_volume_or_404(pid, vol_no)
+    variant = body.variant or {}
+    full_log = variant.get("full_log") or variant.get("content") or ""
+    if not full_log:
+        raise HTTPException(status_code=422, detail="variant.full_log 不能为空")
+    main_record = {
+        "mode": "custom",
+        "label": variant.get("label") or "自定义",
+        "summary": variant.get("one_liner") or (full_log[:80].replace("\n", " ")),
+        "full_log": full_log,
+        "selected_variant": variant,
         "collage": None,
     }
     v.simulated_run = main_record

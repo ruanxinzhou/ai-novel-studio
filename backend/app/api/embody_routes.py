@@ -89,11 +89,12 @@ class _GenerateOutlineIn(BaseModel):
 
 
 class _PickOutlineIn(BaseModel):
-    job_id: str
-    pick_index: int
+    job_id: str = ""
+    pick_index: int = -1
     candidate: dict | None = None
     entry_point: dict | None = None
     stance: dict | None = None
+    custom_data: dict | None = None  # 自定义大纲数据，存在则跳过 job 校验
 
 
 # ---- 帮助函数 ----
@@ -384,18 +385,23 @@ def _pick_outline(pid: str, vol_no: int, body: _PickOutlineIn):
     from ..jobs.store import job_store
     vs, v = _get_volume_or_404(pid, vol_no)
     sid = _session_id(pid, vol_no)
-    job = job_store.get(body.job_id)
-    if job is None or job.session_id != sid:
-        raise HTTPException(status_code=404, detail="job 不存在或不属于该卷")
-    outlines = (job.result or {}).get("outlines") or []
-    idx = int(body.pick_index)
-    if idx < 0 or idx >= len(outlines):
-        raise HTTPException(status_code=422, detail=f"pick_index 越界（共 {len(outlines)} 版）")
-    picked = outlines[idx]
 
     candidate = body.candidate or {}
     entry_point = body.entry_point or {}
     stance = body.stance or {}
+
+    # 自定义数据分支：跳过 job 校验，直接用 custom_data 作为选中大纲
+    if body.custom_data:
+        picked = body.custom_data
+    else:
+        job = job_store.get(body.job_id)
+        if job is None or job.session_id != sid:
+            raise HTTPException(status_code=404, detail="job 不存在或不属于该卷")
+        outlines = (job.result or {}).get("outlines") or []
+        idx = int(body.pick_index)
+        if idx < 0 or idx >= len(outlines):
+            raise HTTPException(status_code=422, detail=f"pick_index 越界（共 {len(outlines)} 版）")
+        picked = outlines[idx]
 
     # 计算信息差（info_gap）：从切入点里取
     info_gap = entry_point.get("info_gap") or entry_point.get("description") or ""

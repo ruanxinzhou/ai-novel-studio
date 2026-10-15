@@ -53,11 +53,13 @@ class _Deps:
 
 class _ScaffoldPrefillIn(BaseModel):
     force: bool = False
+    directive: str = ""
 
 
 class _LockCardIn(BaseModel):
     card_key: str
-    pick_index: int
+    pick_index: int = -1
+    custom_value: list | str | None = None  # 自定义值（存在则跳过 variants 索引，直接写入）
 
 
 class _FinalizeIn(BaseModel):
@@ -256,6 +258,9 @@ def register_scaffold_routes(
                     parts.append(tso.get("outline_text") or json.dumps(tso, ensure_ascii=False)[:2000])
                 elif isinstance(tso, str) and tso:
                     parts.append(f"\n===== 唐迟七日历 =====\n{tso}")
+                directive = (body.directive or "").strip()
+                if directive:
+                    parts.append(f"\n===== 作者额外指令 =====\n{directive}")
                 context = "\n".join(parts)
 
                 update(message="LLM 生成 6×3 版详设卡…", progress=30)
@@ -384,21 +389,30 @@ def register_scaffold_routes(
 
         now = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
         if card_key in list_keys:
-            all_variants = entry.get("variants") or getattr(vol, card_key, None) or []
-            if idx < 0 or idx >= len(all_variants):
-                raise HTTPException(422, f"版本序号越界：{card_key}[{idx}]")
-            selected = all_variants[idx]
-            entry["picked_idx"] = idx
+            if body.custom_value is not None and isinstance(body.custom_value, list):
+                selected = body.custom_value
+            else:
+                all_variants = entry.get("variants") or getattr(vol, card_key, None) or []
+                idx = int(body.pick_index)
+                if idx < 0 or idx >= len(all_variants):
+                    raise HTTPException(422, f"版本序号越界：{card_key}[{idx}]")
+                selected = all_variants[idx]
+            entry["picked_idx"] = body.pick_index if body.custom_value is None else -1
             entry["locked_at"] = now
-            entry["variants"] = all_variants
+            entry["variants"] = entry.get("variants") or selected if body.custom_value is None else entry.get("variants")
             vols.update_planning(vol_no, **{card_key: selected}, scaffold_cards=cards)
         else:
-            variants = entry.get("variants") or []
-            if idx < 0 or idx >= len(variants):
-                raise HTTPException(422, f"版本序号越界：{card_key}[{idx}]")
-            entry["picked_idx"] = idx
+            if body.custom_value is not None and isinstance(body.custom_value, str):
+                selected_text = body.custom_value
+            else:
+                variants = entry.get("variants") or []
+                idx = int(body.pick_index)
+                if idx < 0 or idx >= len(variants):
+                    raise HTTPException(422, f"版本序号越界：{card_key}[{idx}]")
+                selected_text = variants[idx]
+            entry["picked_idx"] = body.pick_index if body.custom_value is None else -1
             entry["locked_at"] = now
-            entry["text"] = variants[idx]
+            entry["text"] = selected_text
             vols.update_planning(vol_no, scaffold_cards=cards)
 
         all_keys = ["death_nodes", "climax_nodes", "clue_nodes", "core_twist", "tangchi_start", "cost_cap"]

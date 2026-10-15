@@ -4307,12 +4307,26 @@ register_settle_routes(
     volumes_for=_volumes_for,
     desk_for=_desk_for,
     entities_for=_entities_for,
+    chore_provider=_chore_provider,
 )
 register_brief_routes(
     app,
     require_project=_require_project,
     volumes_for=_volumes_for,
     desk_for=_desk_for,
+    chore_provider=_chore_provider,
+)
+
+# ============================================================
+# 蓝星间章（interlude）路由
+# ============================================================
+from .interlude_routes import register_interlude_routes
+register_interlude_routes(
+    app,
+    require_project=_require_project,
+    volumes_for=_volumes_for,
+    desk_for=_desk_for,
+    chore_provider=_chore_provider,
 )
 
 # ============================================================
@@ -4360,6 +4374,17 @@ register_embody_routes(
 # ============================================================
 from .scaffold_routes import register_scaffold_routes
 register_scaffold_routes(
+    app,
+    require_project=_require_project,
+    volumes_for=_volumes_for,
+    chore_provider=_chore_provider,
+)
+
+# ============================================================
+# 节奏骨架（rhythm）7 天强度曲线 + 章节分配
+# ============================================================
+from .rhythm_routes import register_rhythm_routes
+register_rhythm_routes(
     app,
     require_project=_require_project,
     volumes_for=_volumes_for,

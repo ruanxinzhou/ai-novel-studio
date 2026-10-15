@@ -51,14 +51,180 @@ const completedOutlineText = ref('')
 
 let sse: { close: () => void } | null = null
 
+// ---- 自定义/编辑 dialog ----
+const dialogVisible = ref(false)
+const dialogMode = ref<'custom' | 'edit'>('custom')
+const dialogStep = ref<0 | 1 | 2 | 3>(0)
+const dialogEditIndex = ref<number>(-1)
+const dialogLabel = ref('')
+const dialogText = ref('')
+
+function openCustom(stepNo: 0 | 1 | 2 | 3) {
+  dialogMode.value = 'custom'
+  dialogStep.value = stepNo
+  dialogEditIndex.value = -1
+  dialogLabel.value = ''
+  dialogText.value = ''
+  dialogVisible.value = true
+}
+
+function openEdit(stepNo: 0 | 1 | 2 | 3, idx: number) {
+  dialogMode.value = 'edit'
+  dialogStep.value = stepNo
+  dialogEditIndex.value = idx
+  const list = [candidates.value, entryPoints.value, stances.value, outlines.value][stepNo] as any[]
+  const it = list[idx]
+  if (!it) return
+  // Prefill
+  if (stepNo === 0) {
+    dialogLabel.value = (it.name || '').replace(/^✏️\s*/, '')
+    dialogText.value =
+      `【身体状态】${it.body_state || ''}\n` +
+      `【求生钩子】${it.struggle_hook || ''}\n` +
+      `【SAN】${it.san_loss || '未知'}`
+  } else if (stepNo === 1) {
+    dialogLabel.value = (it.name || '').replace(/^✏️\s*/, '')
+    dialogText.value =
+      `【场景】${it.description || ''}\n\n【信息差】${it.info_gap || ''}`
+  } else if (stepNo === 2) {
+    dialogLabel.value = (it.name || '').replace(/^✏️\s*/, '')
+    dialogText.value = it.description || ''
+  } else {
+    dialogLabel.value = (it.title || '').replace(/^✏️\s*/, '')
+    const days = (it.day_breakdown || []).map((d: any) => `Day${d.day}：${d.summary}`).join('\n')
+    dialogText.value =
+      (it.tangchi_entry ? `【魂穿设定】${it.tangchi_entry}\n\n` : '') +
+      (days ? `【七日流程】\n${days}\n\n` : '') +
+      (it.climax ? `【第七日高潮】\n${it.climax}\n\n` : '') +
+      (it.blue_star_hook ? `【蓝星钩子】${it.blue_star_hook}\n` : '') +
+      (it.outline_text ? `\n【完整大纲】\n${it.outline_text}` : '')
+  }
+  dialogVisible.value = true
+}
+
+function onDialogSave() {
+  const text = dialogText.value.trim()
+  if (!text) {
+    ElMessage.warning('请填写内容')
+    return
+  }
+  const label = dialogLabel.value.trim() || '自定义'
+  const stepNo = dialogStep.value
+  const idx = dialogEditIndex.value
+  const isEdit = dialogMode.value === 'edit'
+
+  let newItem: any
+  if (stepNo === 0) {
+    // Candidate
+    newItem = {
+      id: `custom-${Date.now()}`,
+      is_custom: true,
+      name: `✏️ ${label}`,
+      role: '自定义',
+      age: null,
+      tag: '自编',
+      body_state: text,
+      struggle_hook: '',
+      san_loss: '自定义',
+      death_countdown: isEdit ? '已编辑' : '自定义',
+    } as EmbodyCandidate
+  } else if (stepNo === 1) {
+    newItem = {
+      id: `custom-${Date.now()}`,
+      is_custom: true,
+      name: `✏️ ${label}`,
+      time_anchor: '自定义',
+      description: text,
+      info_gap: '',
+    } as EmbodyEntryPoint
+  } else if (stepNo === 2) {
+    newItem = {
+      id: `custom-${Date.now()}`,
+      is_custom: true,
+      name: `✏️ ${label}`,
+      tendency: '自定义',
+      cost: '自定义',
+      description: text,
+    } as EmbodyStance
+  } else {
+    // Outline
+    newItem = {
+      index: Date.now(),
+      is_custom: true,
+      title: `✏️ ${label}`,
+      one_liner: text.slice(0, 60),
+      flavor: '自定义',
+      pacing: 'custom',
+      tangchi_entry: '',
+      day_breakdown: [],
+      climax: '',
+      blue_star_hook: '',
+      outline_text: text,
+    } as EmbodyOutline
+  }
+
+  const targetList = [candidates, entryPoints, stances, outlines][stepNo] as { value: any[] }
+  const arr = targetList.value
+  if (isEdit && idx >= 0) {
+    const orig = arr[idx]
+    if (orig?.is_custom) {
+      arr.splice(idx, 1, newItem)
+    } else {
+      // Edit on AI card → append as new custom
+      arr.push(newItem)
+      // Also auto-select this new item? No; let user pick.
+    }
+  } else {
+    arr.push(newItem)
+  }
+  dialogVisible.value = false
+  ElMessage.success(isEdit ? '已保存编辑' : '已添加自定义卡片')
+}
+
+// ---- Rerun helpers ----
+function onRerunStep(stepNo: 0 | 1 | 2 | 3, _idx: number | null, directive: string) {
+  const extra = directive ? `（微调指令：${directive}）` : ''
+  if (stepNo === 0) {
+    ElMessage.info(`重新打捞魂穿候选${extra}…`)
+    loadCandidates()
+  } else if (stepNo === 1) {
+    if (!candidate.value) return
+    ElMessage.info(`重新推演切入点${extra}…`)
+    loadEntryPoints(candidate.value)
+  } else if (stepNo === 2) {
+    ElMessage.info(`重新推演立场${extra}…`)
+    loadStances()
+  } else {
+    // Outlines - re-run with directive appended
+    const extraDirective = directive
+      ? (userDirective.value ? userDirective.value + '\n' : '') + `【微调要求】${directive}`
+      : userDirective.value
+    userDirective.value = extraDirective
+    startGenerate(true)
+  }
+}
+
 // ---- SushiCards items 适配 ----
+function decorateCustom<T extends Record<string, any>>(arr: T[], badgeCustom: string): any[] {
+  return arr.map((c: any) => {
+    if (c.is_custom && !c._is_decorated) {
+      c._is_decorated = true
+      // add ✏️ prefix if missing
+      const nameField = c.name !== undefined ? 'name' : (c.title !== undefined ? 'title' : null)
+      if (nameField && typeof c[nameField] === 'string' && !c[nameField].startsWith('✏️')) {
+        c[nameField] = '✏️ ' + c[nameField]
+      }
+    }
+    return c
+  })
+}
 
 const candidateCards = computed(() =>
-  candidates.value.map((c) => ({
+  decorateCustom(candidates.value, '自定义').map((c) => ({
     ...c,
     _title: c.name,
     _subtitle: `${c.role || ''}${c.age ? ` · ${c.age}岁` : ''}${c.tag ? ` · ${c.tag}` : ''}`,
-    _badge: c.death_countdown || c.san_loss || '',
+    _badge: c.death_countdown || c.san_loss || (c.is_custom ? '自编' : ''),
     _content:
       `【身体状态】${c.body_state || ''}\n` +
       `【求生钩子】${c.struggle_hook || ''}\n` +
@@ -67,11 +233,11 @@ const candidateCards = computed(() =>
 )
 
 const entryPointCards = computed(() =>
-  entryPoints.value.map((ep) => ({
+  decorateCustom(entryPoints.value, '自定义').map((ep) => ({
     ...ep,
     _title: ep.name,
     _subtitle: ep.time_anchor || '',
-    _badge: '切入点',
+    _badge: ep.is_custom ? '自编' : '切入点',
     _content:
       `【场景】${ep.description || ''}\n\n` +
       `【信息差】${ep.info_gap || ''}`,
@@ -79,28 +245,29 @@ const entryPointCards = computed(() =>
 )
 
 const stanceCards = computed(() =>
-  stances.value.map((s) => ({
+  decorateCustom(stances.value, '自定义').map((s) => ({
     ...s,
     _title: s.name,
     _subtitle: s.tendency || '',
-    _badge: s.cost || '',
+    _badge: s.cost || (s.is_custom ? '自编' : ''),
     _content: s.description || '',
   })),
 )
 
 const outlineCards = computed(() => {
-  return outlines.value.map((o) => {
-    const days = (o.day_breakdown || []).map((d) => `Day${d.day}：${d.summary}`).join('\n')
+  return decorateCustom(outlines.value, '自定义').map((o) => {
+    const days = (o.day_breakdown || []).map((d: any) => `Day${d.day}：${d.summary}`).join('\n')
     return {
       ...o,
-      _title: o.title || `第${o.index + 1}版`,
+      _title: o.title || `第${(o.index ?? 0) + 1}版`,
       _subtitle: o.one_liner || '',
-      _badge: o.pacing || o.flavor || '',
+      _badge: o.pacing || o.flavor || (o.is_custom ? '自编' : ''),
       _content:
         (o.tangchi_entry ? `【魂穿设定】${o.tangchi_entry}\n\n` : '') +
         (days ? `【七日流程】\n${days}\n\n` : '') +
         (o.climax ? `【第七日高潮】\n${o.climax}\n\n` : '') +
-        (o.blue_star_hook ? `【蓝星钩子】${o.blue_star_hook}\n` : ''),
+        (o.blue_star_hook ? `【蓝星钩子】${o.blue_star_hook}\n` : '') +
+        (o.outline_text && !days ? o.outline_text : ''),
     }
   })
 })
@@ -110,6 +277,7 @@ async function loadCandidates() {
   const pid = currentProjectId.value
   if (!pid) return
   loadingCandidates.value = true
+  candidates.value = []
   try {
     const r = await embodyApi.candidates(pid, props.volNo)
     candidates.value = r.candidates || []
@@ -191,7 +359,6 @@ function onPickStance(id: string) {
 function goBack() {
   if (step.value === 4) return
   if (step.value === 3 && outlines.value.length > 0) {
-    // 在生成结果页退回选立场
     step.value = 2
     return
   }
@@ -199,12 +366,12 @@ function goBack() {
 }
 
 // ---- 启动 5 版大纲 ----
-async function startGenerate() {
+async function startGenerate(isRerun = false) {
   const pid = currentProjectId.value
   if (!pid || !candidate.value || !entryPoint.value || !stance.value) return
   generating.value = true
   genProgress.value = 3
-  genMessage.value = '正在启动 5 版大纲并行生成…'
+  genMessage.value = isRerun ? '正在按新指令重新生成 5 版大纲…' : '正在启动 5 版大纲并行生成…'
   outlines.value = []
   pickedOutlineId.value = null
   pickedOutline.value = null
@@ -269,9 +436,9 @@ function closeSSE() {
 }
 
 // ---- 选版落盘 ----
-async function pickOutlineById(id: string) {
+async function pickOutlineById(id: string, _idx?: number) {
   const pid = currentProjectId.value
-  if (!pid || !outlineJob.value || !candidate.value || !entryPoint.value || !stance.value) return
+  if (!pid || !candidate.value || !entryPoint.value || !stance.value) return
   const idx = outlines.value.findIndex((o) => String(o.index) === id || id === String(o.index))
   const realIdx = idx >= 0 ? idx : Number(id)
   const target = outlines.value[realIdx]
@@ -280,18 +447,25 @@ async function pickOutlineById(id: string) {
   pickedOutline.value = target
   completing.value = true
   try {
-    const r = await embodyApi.pickOutline(pid, props.volNo, {
-      job_id: outlineJob.value.job_id,
-      pick_index: realIdx,
+    const isCustom = !!(target as any).is_custom
+    const body: any = {
       candidate: candidate.value,
       entry_point: entryPoint.value,
       stance: stance.value,
-    })
+    }
+    if (isCustom) {
+      body.custom_data = { ...target }
+    } else {
+      if (!outlineJob.value) throw new Error('当前没有生成任务，无法选取 AI 版本')
+      body.job_id = outlineJob.value.job_id
+      body.pick_index = realIdx
+    }
+    const r = await embodyApi.pickOutline(pid, props.volNo, body)
     completedHost.value = candidate.value
-    completedOutlineText.value = r.picked.outline_text || ''
+    completedOutlineText.value = r.picked.outline_text || target.outline_text || ''
     outlines.value = (r.volume?.tangchi_story_outline ? [r.volume.tangchi_story_outline as EmbodyOutline] : outlines.value)
     step.value = 4
-    ElMessage.success('魂穿设定已落盘，embody 阶段完成。')
+    ElMessage.success(isCustom ? '自定义魂穿大纲已落盘，embody 阶段完成。' : '魂穿设定已落盘，embody 阶段完成。')
   } catch (e: any) {
     ElMessage.error(`落盘失败：${e?.message || e}`)
   } finally {
@@ -342,7 +516,7 @@ const activeStep = computed(() => Math.min(step.value, 4))
     <!-- Step 0：选身体 -->
     <div v-if="step === 0" class="embody-step">
       <h3>Step 1 · 选一具身体</h3>
-      <p class="hint">挑一个倒霉蛋——唐迟穿进去的时候，他/她正处于最接近死亡/崩溃的那个瞬间。</p>
+      <p class="hint">挑一个倒霉蛋——唐迟穿进去的时候，他/她正处于最接近死亡/崩溃的那个瞬间。可以 reroll 整盘重抽，也可以自定义/编辑某一版。</p>
       <div v-if="loadingCandidates" class="loading-hint">正在打捞副本里最倒霉的几位……</div>
       <SushiCards
         v-else
@@ -354,10 +528,12 @@ const activeStep = computed(() => Math.min(step.value, 4))
         item-subtitle-field="_subtitle"
         item-content-field="_content"
         item-badge-field="_badge"
-        :allow-regenerate="false"
         :plate-count="3"
         :is-active="true"
         @pick="onPickCandidate"
+        @rerun="(idx, dir) => onRerunStep(0, idx, dir)"
+        @custom-write="() => openCustom(0)"
+        @edit-card="(idx) => openEdit(0, idx)"
       />
     </div>
 
@@ -384,10 +560,12 @@ const activeStep = computed(() => Math.min(step.value, 4))
         item-subtitle-field="_subtitle"
         item-content-field="_content"
         item-badge-field="_badge"
-        :allow-regenerate="false"
         :plate-count="3"
         :is-active="true"
         @pick="onPickEntryPoint"
+        @rerun="(idx, dir) => onRerunStep(1, idx, dir)"
+        @custom-write="() => openCustom(1)"
+        @edit-card="(idx) => openEdit(1, idx)"
       />
     </div>
 
@@ -416,14 +594,16 @@ const activeStep = computed(() => Math.min(step.value, 4))
           item-subtitle-field="_subtitle"
           item-content-field="_content"
           item-badge-field="_badge"
-          :allow-regenerate="false"
           :plate-count="3"
           :is-active="true"
           @pick="onPickStance"
+          @rerun="(idx, dir) => onRerunStep(2, idx, dir)"
+          @custom-write="() => openCustom(2)"
+          @edit-card="(idx) => openEdit(2, idx)"
         />
 
         <el-card shadow="never" class="directive-card">
-          <h4>📝 作者额外要求（可选）</h4>
+          <h4>📝 作者额外要求（可选，将作用于大纲生成与 reroll）</h4>
           <el-input
             v-model="userDirective"
             type="textarea"
@@ -437,7 +617,7 @@ const activeStep = computed(() => Math.min(step.value, 4))
             type="primary"
             size="large"
             :disabled="!stance"
-            @click="startGenerate"
+            @click="startGenerate(false)"
           >
             🎲 开始并行生成 5 版唐迟七日大纲
           </el-button>
@@ -464,7 +644,7 @@ const activeStep = computed(() => Math.min(step.value, 4))
       </div>
 
       <div v-if="outlines.length > 0" class="outline-results">
-        <h4 v-if="!generating">🎯 请挑选一版作为唐迟的最终故事大纲</h4>
+        <h4 v-if="!generating">🎯 请挑选一版作为唐迟的最终故事大纲（可 reroll / 自定义 / 编辑）</h4>
         <h4 v-else>已完成的版本（生成中…）</h4>
         <SushiCards
           mode="ensemble"
@@ -475,10 +655,12 @@ const activeStep = computed(() => Math.min(step.value, 4))
           item-subtitle-field="_subtitle"
           item-content-field="_content"
           item-badge-field="_badge"
-          :allow-regenerate="false"
           :plate-count="5"
           :is-active="!generating && !completing"
           @pick="pickOutlineById"
+          @rerun="(idx, dir) => onRerunStep(3, idx, dir)"
+          @custom-write="() => openCustom(3)"
+          @edit-card="(idx) => openEdit(3, idx)"
         />
       </div>
     </div>
@@ -501,7 +683,9 @@ const activeStep = computed(() => Math.min(step.value, 4))
           <strong>立场：</strong>{{ stance?.name }}（{{ stance?.tendency }}）
         </p>
         <div v-if="pickedOutline" class="picked-outline">
-          <h4>📜 选定大纲：{{ pickedOutline.title }}</h4>
+          <h4>📜 选定大纲：{{ pickedOutline.title }}
+            <el-tag v-if="(pickedOutline as any).is_custom" size="small" type="warning" style="margin-left:8px;">自定义</el-tag>
+          </h4>
           <p class="pacing-badge" :class="'p-' + (pickedOutline.pacing || pickedOutline.flavor || '').slice(0,4)">
             节奏：{{ pickedOutline.pacing || pickedOutline.flavor }}
           </p>
@@ -520,6 +704,32 @@ const activeStep = computed(() => Math.min(step.value, 4))
         <el-button size="large" @click="resetAll">🔄 重设魂穿</el-button>
       </div>
     </div>
+
+    <!-- Dialog -->
+    <el-dialog
+      v-model="dialogVisible"
+      :title="dialogMode === 'custom' ? '📝 自定义卡片' : '✏️ 编辑卡片'"
+      width="600px"
+      :close-on-click-modal="false"
+    >
+      <div class="dlg-row">
+        <label>名称/标题</label>
+        <el-input v-model="dialogLabel" placeholder="自定义名称" maxlength="40" />
+      </div>
+      <div class="dlg-row">
+        <label>内容</label>
+        <el-input
+          v-model="dialogText"
+          type="textarea"
+          :rows="14"
+          placeholder="请输入内容"
+        />
+      </div>
+      <template #footer>
+        <el-button @click="dialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="onDialogSave">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -638,6 +848,17 @@ const activeStep = computed(() => Math.min(step.value, 4))
   margin: 0 0 12px;
   color: #c8b18a;
   font-size: 15px;
+}
+
+.dlg-row {
+  margin-bottom: 14px;
+}
+.dlg-row label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: #606266;
+  font-weight: 500;
 }
 
 /* 完成态 */
