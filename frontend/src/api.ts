@@ -1851,3 +1851,110 @@ export const briefApi = {
     ),
 }
 
+// ============================================================
+// 杀青归账（settle）6 步面板
+// ============================================================
+export interface SettleForeshadow {
+  id: string
+  chapter_no: number
+  planted_text: string
+  status: 'paid' | 'dropped' | 'carried'
+  resolution?: string
+}
+
+export interface SettleEntityCheck {
+  entity_id: string
+  name: string
+  status_after: string
+  san_delta: number
+  note: string
+}
+
+export interface SettleCostSummary {
+  cost_summary: string
+  suggested_contamination_delta: number
+  san_loss_note: string
+  new_echo?: string
+  kill_add?: string
+}
+
+export interface SettleBlueStarHook {
+  id: string
+  title: string
+  detail: string
+  summary?: string
+}
+
+export interface SettleNextVolumeHint {
+  id: string
+  title: string
+  entry_point: string
+  info_gap: string
+  summary?: string
+}
+
+export interface SettleOverview {
+  volume: any
+  foreshadows: SettleForeshadow[]
+  chapters_written: number
+  total_words: number
+  death_count: number
+  current_contamination: number
+  is_mock: boolean
+}
+
+export interface SettleEntityUpdate {
+  id: string
+  status?: string
+  san_delta?: number
+  note?: string
+}
+
+export interface SettleApplyBody {
+  contamination_delta: number
+  foreshadow_decisions: Record<string, { status: string; resolution?: string }>
+  entity_updates?: SettleEntityUpdate[]
+  cost_summary?: Partial<SettleCostSummary>
+  blue_star_hook?: SettleBlueStarHook | null
+  next_volume_hint?: SettleNextVolumeHint | null
+}
+
+export const settleApi = {
+  overview: (pid: string, volNo: number) =>
+    req<SettleOverview>(`/api/projects/${pid}/volumes/${volNo}/settle/overview`),
+
+  detect: (pid: string, volNo: number) =>
+    req<{ foreshadows: SettleForeshadow[] }>(`/api/projects/${pid}/volumes/${volNo}/settle/detect`),
+
+  aiSuggest: (pid: string, volNo: number, step: string, context?: Record<string, unknown>) =>
+    req<Record<string, any>>(
+      `/api/projects/${pid}/volumes/${volNo}/settle/ai-suggest`,
+      { method: 'POST', body: JSON.stringify({ step, context: context || {} }) },
+    ),
+
+  apply: (pid: string, volNo: number, body: SettleApplyBody) =>
+    req<any>(
+      `/api/projects/${pid}/volumes/${volNo}/settle/apply`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  finalize: (pid: string, volNo: number) =>
+    req<{ ok: boolean; volume: any; next_action_options: string[] }>(
+      `/api/projects/${pid}/volumes/${volNo}/settle/finalize`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+
+  // 落锤后的后续动作
+  createInterlude: (pid: string) =>
+    req<{ ok: boolean; volume_no: number; volume: any }>(
+      `/api/projects/${pid}/workbench/volumes/interlude`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+
+  createNextDungeon: (pid: string, title: string) =>
+    req<{ ok: boolean; volume_no: number; volume: any }>(
+      `/api/projects/${pid}/workbench/volumes`,
+      { method: 'POST', body: JSON.stringify({ title }) },
+    ),
+}
+

@@ -13,6 +13,7 @@ import EmbodyView from './EmbodyView.vue'
 import DungeonScaffoldView from './DungeonScaffoldView.vue'
 import RhythmView from './RhythmView.vue'
 import DeskView from './DeskView.vue'
+import SettleView from './SettleView.vue'
 import ChapterBriefModal from '../components/ChapterBriefModal.vue'
 import { deskApi } from '../api'
 import {
@@ -261,6 +262,13 @@ defineExpose({ refresh: loadPhase })
               @selected="onBriefSelected"
             />
           </div>
+
+          <!-- settle 阶段：杀青归账 6 步 -->
+          <SettleView
+            v-else-if="phase === 'settle'"
+            :vol-no="currentVolumeNo"
+            @done="loadPhase"
+          />
 
           <!-- 其他阶段：占位提示 -->
           <div v-else class="placeholder-view">

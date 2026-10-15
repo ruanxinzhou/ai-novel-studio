@@ -4307,6 +4307,7 @@ register_settle_routes(
     volumes_for=_volumes_for,
     desk_for=_desk_for,
     entities_for=_entities_for,
+    chore_provider=_chore_provider,
 )
 register_brief_routes(
     app,
