@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import SushiCards from '../components/SushiCards.vue'
 import { simulateApi } from '../api'
 import type { Job } from '../api'
 import { currentProjectId } from '../state'
@@ -19,6 +20,7 @@ const uiState = ref<UiState>('loading')
 const volume = ref<any>(null)
 const job = ref<Job | null>(null)
 const running = ref(false)
+const pickedVariantId = ref<string | null>(null)
 
 // ---- 启动参数 ----
 const userDirective = ref('')
@@ -116,6 +118,7 @@ function applyJob(j: Job) {
   if (j.status === 'done') {
     running.value = false
     uiState.value = 'result'
+    pickedVariantId.value = null
     // 默认拼贴 base = 0；selections 默认每段从 base
     if (Object.keys(collageSelections.value).length === 0) {
       collageBase.value = 0
@@ -144,6 +147,7 @@ async function onStart() {
       tangchi_replace_idx: tangchiReplace.value,
     })
     job.value = r.job
+    pickedVariantId.value = null
     uiState.value = 'running'
     startSse()
   } catch (e: any) {
@@ -152,7 +156,9 @@ async function onStart() {
   }
 }
 
-async function onPickOne(idx: number) {
+async function onPickOne(id: string | null, idx?: number) {
+  if (id == null || idx == null) return
+  pickedVariantId.value = id
   const pid = currentProjectId.value
   if (!pid || !job.value) return
   try {
@@ -199,18 +205,11 @@ async function onReset() {
     const r = await simulateApi.resetRun(pid, props.volNo)
     volume.value = r.volume
     job.value = null
+    pickedVariantId.value = null
     uiState.value = 'ready'
     ElMessage.success('已清空跑团结果，可以重跑')
   } catch (e: any) {
     ElMessage.error('清空失败：' + (e?.message ?? e))
-  }
-}
-
-function variantPreview(v: any): string {
-  try {
-    return JSON.stringify(v, null, 2).slice(0, 800)
-  } catch {
-    return String(v)
   }
 }
 
@@ -286,43 +285,38 @@ watch(() => props.volNo, () => {
         <h3>跑团进行中…</h3>
         <el-progress :percentage="Math.round(job?.progress ?? 0)" :status="(job?.progress ?? 0) >= 100 ? 'success' : undefined" />
         <p class="msg">{{ job?.message || '等待开场…' }}</p>
-        <el-row :gutter="16" class="variant-cards">
-          <el-col v-for="(_, i) in 3" :key="i" :span="8">
-            <el-card shadow="hover" class="var-card">
-              <div class="var-label">{{ ['好运线', '厄运线', '反转线'][i] }}</div>
+        <div class="variant-cards-loading">
+          <div class="var-loading-row">
+            <div v-for="(label, i) in ['好运线', '厄运线', '反转线']" :key="i" class="var-loading-card">
+              <div class="var-label">{{ label }}</div>
               <div class="var-one-liner">
                 <template v-if="(job?.sub_results || []).length > i">
                   {{ (job?.sub_results as any[])[i]?.one_liner || '推演中…' }}
                 </template>
                 <template v-else>等待开场…</template>
               </div>
-            </el-card>
-          </el-col>
-        </el-row>
+            </div>
+          </div>
+        </div>
       </el-card>
     </div>
 
-    <!-- 结果对比 + 拼贴 -->
+    <!-- 结果对比 + 拼贴（用 SushiCards ensemble）-->
     <div v-else-if="uiState === 'result'" class="sim-result">
-      <el-row :gutter="16">
-        <el-col v-for="(v, i) in variants" :key="i" :span="8">
-          <el-card shadow="hover" class="result-card">
-            <div class="result-head">
-              <el-tag type="primary" size="large">{{ v.label || `第${i+1}场` }}</el-tag>
-              <el-tag v-if="v.flavor" type="info" size="small">{{ v.flavor }}</el-tag>
-            </div>
-            <div class="result-oneliner"><strong>{{ v.one_liner || '（无 one-liner）' }}</strong></div>
-            <el-collapse>
-              <el-collapse-item title="原始数据预览">
-                <pre class="log-preview">{{ variantPreview(v) }}</pre>
-              </el-collapse-item>
-            </el-collapse>
-            <div class="result-actions">
-              <el-button type="primary" size="small" @click="onPickOne(i)">选这一场当主线</el-button>
-            </div>
-          </el-card>
-        </el-col>
-      </el-row>
+      <SushiCards
+        mode="ensemble"
+        :items="variants"
+        :picked-id="pickedVariantId"
+        axis-label="3 场 COC 并行跑团结果"
+        item-title-field="label"
+        item-subtitle-field="one_liner"
+        item-content-field="full_log"
+        item-badge-field="flavor"
+        :allow-regenerate="false"
+        :plate-count="3"
+        :is-active="true"
+        @pick="onPickOne"
+      />
 
       <el-card shadow="never" class="collage-card">
         <h3>🧩 或：拼贴合成主跑团记录</h3>
@@ -437,10 +431,21 @@ watch(() => props.volNo, () => {
   margin: 12px 0;
   color: #555;
 }
-.variant-cards {
+
+/* 跑中态：简化三卡（不带选定按钮） */
+.variant-cards-loading {
   margin-top: 16px;
 }
-.var-card {
+.var-loading-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+.var-loading-card {
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  padding: 12px;
+  background: #fafafa;
   min-height: 100px;
 }
 .var-label {
@@ -454,35 +459,7 @@ watch(() => props.volNo, () => {
   line-height: 1.5;
 }
 
-.result-card {
-  margin-bottom: 16px;
-}
-.result-head {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  margin-bottom: 8px;
-}
-.result-oneliner {
-  margin: 8px 0;
-  line-height: 1.6;
-}
-.log-preview {
-  background: #f6f8fa;
-  padding: 8px;
-  border-radius: 4px;
-  font-size: 12px;
-  max-height: 260px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-all;
-  margin: 0;
-}
-.result-actions {
-  margin-top: 12px;
-  text-align: right;
-}
-
+/* 拼贴区域 */
 .collage-card {
   margin-top: 16px;
   background: #fafafa;

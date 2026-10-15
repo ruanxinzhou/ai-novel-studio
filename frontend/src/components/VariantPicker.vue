@@ -1,4 +1,6 @@
 <script setup lang="ts">
+// @deprecated 旧 kindle 深色 UI（仅被 SessionView 使用），新代码请用 <SushiCards mode="ensemble">。
+//             Task 14 删除 SessionView 时一并删除本文件。
 // 通用 N 选 1 对比面板：卡片网格 + 选定按钮 + 选中高亮
 // 支持三种内建渲染模式（pdf5 / coc / outline5），与 jobs.result 的数据结构对应。
 import { computed, ref } from 'vue'

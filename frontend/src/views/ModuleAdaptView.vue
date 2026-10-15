@@ -4,7 +4,7 @@ import { ElMessage } from 'element-plus'
 import { Loading, UploadFilled, Document } from '@element-plus/icons-vue'
 import SushiCards from '../components/SushiCards.vue'
 import { adaptApi } from '../api'
-import type { Candidate, Job } from '../api'
+import type { Job } from '../api'
 import { currentProjectId } from '../state'
 
 const props = defineProps<{
@@ -25,7 +25,9 @@ const userHint = ref('')
 const nOptions = [3, 5, 8]
 const nVal = ref(5)
 const job = ref<Job | null>(null)
-const candidates = ref<Candidate[]>([])
+// ensemble 模式直接用后端原始 adaptations，不再映射成 Candidate[]
+const adaptations = ref<any[]>([])
+const pickedAdaptId = ref<string | null>(null)
 const errorMsg = ref('')
 const starting = ref(false)
 let sse: { close: () => void } | null = null
@@ -41,27 +43,13 @@ function adaptationsFromJob(j: Job): any[] {
   return []
 }
 
-function buildCandidates(adaptations: any[]): Candidate[] {
-  return adaptations.map((a, idx) => ({
-    id: `adapt-${idx}`,
-    phase: 'adapt',
-    card_key: 'adapt_module',
-    content: a.adapted_premise || '',
-    axis_label: a.flavor || `第${idx + 1}版`,
-    axis_dimension: 'flavor',
-    rationale: (a.changed_elements || []).slice(0, 3).join('；') || a.one_liner || '',
-    created_at: new Date().toISOString(),
-    twist: a.flavor || '',
-  } as Candidate & { twist?: string }))
-}
-
 function applyJob(j: Job | null) {
   if (!j) return
   job.value = j
   if (j.status === 'done') {
     const adapts = adaptationsFromJob(j)
-    candidates.value = buildCandidates(adapts)
-    if (candidates.value.length > 0) {
+    adaptations.value = adapts
+    if (adapts.length > 0) {
       uiState.value = 'done-pick'
     } else {
       uiState.value = 'upload'
@@ -72,9 +60,9 @@ function applyJob(j: Job | null) {
     ElMessage.error('改编任务失败：' + errorMsg.value)
   } else if (j.status === 'running' || j.status === 'pending') {
     uiState.value = 'progress'
-    // 实时把已完成的 sub_results 也展示出来
+    // 实时把已完成的 sub_results 也展示出来（ensemble 模式可直接显示）
     const subs = (j.sub_results || []).filter((r: any) => r && !r.error)
-    if (subs.length) candidates.value = buildCandidates(subs)
+    if (subs.length) adaptations.value = subs
   }
 }
 
@@ -172,7 +160,8 @@ async function startPdf5() {
   try {
     const r = await adaptApi.startPdf5(pid, realVolNo.value, file.value, userHint.value, nVal.value)
     job.value = r.job
-    candidates.value = []
+    adaptations.value = []
+    pickedAdaptId.value = null
     uiState.value = 'progress'
     startSse()
   } catch (e: any) {
@@ -182,10 +171,10 @@ async function startPdf5() {
   }
 }
 
-async function onPickAdapt(candidateId: string | null) {
-  if (!candidateId) return
-  const idx = candidates.value.findIndex(c => c.id === candidateId)
-  if (idx < 0 || !job.value) return
+async function onPickAdapt(id: string | null, idx?: number) {
+  if (id == null || idx == null) return
+  pickedAdaptId.value = id
+  if (!job.value) return
   const pid = currentProjectId.value
   if (!pid) return
   try {
@@ -284,34 +273,53 @@ onUnmounted(() => {
       />
       <p class="adapt-progress-msg">{{ job?.message || '排队中...' }}</p>
 
-      <div v-if="candidates.length" class="adapt-subs">
-        <div class="adapt-subs-title">已完成版本：</div>
-        <div class="adapt-subs-grid">
-          <div v-for="c in candidates" :key="c.id" class="adapt-sub-card">
-            <div class="adapt-sub-flavor">{{ c.twist || c.axis_label }}</div>
-            <div class="adapt-sub-text">{{ (c.content || '').slice(0, 120) }}{{ (c.content || '').length > 120 ? '…' : '' }}</div>
-          </div>
-        </div>
+      <!-- 改编进行中：用 ensemble 模式实时展示已完成版本 -->
+      <div v-if="adaptations.length" class="adapt-subs-loading">
+        <p class="adapt-subs-title">已完成版本（实时）：</p>
+        <SushiCards
+          mode="ensemble"
+          :items="adaptations"
+          axis-label="已出炉版本（任务仍在进行，完成后可选定）"
+          item-title-field="flavor"
+          item-subtitle-field="one_liner"
+          item-content-field="adapted_premise"
+          item-badge-field="flavor"
+          :allow-regenerate="false"
+          :is-active="false"
+        >
+          <template #item="{ item }">
+            <div v-if="item.changed_elements?.length" class="meta-line">
+              <span v-for="(c, i) in item.changed_elements.slice(0, 3)" :key="i" class="meta-chip">{{ c }}</span>
+            </div>
+            <div v-if="item.player_cards?.length" class="meta-hint">角色卡 {{ item.player_cards.length }} 位</div>
+          </template>
+        </SushiCards>
       </div>
     </div>
 
-    <!-- done-pick：5 版 SushiCards -->
+    <!-- done-pick：N 版 ensemble SushiCards -->
     <div v-else-if="uiState === 'done-pick'" class="adapt-pick">
-      <p class="adapt-pick-hint">改编完成！请从下面 5 版中挑选一版作为本卷副本核：</p>
+      <p class="adapt-pick-hint">改编完成！请从下面 {{ adaptations.length }} 版中挑选一版作为本卷副本核：</p>
       <SushiCards
-        card-key="adapt_module"
-        card-label="改编版本"
-        :candidates="candidates"
-        :editing="null"
-        :messages="[]"
-        axis-label="5 版差异化改编"
-        phase="adapt"
-        :plate-count="5"
+        mode="ensemble"
+        :items="adaptations"
+        :picked-id="pickedAdaptId"
+        :axis-label="`${nVal} 版差异化改编`"
+        item-title-field="flavor"
+        item-subtitle-field="one_liner"
+        item-content-field="adapted_premise"
+        item-badge-field="flavor"
+        :allow-regenerate="false"
         :is-active="true"
-        :locked-text="null"
-        @generate="() => {}"
         @pick="onPickAdapt"
-      />
+      >
+        <template #item="{ item }">
+          <div v-if="item.changed_elements?.length" class="meta-line">
+            <span v-for="(c, i) in item.changed_elements.slice(0, 3)" :key="i" class="meta-chip">{{ c }}</span>
+          </div>
+          <div v-if="item.player_cards?.length" class="meta-hint">角色卡 {{ item.player_cards.length }} 位</div>
+        </template>
+      </SushiCards>
     </div>
 
     <!-- selected -->
@@ -400,37 +408,13 @@ onUnmounted(() => {
   color: #606266;
   text-align: center;
 }
-.adapt-subs {
+.adapt-subs-loading {
   margin-top: 20px;
 }
 .adapt-subs-title {
   font-size: 13px;
   color: #909399;
   margin-bottom: 8px;
-}
-.adapt-subs-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 10px;
-}
-.adapt-sub-card {
-  background: #f9fafc;
-  border: 1px solid #ebeef5;
-  border-radius: 6px;
-  padding: 10px;
-}
-.adapt-sub-flavor {
-  font-size: 12px;
-  color: #e6a23c;
-  font-weight: 600;
-  margin-bottom: 6px;
-}
-.adapt-sub-text {
-  font-size: 12px;
-  color: #606266;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-all;
 }
 .adapt-pick {
   margin-top: 8px;
@@ -459,11 +443,23 @@ onUnmounted(() => {
   color: #303133;
 }
 
-/* 隐藏 SushiCards 的"换一拨/我自己空白写"按钮，adapt 阶段不支持重新生成 */
-:deep(.sushi-plate-actions) {
-  display: none !important;
+/* ensemble item 插槽里的 meta chip */
+.meta-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 4px;
 }
-:deep(.sushi-empty) {
-  display: none !important;
+.meta-chip {
+  display: inline-block;
+  font-size: 11px;
+  color: #909399;
+  background: #f4f4f5;
+  border-radius: 3px;
+  padding: 1px 6px;
+}
+.meta-hint {
+  font-size: 11px;
+  color: #909399;
 }
 </style>
