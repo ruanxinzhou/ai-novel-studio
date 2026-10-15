@@ -10,6 +10,7 @@ import BookSetupView from './BookSetupView.vue'
 import ModuleAdaptView from './ModuleAdaptView.vue'
 import CocSimView from './CocSimView.vue'
 import EmbodyView from './EmbodyView.vue'
+import DungeonScaffoldView from './DungeonScaffoldView.vue'
 import {
   currentProjectId,
   currentPhase,
@@ -153,6 +154,13 @@ defineExpose({ refresh: loadPhase })
           <!-- embody 阶段：唐迟魂穿 4 步 -->
           <EmbodyView
             v-else-if="phase === 'embody'"
+            :vol-no="currentVolumeNo"
+            @done="loadPhase"
+          />
+
+          <!-- scaffold 阶段：副本详设 6 卡 -->
+          <DungeonScaffoldView
+            v-else-if="phase === 'scaffold'"
             :vol-no="currentVolumeNo"
             @done="loadPhase"
           />

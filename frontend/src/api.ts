@@ -884,7 +884,7 @@ export const sessionsApi = {
 }
 
 // ---- 后台长任务（jobs：PDF 5 版 / COC 批量模拟 / 大纲 5 版）----
-export type JobKind = 'pdf5' | 'coc_batch' | 'outline5'
+export type JobKind = 'pdf5' | 'coc_batch' | 'outline5' | 'embody_outline5' | 'sushi' | 'scaffold_prefill'
 export type JobStatus = 'pending' | 'running' | 'done' | 'error' | 'cancelled'
 
 export interface Pdf5Variant {
@@ -1657,6 +1657,91 @@ export const embodyApi = {
     req<{ ok: boolean; volume: any; picked: EmbodyOutline }>(
       `/api/projects/${pid}/workbench/volumes/${volNo}/embody/pick-outline`,
       { method: 'POST', body: JSON.stringify(body) },
+    ),
+}
+
+// ---- 副本详设 6 卡（Scaffold）----
+
+export interface DeathNode {
+  day: number
+  who: string
+  how: string
+  tease?: string
+  cost?: string
+}
+export interface ClimaxNode {
+  day: number
+  title: string
+  beat: string
+  weight: number
+}
+export interface ClueNode {
+  day: number
+  where: string
+  what: string
+  leads_to?: string
+  is_red_herring?: boolean
+}
+export interface ScaffoldPayload {
+  death_nodes?: DeathNode[][]
+  climax_nodes?: ClimaxNode[][]
+  clue_nodes?: ClueNode[][]
+  core_twist?: string[]
+  tangchi_start?: string[]
+  cost_cap?: string[]
+  is_mock?: boolean
+}
+
+export const scaffoldApi = {
+  getVolume: adaptApi.getVolume,
+  patchVolume: adaptApi.patchVolume,
+
+  prefill: (pid: string, volNo: number, opts?: { force?: boolean }) =>
+    req<{ ok: boolean; job_id: string; job: Job }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/scaffold/prefill`,
+      { method: 'POST', body: JSON.stringify({ force: !!opts?.force }) },
+    ),
+
+  listJobs: (pid: string, volNo: number) =>
+    req<{ jobs: Job[] }>(`/api/projects/${pid}/workbench/volumes/${volNo}/scaffold/jobs`),
+
+  /** SSE 订阅 prefill 任务：job_update / job_update_batch / job_idle */
+  subscribeJobs: (
+    pid: string,
+    volNo: number,
+    onEvent: (ev: {
+      type: 'job_update' | 'job_update_batch' | 'job_idle'
+      job?: Job
+      jobs?: Job[]
+    }) => void,
+  ) => {
+    const url = `/api/projects/${pid}/workbench/volumes/${volNo}/scaffold/stream`
+    const es = new EventSource(url)
+    const handle = (type: 'job_update' | 'job_update_batch' | 'job_idle') => (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data)
+        if (type === 'job_update') onEvent({ type, job: data as Job })
+        else if (type === 'job_update_batch') onEvent({ type, jobs: Array.isArray(data) ? data : [] })
+        else onEvent({ type })
+      } catch { /* ignore */ }
+    }
+    es.addEventListener('job_update', handle('job_update'))
+    es.addEventListener('job_update_batch', handle('job_update_batch'))
+    es.addEventListener('job_idle', handle('job_idle'))
+    es.onerror = () => { /* 静默 */ }
+    return { close: () => { es.close() } }
+  },
+
+  lockCard: (pid: string, volNo: number, card_key: string, pick_index: number) =>
+    req<{ ok: boolean; card_key: string; picked_idx: number; locked_at: string; all_locked?: boolean; volume?: any }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/scaffold/lock-card`,
+      { method: 'POST', body: JSON.stringify({ card_key, pick_index }) },
+    ),
+
+  finalize: (pid: string, volNo: number) =>
+    req<{ ok: boolean; stage_completed: Record<string, boolean> }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/scaffold/finalize`,
+      { method: 'POST', body: JSON.stringify({}) },
     ),
 }
 

@@ -340,12 +340,30 @@ class VolumeStore:
             "adapted_module", "simulated_run",
             "host_character", "entry_point", "info_gap",
             "stance", "tangchi_story_outline",
+            # Task 8：副本详设 6 卡
+            "death_nodes", "climax_nodes", "clue_nodes",
+            "pasted_nodes", "scaffold_cards",
+            "stage_completed",
         }
+        # 这些字段允许显式传 None 来清空重跑
+        _allow_none = {"simulated_run"}
+        # 这些字段的 falsey 值（[]/{}/False/"") 是有效值，必须落盘
+        _allow_falsey = {"death_nodes", "climax_nodes", "clue_nodes",
+                         "pasted_nodes", "scaffold_cards", "stage_completed",
+                         "satisfaction_beats", "foreshadows_to_plant",
+                         "bonds_to_deepen", "gods_to_hint"}
         for k, val in kwargs.items():
-            if k in planning_fields:
-                # simulated_run 允许显式传 None 来清空重跑
-                if val is not None or k == "simulated_run":
-                    setattr(v, k, val)
+            if k not in planning_fields:
+                continue
+            if val is None:
+                if k in _allow_none:
+                    setattr(v, k, None)
+                continue
+            # falsey 但属于 _allow_falsey（如 []/{}）照常写入
+            if not val and k not in _allow_falsey:
+                # 空字符串/0 对于普通字段跳过（避免覆盖默认）
+                continue
+            setattr(v, k, val)
         self.save(v)
         return v
 

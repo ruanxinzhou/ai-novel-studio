@@ -4098,7 +4098,14 @@ class VolumeUpdateIn(BaseModel):
     entry_point: dict | None = None
     info_gap: str | None = None
     stance: dict | None = None
-    tangchi_story_outline: dict | None = None
+    tangchi_story_outline: dict | str | None = None
+    # Task 8：副本详设 6 卡
+    death_nodes: list | None = None
+    climax_nodes: list | None = None
+    clue_nodes: list | None = None
+    pasted_nodes: list | None = None
+    scaffold_cards: dict | None = None
+    stage_completed: dict | None = None
 
 
 class SettlePreviewIn(BaseModel):
@@ -4156,10 +4163,19 @@ def volumes_update(pid: str, vol_no: int, body: VolumeUpdateIn) -> dict:
     """更新卷规划板字段。"""
     _require_project(pid)
     vs = _volumes_for(pid)
-    # model_dump 默认 exclude_none，但 simulated_run 显式传 None 需要保留以清空
+    # model_dump 默认 exclude_none，但 simulated_run 显式传 None 需要保留以清空；
+    # 同时保留显式传 []/{}（清空 6 卡时需要）—— 用 model_fields_set 把所有被显式传入的字段（包括 falsey）都带进去
     kwargs = body.model_dump(exclude_none=True) if hasattr(body, "model_dump") else body.dict(exclude_none=True)
-    if body.simulated_run is None and "simulated_run" in body.model_fields_set:
-        kwargs["simulated_run"] = None
+    explicit = body.model_fields_set if hasattr(body, "model_fields_set") else set()
+    for k in explicit:
+        v = getattr(body, k, None)
+        if v is None and k == "simulated_run":
+            kwargs[k] = None
+        elif v is not None:
+            kwargs[k] = v
+        elif k in {"death_nodes", "climax_nodes", "clue_nodes",
+                   "pasted_nodes", "scaffold_cards"}:
+            kwargs[k] = v  # 允许传 []/{} 等空值，清卡
     try:
         v = vs.update_planning(vol_no, **kwargs)
     except ValueError as e:
@@ -4333,6 +4349,17 @@ register_simulate_routes(
 # ============================================================
 from .embody_routes import register_embody_routes
 register_embody_routes(
+    app,
+    require_project=_require_project,
+    volumes_for=_volumes_for,
+    chore_provider=_chore_provider,
+)
+
+# ============================================================
+# 副本详设（scaffold）6 卡 AI 预填 + 选版锁定
+# ============================================================
+from .scaffold_routes import register_scaffold_routes
+register_scaffold_routes(
     app,
     require_project=_require_project,
     volumes_for=_volumes_for,

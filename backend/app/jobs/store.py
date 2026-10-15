@@ -40,7 +40,7 @@ from typing import Any, Callable
 # 常量
 # ---------------------------------------------------------------------------
 
-JOB_KINDS = ("coc_batch", "pdf_adapt5", "outline5", "embody_outline5", "sushi")
+JOB_KINDS = ("coc_batch", "pdf_adapt5", "outline5", "embody_outline5", "sushi", "scaffold_prefill")
 JOB_STATUSES = ("pending", "running", "done", "error", "cancelled")
 
 
