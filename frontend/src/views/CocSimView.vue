@@ -40,9 +40,9 @@ const SECTIONS = [
   { key: 'npc_fates', label: 'NPC 命运' },
 ]
 const FROM_OPTIONS = [
-  { value: 0, label: '好运线' },
-  { value: 1, label: '厄运线' },
-  { value: 2, label: '反转线' },
+  { value: 0, label: '全员殒落线' },
+  { value: 1, label: '一人独活线' },
+  { value: 2, label: '真相污染线' },
 ]
 const collageSelections = ref<Record<string, number>>({})
 const collageNotes = ref<Record<string, string>>({})
@@ -231,7 +231,7 @@ watch(() => props.volNo, () => {
     <div class="sim-header">
       <h2>🎲 COC 并行跑团仿真</h2>
       <p class="sub">
-        3 场并行（同组 PL 好运/厄运线 + 异组 PL 反转线），挑一场作为主线或拼贴多场精华
+        3 场并行（全员殒落 / 一人独活 / 真相污染），挑一场作为主线或拼贴多场精华
       </p>
       <div v-if="completed" class="completed-banner">
         <span>✓ 已选定跑团走向：{{ completed.summary || completed.label || '（已完成）' }}</span>
@@ -287,7 +287,7 @@ watch(() => props.volNo, () => {
         <p class="msg">{{ job?.message || '等待开场…' }}</p>
         <div class="variant-cards-loading">
           <div class="var-loading-row">
-            <div v-for="(label, i) in ['好运线', '厄运线', '反转线']" :key="i" class="var-loading-card">
+            <div v-for="(label, i) in ['全员殒落线', '一人独活线', '真相污染线']" :key="i" class="var-loading-card">
               <div class="var-label">{{ label }}</div>
               <div class="var-one-liner">
                 <template v-if="(job?.sub_results || []).length > i">

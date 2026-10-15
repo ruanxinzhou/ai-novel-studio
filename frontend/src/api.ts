@@ -1520,3 +1520,143 @@ export const simulateApi = {
       { method: 'POST', body: JSON.stringify(body) },
     ),
 }
+
+// ---- 工作台 embody 阶段（唐迟魂穿 4 步）----
+
+export interface EmbodyCandidate {
+  id: string
+  name: string
+  role?: string
+  age?: number
+  body_state?: string
+  struggle_hook?: string
+  san_loss?: string
+  death_countdown?: string
+  tag?: string
+  [k: string]: unknown
+}
+
+export interface EmbodyEntryPoint {
+  id: string
+  name: string
+  description?: string
+  info_gap?: string
+  time_anchor?: string
+  [k: string]: unknown
+}
+
+export interface EmbodyStance {
+  id: string
+  name: string
+  description?: string
+  cost?: string
+  tendency?: string
+  [k: string]: unknown
+}
+
+export interface EmbodyOutline {
+  index: number
+  title: string
+  one_liner?: string
+  pacing?: string
+  tangchi_entry?: string
+  flavor?: string
+  climax?: string
+  blue_star_hook?: string
+  foreshadow_planted?: string[]
+  day_breakdown?: Array<{ day: number; summary: string }>
+  outline_text?: string
+  [k: string]: unknown
+}
+
+export const embodyApi = {
+  /** 复用 adaptApi.getVolume / patchVolume */
+  getVolume: adaptApi.getVolume,
+  patchVolume: adaptApi.patchVolume,
+
+  /** Step 1：列魂穿候选 */
+  candidates: (pid: string, volNo: number) =>
+    req<{ candidates: EmbodyCandidate[] }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/embody/candidates`,
+    ),
+
+  /** Step 2：根据候选生成 3 个切入点 */
+  entryPoints: (pid: string, volNo: number, body: { candidate_id?: string; candidate?: EmbodyCandidate | null }) =>
+    req<{ entry_points: EmbodyEntryPoint[] }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/embody/entry-points`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  /** Step 3：根据候选+切入点生成 3 个立场 */
+  stances: (pid: string, volNo: number, body: { candidate?: EmbodyCandidate | null; entry_point?: EmbodyEntryPoint | null }) =>
+    req<{ stances: EmbodyStance[] }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/embody/stances`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  /** Step 4：启动 5 版大纲并行生成 */
+  generateOutline: (
+    pid: string,
+    volNo: number,
+    body: {
+      candidate?: EmbodyCandidate | null
+      entry_point?: EmbodyEntryPoint | null
+      stance?: EmbodyStance | null
+      user_directive?: string
+      n?: number
+    },
+  ) =>
+    req<{ ok: boolean; job_id: string; job: Job }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/embody/generate-outline`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  /** 列出该卷 embody jobs */
+  listJobs: (pid: string, volNo: number) =>
+    req<{ jobs: Job[] }>(`/api/projects/${pid}/workbench/volumes/${volNo}/embody/jobs`),
+
+  /** 订阅 embody SSE 流 */
+  subscribeJobs: (
+    pid: string,
+    volNo: number,
+    onEvent: (ev: {
+      type: 'job_update' | 'job_update_batch' | 'job_idle'
+      job?: Job
+      jobs?: Job[]
+    }) => void,
+  ) => {
+    const url = `/api/projects/${pid}/workbench/volumes/${volNo}/embody/stream`
+    const es = new EventSource(url)
+    const handle = (type: 'job_update' | 'job_update_batch' | 'job_idle') => (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data)
+        if (type === 'job_update') onEvent({ type, job: data as Job })
+        else if (type === 'job_update_batch') onEvent({ type, jobs: Array.isArray(data) ? data : [] })
+        else onEvent({ type })
+      } catch { /* ignore */ }
+    }
+    es.addEventListener('job_update', handle('job_update'))
+    es.addEventListener('job_update_batch', handle('job_update_batch'))
+    es.addEventListener('job_idle', handle('job_idle'))
+    es.onerror = () => { /* 静默 */ }
+    return { close: () => { es.close() } }
+  },
+
+  /** 选版落盘，写入 host_character / entry_point / stance / tangchi_story_outline 并标记阶段完成 */
+  pickOutline: (
+    pid: string,
+    volNo: number,
+    body: {
+      job_id: string
+      pick_index: number
+      candidate?: EmbodyCandidate | null
+      entry_point?: EmbodyEntryPoint | null
+      stance?: EmbodyStance | null
+    },
+  ) =>
+    req<{ ok: boolean; volume: any; picked: EmbodyOutline }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/embody/pick-outline`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+}
+

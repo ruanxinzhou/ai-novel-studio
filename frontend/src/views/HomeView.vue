@@ -9,6 +9,7 @@ import AIChatFloat from '../components/AIChatFloat.vue'
 import BookSetupView from './BookSetupView.vue'
 import ModuleAdaptView from './ModuleAdaptView.vue'
 import CocSimView from './CocSimView.vue'
+import EmbodyView from './EmbodyView.vue'
 import {
   currentProjectId,
   currentPhase,
@@ -145,6 +146,13 @@ defineExpose({ refresh: loadPhase })
           <!-- simulate 阶段：3场并行 COC 跑团 + 单选/拼贴 -->
           <CocSimView
             v-else-if="phase === 'simulate'"
+            :vol-no="currentVolumeNo"
+            @done="loadPhase"
+          />
+
+          <!-- embody 阶段：唐迟魂穿 4 步 -->
+          <EmbodyView
+            v-else-if="phase === 'embody'"
             :vol-no="currentVolumeNo"
             @done="loadPhase"
           />

@@ -228,7 +228,7 @@ def _start_sim(pid: str, vol_no: int, body: _StartIn) -> dict:
         "flavors": [vc.get("flavor") for vc in variant_configs],
         "volume_no": vol_no,
     })
-    labels = ["同组PL·好运线", "同组PL·厄运线", "异组PL·反转线"]
+    labels = ["全员殒落线", "一人独活线", "真相污染线"]
 
     progress_lock = threading.Lock()
     session_state = {i: {"day": 1, "turn": 0, "done": False} for i in range(3)}
@@ -277,14 +277,19 @@ def _start_sim(pid: str, vol_no: int, body: _StartIn) -> dict:
             update(progress=5, message="测试模式：max_turns=1，跳过 LLM 直接生成 mock 结果…")
             time.sleep(2)
             variants = []
+            _mock_oneliners = [
+                "无人生还——SAN 集体崩盘，全员在第七日同归于尽的绝望团。",
+                "只剩唐迟一人活下来——同伴逐一被替换/疯掉，他要独自面对真相。",
+                "揭开真相的人被真相吞噬——知道得越多，SAN 掉得越快，所有人都变成了它的一部分。",
+            ]
             for i, lab in enumerate(labels):
                 v = {
                     "label": lab,
                     "index": i,
-                    "one_liner": f"测试{i+1}线 one-liner",
+                    "one_liner": _mock_oneliners[i],
                     "flavor": "mock",
                     "full_log": (
-                        f"这是{i+1}线的完整跑团日志 mock...\n"
+                        f"这是【{lab}】的完整跑团日志 mock...\n"
                         f"Day1 开场...（{lab}）\n"
                         f"Day3 异常浮现...\n"
                         f"Day5 遭遇第一个死亡...\n"

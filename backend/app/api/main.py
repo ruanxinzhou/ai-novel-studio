@@ -4094,6 +4094,11 @@ class VolumeUpdateIn(BaseModel):
     endgame_layer_hints: dict | None = None
     adapted_module: str | None = None
     simulated_run: dict | None = None
+    host_character: dict | None = None
+    entry_point: dict | None = None
+    info_gap: str | None = None
+    stance: dict | None = None
+    tangchi_story_outline: dict | None = None
 
 
 class SettlePreviewIn(BaseModel):
@@ -4320,6 +4325,17 @@ register_simulate_routes(
     fields_for=_fields_for,
     coc_run_for=_coc_run_for,
     field_run_for=_field_run_for,
+    chore_provider=_chore_provider,
+)
+
+# ============================================================
+# 唐迟魂穿（embody）路由
+# ============================================================
+from .embody_routes import register_embody_routes
+register_embody_routes(
+    app,
+    require_project=_require_project,
+    volumes_for=_volumes_for,
     chore_provider=_chore_provider,
 )
 

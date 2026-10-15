@@ -372,7 +372,7 @@ def _start_coc(pid: str, sid: str, body: _CocIn) -> dict:
         "total_sessions": 3,
         "flavors": [vc.get("flavor") for vc in variant_configs],
     })
-    labels = ["同组PL·好运线", "同组PL·厄运线", "异组PL·反转线"]
+    labels = ["全员殒落线", "一人独活线", "真相污染线"]
 
     progress_lock = threading.Lock()
     session_state = {i: {"day": 1, "turn": 0, "done": False} for i in range(3)}

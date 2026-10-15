@@ -86,9 +86,9 @@ class Volume:
     pasted_nodes: list = field(default_factory=list)
     host_character: dict | None = None
     entry_point: dict | None = None
-    info_gap: dict | None = None
-    stance: str | None = None
-    tangchi_story_outline: str | None = None
+    info_gap: str | None = None
+    stance: dict | None = None
+    tangchi_story_outline: dict | None = None
     deviation_points: list = field(default_factory=list)
     rhythm_blueprint: dict | None = None
     scaffold_cards: dict = field(default_factory=dict)
@@ -338,6 +338,8 @@ class VolumeStore:
             "bonds_to_deepen", "gods_to_hint", "contamination_goal",
             "satisfaction_beats", "endgame_layer_hints",
             "adapted_module", "simulated_run",
+            "host_character", "entry_point", "info_gap",
+            "stance", "tangchi_story_outline",
         }
         for k, val in kwargs.items():
             if k in planning_fields:
