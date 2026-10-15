@@ -22,6 +22,7 @@ from app.wizard.store import (
     STRAND_LABELS,
     ChapterWork,
     DeskStore,
+    Scene,
     WizardData,
     WizardStore,
 )
@@ -29,7 +30,7 @@ from app.wizard.store import (
 __all__ = [
     "PAYOFF_LABELS", "PAYOFF_SCALES",
     "STAGES", "STATIONS", "STATION_LABELS", "STRANDS", "STRAND_LABELS",
-    "ChapterWork", "DeskStore", "WizardData", "WizardStore",
+    "ChapterWork", "DeskStore", "Scene", "WizardData", "WizardStore",
     "DirectionCards", "generate_direction_cards",
     "chapter_outlines", "chapter_title_of", "finalize_chapter", "outline_map",
     "parse_outline", "previous_tail", "run_chapter_stage", "work_text",

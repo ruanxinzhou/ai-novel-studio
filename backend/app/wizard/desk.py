@@ -27,6 +27,12 @@ from app.wizard.store import STAGES, DeskStore, WizardStore
 _CHAPTER_HEAD = re.compile(r"^#{0,4}\s*第\s*(\d+)\s*章", re.MULTILINE)
 _VOLUME_HEAD = re.compile(r"^#{0,4}\s*第\s*[0-9一二三四五六七八九十百千]+\s*卷[^\n]*$", re.MULTILINE)
 _SEPARATOR_LINE = re.compile(r"^[-=]{3,}\s*$")
+# 书化新格式（《第七日的亡者》四层结构）
+_FIELD_HEAD = re.compile(r"^#{0,4}\s*第\s*(\d+)\s*场[::\s]*([^\n]*)$", re.MULTILINE)
+_DAY_HEAD = re.compile(r"^#{0,4}\s*第\s*([一二三四五六七1-7])\s*天[^\n]*$", re.MULTILINE)
+_INTERLUDE_HEAD = re.compile(r"^#{0,4}\s*(?:现实|间章|休息|蓝星)(?::：|间章|休息|$)[^\n]*$", re.MULTILINE)
+
+_CN_DAY_MAP = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7}
 
 
 def _volume_title_of(line: str) -> str:
@@ -49,41 +55,153 @@ def parse_outline(outline_text: str) -> tuple[dict[int, str], list[dict]]:
       归入无名首组（前端对无名组不渲染卷头）。卷头到下一章之间的零散文字记为
       该卷 note，不丢也不污染章大纲。
     """
+    chapters, volumes, _ = parse_outline_ext(outline_text)
+    return chapters, volumes
+
+
+def _parse_day_num(s: str) -> int | None:
+    s = s.strip()
+    if s.isdigit():
+        n = int(s)
+        return n if 1 <= n <= 7 else None
+    return _CN_DAY_MAP.get(s)
+
+
+def parse_outline_ext(outline_text: str) -> tuple[dict[int, str], list[dict], dict]:
+    """增强版大纲解析：除了 chapters/volumes，还返回 chapter_meta（章→场/日/间章绑定）。
+
+    返回 (chapters, volumes, chapter_meta)：
+    - chapters/volumes 同 parse_outline
+    - chapter_meta: {章号: {field_no, day, is_interlude}}，识别新格式才填充，老格式全为 None/False
+
+    支持四种头部（从粗到细粒度）：
+      - 卷：「第X卷」（同旧）
+      - 场：「第N场：标题」——下面到下一场/卷之前的章属于该场
+      - 日：「第X天」「第三天」——下面到下一日/间章/场之前的章属于该日
+      - 间章：「现实」「间章」「休息」「蓝星」——下面到下一日/场之前的章为现实间章
+
+    旧格式（只有卷+章）完全兼容：chapter_meta 里 field_no/day 全为 None，is_interlude=False。
+    """
     text = outline_text or ""
     matches = list(_CHAPTER_HEAD.finditer(text))
     chapters: dict[int, str] = {}
     volumes: list[dict] = []
+    chapter_meta: dict[int, dict] = {}
     current: dict | None = None
+    cur_field: int | None = None
+    cur_day: int | None = None
+    cur_interlude: bool = False
 
     def open_volume(title: str) -> dict:
         v = {"title": title, "note": "", "chapters": []}
         volumes.append(v)
         return v
 
-    pre = text[: matches[0].start()] if matches else text
-    m = _VOLUME_HEAD.search(pre)
-    if m:
-        current = open_volume(_volume_title_of(m.group(0)))
-        current["note"] = _strip_separators(pre[m.end():])
+    def scan_context(seg: str) -> None:
+        """在一段文本里扫描场/日/间章头，更新 cur_* 状态。卷头不影响场/日状态。"""
+        nonlocal cur_field, cur_day, cur_interlude
+        # 按在文本中的出现顺序依次处理
+        events = []
+        for fm in _FIELD_HEAD.finditer(seg):
+            events.append((fm.start(), "field", fm))
+        for dm in _DAY_HEAD.finditer(seg):
+            events.append((dm.start(), "day", dm))
+        for im in _INTERLUDE_HEAD.finditer(seg):
+            events.append((im.start(), "interlude", im))
+        for vm in _VOLUME_HEAD.finditer(seg):
+            events.append((vm.start(), "volume", vm))
+        events.sort(key=lambda x: x[0])
+        for _, kind, m in events:
+            if kind == "field":
+                try:
+                    cur_field = int(m.group(1))
+                except (TypeError, ValueError):
+                    pass
+                cur_day = None
+                cur_interlude = False
+            elif kind == "day":
+                cur_day = _parse_day_num(m.group(1))
+                cur_interlude = False
+            elif kind == "interlude":
+                cur_interlude = True
+                cur_day = None
+            # volume 头不改变场/日状态，卷的处理在老逻辑（open_volume）里
 
+    def strip_struct_heads(body: str) -> str:
+        for pat in (_FIELD_HEAD, _DAY_HEAD, _INTERLUDE_HEAD, _VOLUME_HEAD):
+            body = pat.sub("", body)
+        return body
+
+    def open_volume_for(vol_match, base_text: str, base_offset: int) -> None:
+        """在 base_text 中找到 vol_match 后开新卷，并抽取卷 note（卷头后到下一个结构头之间）。
+        base_offset 是 base_text 在全文中的起始位置，用于切 after_vol 时不做对象身份比较。"""
+        nonlocal current
+        title = _volume_title_of(vol_match.group(0))
+        current = open_volume(title)
+        after_vol = base_text[vol_match.end():]
+        note_cuts = []
+        for pat in (_CHAPTER_HEAD, _FIELD_HEAD, _DAY_HEAD, _INTERLUDE_HEAD, _VOLUME_HEAD):
+            for sm in pat.finditer(after_vol):
+                note_cuts.append(sm.start())
+        note_text = after_vol[:min(note_cuts)] if note_cuts else after_vol
+        note_text = strip_struct_heads(note_text)
+        current["note"] = _strip_separators(note_text)
+
+    # 处理首章之前的预文本：扫卷头 + 场/日/间章头
+    pre_end = matches[0].start() if matches else len(text)
+    pre = text[:pre_end]
+    scan_context(pre)
+    pre_vol = _VOLUME_HEAD.search(pre)
+    if pre_vol:
+        open_volume_for(pre_vol, pre, 0)
+
+    # last_context_pos: 上次扫描结构头的位置（已扫到 pre_end，首章不再重复扫 pre）
+    last_context_pos = pre_end
     for i, cm in enumerate(matches):
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        chunk = text[cm.end():end]
-        vol = _VOLUME_HEAD.search(chunk)
-        next_title, next_note = "", ""
-        if vol:
-            next_title = _volume_title_of(vol.group(0))
-            next_note = _strip_separators(chunk[vol.end():])
-            chunk = chunk[: vol.start()]
+        ch_start = cm.start()
+        ch_end = cm.end()
+
+        # 1) 扫"上次扫描位置"到"本章头开始"之间所有结构头
+        new_vol = None
+        if ch_start > last_context_pos:
+            seg_to_scan = text[last_context_pos:ch_start]
+            new_vol = _VOLUME_HEAD.search(seg_to_scan)
+            scan_context(seg_to_scan)
+
+        # 2) 本章正文：章头后到下一个结构头或下一章头/段尾
+        after_head = text[ch_end:end]
+        cut_positions = [end - ch_end]
+        for pat in (_VOLUME_HEAD, _FIELD_HEAD, _DAY_HEAD, _INTERLUDE_HEAD, _CHAPTER_HEAD):
+            for sm in pat.finditer(after_head):
+                cut_positions.append(sm.start())
+        body_cut = min(cut_positions)
+        body_chunk = after_head[:body_cut]
+
+        # 2.5) 如果章前出现了新卷头，开新卷（章入新卷）
+        if new_vol is not None:
+            open_volume_for(new_vol, seg_to_scan, last_context_pos)
+
         no = int(cm.group(1))
         if current is None:
-            current = open_volume("")            # 卷头出现在更后面：先开无名首组
+            current = open_volume("")
         current["chapters"].append(no)
-        chapters[no] = _strip_separators(chunk)
-        if vol:
-            current = open_volume(next_title)    # 章归组后再开新卷，保证卷序正确
-            current["note"] = next_note
-    return chapters, volumes
+        chapters[no] = _strip_separators(strip_struct_heads(body_chunk))
+        chapter_meta[no] = {
+            "field_no": cur_field,
+            "day": cur_day if not cur_interlude else None,
+            "is_interlude": cur_interlude,
+        }
+
+        # 3) 扫本章正文之后、下一章之前的尾部（可能有新卷/场/日头，给下一章用）
+        after_body = after_head[body_cut:]
+        tail_vol = _VOLUME_HEAD.search(after_body)
+        scan_context(after_body)
+        if tail_vol is not None:
+            open_volume_for(tail_vol, after_body, ch_end + body_cut)
+
+        last_context_pos = end
+    return chapters, volumes, chapter_meta
 
 
 def chapter_outlines(outline_text: str) -> dict[int, str]:
@@ -144,12 +262,16 @@ def run_chapter_stage(
     on_event=None,
     modules: list[str] | None = None,
     full_modules: bool = False,
+    book_store=None,
+    field_store=None,
 ) -> dict:
     """单章单层生成：plot/draft/polish；同输入幂等回收据，force 绕过。
     extra_materials：作者勾选的跨项目参考层（REFERENCE 族，互为范文）。
     entity_store：给定时为 plot/draft 注入开章任务书（五段结构）。
     modules/full_modules：写作模块注入——未指定时按层默认集注入摘要版
-    （digest，省上下文）；显式点名或 full_modules=True 时注入完整规则。"""
+    （digest，省上下文）；显式点名或 full_modules=True 时注入完整规则。
+    book_store/field_store：书化项目时传入（BookStore/FieldStore），注入书铁律、
+    讣告卡、当日节拍到任务书；传 None 时走通用五段任务书（旧项目兼容）。"""
     if stage not in STAGES:
         raise ValueError(f"未知阶段：{stage}")
     spec = SPECS[stage]
@@ -160,6 +282,30 @@ def run_chapter_stage(
     # 写作模块：默认集摘要随行（显式点名 → 完整规则）
     materials.extend(skill_materials(stage, requested=modules,
                                      digest=(modules is None and not full_modules)))
+    # 书化项目：根据章节类型自动追加书专属模块（摘要版，不挤爆上下文）
+    if book_store is not None:
+        auto_modules: list[str] = ["obsession_cost"]  # 所有章节都要代价意识
+        if getattr(work, "is_interlude", False):
+            auto_modules.append("interlude_relief")
+        elif getattr(work, "field_no", None) is not None:
+            auto_modules.append("coc_horror")
+            if stage == "plot":
+                auto_modules.append("infinite_loop_unit")
+        # 去重（用户若显式点名了同模块，摘要版会让位给完整版——这里通过
+        # 检查 requested 列表避免重复注入）
+        already = set(modules or [])
+        use_digest = modules is None and not full_modules
+        for am in auto_modules:
+            if am in already:
+                continue
+            from app.skills.modules import module_rules, module_digest
+            content = module_digest(am) if use_digest else module_rules(am)
+            materials.append(Material(
+                source_id=f"skill:{am}",
+                family=MaterialFamily.REQUIRED,
+                content=content,
+                title=f"写作模块[{am}]" + ("（摘要）" if use_digest else ""),
+            ))
     if stage == "plot":
         body = o_map.get(chapter, "")
         if not body:
@@ -189,10 +335,20 @@ def run_chapter_stage(
         materials.append(direction_mat)
     if extra_materials:
         materials.extend(extra_materials)
+    # 书化项目：REQUIRED 注入书级硬卡（铁律/七日基线/唐迟刻度/终局锚）
+    if book_store is not None:
+        try:
+            materials.append(Material(
+                source_id="book:hardcards", family=MaterialFamily.REQUIRED,
+                content=book_store.render_all(),
+                title="书级硬卡（铁律/七日基线/唐迟刻度/终局锚）"))
+        except Exception:
+            pass
     checklist_injected = False
     if entity_store is not None and stage in ("plot", "draft"):
         checklist = build_chapter_checklist(
-            entity_store, desk, chapter, max(o_map) if o_map else 0)
+            entity_store, desk, chapter, max(o_map) if o_map else 0,
+            book_store=book_store, field_store=field_store)
         if checklist is not None:
             materials.append(checklist)
             checklist_injected = True

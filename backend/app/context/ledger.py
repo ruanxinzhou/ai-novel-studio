@@ -140,13 +140,23 @@ def _entity_ledger(store: EntityStore) -> Material | None:
 
 
 def build_state_materials(project_store, entity_store: EntityStore,
-                          desk: DeskStore, pid: str) -> list[Material]:
-    """项目已写状态 → 三类材料（有什么带什么，没有的不硬造）。"""
+                          desk: DeskStore, pid: str,
+                          book_store=None, field_store=None) -> list[Material]:
+    """项目已写状态 → 三类材料（有什么带什么，没有的不硬造）。
+    book_store/field_store 传 None 时不注入书卡（旧项目/通用项目兼容）。"""
     mats: list[Material] = []
     for m in (_plot_digest(desk), _draft_recent(project_store, desk, pid),
               _entity_ledger(entity_store)):
         if m is not None:
             mats.append(m)
+    if book_store is not None:
+        try:
+            mats.append(Material(
+                source_id="book:hardcards", family=MaterialFamily.REQUIRED,
+                content=book_store.render_all(), title="书级硬卡（铁律/七日基线/唐迟刻度/终局锚）",
+            ))
+        except Exception:
+            pass
     return mats
 
 
@@ -329,13 +339,16 @@ def _written_nos(desk: DeskStore) -> list[int]:
 
 
 def build_chapter_checklist(entity_store: EntityStore, desk: DeskStore,
-                            chapter: int, outline_total: int) -> Material | None:
+                            chapter: int, outline_total: int,
+                            book_store=None, field_store=None) -> Material | None:
     """开章任务书：写第 N 章前的 REQUIRED 自检材料，五段结构。
 
     ①开篇委托（上一章结尾，开篇接住变化）②本章故事（进度与跳章提醒）
-    ③本章人物与设定（截至上一章的实体快照，含已退场/未出场标注）
-    ④怎么写更顺（节奏位置 + 三线近况 + 到期伏笔按账龄排急缓）
-    ⑤收在哪里（章末收束要求）。五段全空（开书第一章且无设定）返回 None。
+    ③本书本场（书铁律+七日Day节拍+讣告卡——book/field 有传才注入）
+    ④本章人物与设定（截至上一章的实体快照，含已退场/未出场标注）
+    ⑤怎么写更顺（节奏位置 + 三线近况 + 到期伏笔按账龄排急缓）
+    ⑥收在哪里（章末收束要求）。六段全空（开书第一章且无设定）返回 None。
+    book_store/field_store 传 None 时退化为五段通用任务书（旧项目兼容）。
     """
     sections: list[str] = []
 
@@ -361,7 +374,109 @@ def build_chapter_checklist(entity_store: EntityStore, desk: DeskStore,
     if len(pos) > 1:  # 只有「本章为第 N 章」一行时不单独成节
         sections.append("【本章故事】（本章位置）\n" + "；".join(pos))
 
-    # ③ 本章人物与设定（实体快照）
+    # ③ 本书本场（书铁律+七日Day节拍+讣告卡）——仅在传了 book_store/field_store 时注入
+    book_field_parts: list[str] = []
+    if book_store is not None:
+        try:
+            premise = book_store.premise()
+            book_field_parts.append(
+                "**铁律**：七日锚（Day1→Day7 顺序永不跳）；讣告三功能（入场/机制/出场）；"
+                "神不出场不对话；第七日=死期永不破。\n"
+                f"**主角**：{_clean(premise.data.get('protagonist', ''), 120)}"
+            )
+            # 唐迟当前侵蚀度提醒
+            tangchi = book_store.tangchi_raw()
+            erosion = tangchi.get("erosion_level", 0)
+            crafts = tangchi.get("crafts", []) or []
+            next_ms = None
+            for ms in tangchi.get("madness_milestones", []) or []:
+                if erosion < ms.get("threshold", 100):
+                    next_ms = ms
+                    break
+            tang_line = f"**唐迟刻度**：当前侵蚀度 {erosion}/100"
+            if crafts:
+                tang_line += f"；已累积手艺 {len(crafts)} 项（{', '.join(c['name'] for c in crafts[-3:])}）"
+            if next_ms:
+                tang_line += f"；下一里程碑：{next_ms['threshold']}→{next_ms.get('sign','')}"
+            book_field_parts.append(tang_line)
+        except Exception:
+            pass
+
+    # 从章节读取 field_no/day/is_interlude
+    cur_field_no = None
+    cur_day = None
+    cur_is_interlude = False
+    if field_store is not None:
+        try:
+            w = desk.get(chapter)
+            if w is not None:
+                cur_field_no = getattr(w, "field_no", None)
+                cur_day = getattr(w, "day", None)
+                cur_is_interlude = bool(getattr(w, "is_interlude", False))
+        except Exception:
+            pass
+
+    # 如果 chapter work 里还没写 meta（新解析的章尚未记录到 desk），fallback 到 desk 里找最近有 meta 的前章
+    if cur_field_no is None and field_store is not None:
+        for no in sorted((n for n in desk.all_nos() if n <= chapter), reverse=True):
+            w = desk.get(no)
+            if w is not None and getattr(w, "field_no", None) is not None:
+                # 只在 chapter 自己的 meta 缺失时才借用（章本身是新增章时会用到）
+                break
+
+    field_context = ""
+    if field_store is not None and cur_field_no is not None:
+        try:
+            fw = field_store.get(cur_field_no)
+            if fw is not None:
+                obit_lines = [f"**第{fw.no}场·{fw.title or '（未命名）'}**（{fw.world_type}）"]
+                if fw.world_premise:
+                    obit_lines.append(f"世界设定：{_clean(fw.world_premise, 160)}")
+                obit_lines.append(fw.obituary.render(fw.no))
+                if cur_is_interlude:
+                    obit_lines.append(
+                        "**本章是现实间章**：8:2 节奏——八成日常回血、两成暗线带刺；"
+                        "必须出现本场讣告残页/其他选中者痕迹/对下一场的暗示之一；"
+                        "不能写成纯日常流水。")
+                elif cur_day is not None:
+                    # 当日节拍：优先本场 override，否则全局基线
+                    beats = None
+                    if fw.obituary.day_beats_override:
+                        for b in fw.obituary.day_beats_override:
+                            if int(b.get("day", 0)) == cur_day:
+                                beats = b
+                                break
+                    if beats is None and book_store is not None:
+                        from app.book.pulse import get_beat
+                        beats = get_beat(book_store.pulse_raw().get("day_beats", []), cur_day)
+                    if beats:
+                        obit_lines.append(
+                            f"\n**Day{cur_day}·{beats.get('name','')}（张力 {beats.get('tension','?')}/10）**\n"
+                            f"- 本日任务：{beats.get('mission','')}\n"
+                            f"- 必须节拍：{beats.get('required_beat','')}\n"
+                            f"- 常见陷阱：{beats.get('trap','')}"
+                        )
+                    # 当日 DayWork（作者填的细纲）
+                    dw = fw.days.get(cur_day) if fw.days else None
+                    if dw and (dw.summary or dw.required_hook):
+                        seg = f"\n**Day{cur_day}作者设定**："
+                        if dw.summary:
+                            seg += dw.summary
+                        if dw.required_hook:
+                            seg += f"｜必现钩子：{dw.required_hook}"
+                        obit_lines.append(seg)
+                field_context = "\n".join(obit_lines)
+        except Exception:
+            field_context = ""
+
+    if book_field_parts or field_context:
+        sec = ["【本书本场】（本章所属场/日位置 + 必须遵守的硬约束）"]
+        sec.extend(book_field_parts)
+        if field_context:
+            sec.append(field_context)
+        sections.append("\n\n".join(sec))
+
+    # ④ 本章人物与设定（实体快照）
     for etype in ("character", "location", "item", "plotline"):
         ents = []
         for e in entity_store.list(type=etype):

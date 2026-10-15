@@ -14,8 +14,9 @@ import httpx
 
 from .base import Provider, ProviderError, StreamEvent, Usage, strip_think
 
-# 现金单价（元/百万token）。占位值，接入账单后校准。
+# 现金单价（元/百万token）。Flash 档位为快速预览版，价格按官方公告校准；其他为历史占位。
 PRICE_CNY_PER_MTOK = {
+    "MiniMax-M3.1-Flash-Preview": {"in": 0.1, "out": 0.4},
     "MiniMax-M3": {"in": 2.1, "out": 8.4},
     "MiniMax-M2.7": {"in": 2.1, "out": 8.4},
     "MiniMax-M2": {"in": 1.0, "out": 8.0},
@@ -63,7 +64,7 @@ class MiniMaxProvider(Provider):
     name = "minimax"
 
     def __init__(self, api_key: str, base_url: str | None = None,
-                 default_model: str = "MiniMax-M3"):
+                 default_model: str = "MiniMax-M3.1-Flash-Preview"):
         if not api_key or "在此填入" in api_key:
             raise ProviderError("MiniMax api_key 未配置（config.local.yaml）")
         self.api_key = api_key

@@ -7,7 +7,9 @@ import {
   ENTITY_TYPES,
   ENTITY_TYPE_LABELS,
   entitiesApi,
+  protagonistApi,
   type EntityInfo,
+  type ProtagonistState,
 } from '../api'
 import { currentProjectId } from '../state'
 
@@ -27,6 +29,75 @@ const extractText = ref('')
 const extractChapter = ref<number | null>(null)
 const extracting = ref(false)
 const extractResult = ref<{ created: number; updated: number; dropped: number } | null>(null)
+
+// ---- 主角（唐迟）档案 ----
+const protagonist = ref<ProtagonistState | null>(null)
+const proEdit = ref(false)
+const proSaving = ref(false)
+const proForm = ref({
+  current_body_identity: '',
+  current_location: '',
+  sanity_hint: '',
+  contamination_level: 0,
+  blue_star_bonds_text: '' as string,  // 一行一条 "名字|关系|深度|备注"
+  known_truths_text: '' as string,
+})
+
+async function loadProtagonist() {
+  if (!currentProjectId.value) { protagonist.value = null; return }
+  try {
+    const r = await protagonistApi.get(currentProjectId.value)
+    protagonist.value = r.protagonist
+  } catch (e) {
+    console.warn('load protagonist failed', e)
+  }
+}
+
+function openProEdit() {
+  if (!protagonist.value) return
+  const p = protagonist.value
+  proForm.value = {
+    current_body_identity: p.current_body_identity || '',
+    current_location: p.current_location || '',
+    sanity_hint: p.sanity_hint || '',
+    contamination_level: p.contamination_level || 0,
+    blue_star_bonds_text: (p.blue_star_bonds || [])
+      .map(b => `${b.name}|${b.relation}|${b.depth}|${b.note || ''}`).join('\n'),
+    known_truths_text: (p.known_truths || []).join('\n'),
+  }
+  proEdit.value = true
+}
+
+async function saveProtagonist() {
+  if (!currentProjectId.value || !protagonist.value) return
+  proSaving.value = true
+  try {
+    const bonds = proForm.value.blue_star_bonds_text.split('\n')
+      .map(l => l.trim()).filter(Boolean)
+      .map(line => {
+        const [name, relation, depth, note] = line.split('|').map(s => (s || '').trim())
+        return { name: name || '?', relation: relation || '?', depth: depth || '浅', note: note || '' }
+      })
+    const truths = proForm.value.known_truths_text.split('\n')
+      .map(l => l.trim()).filter(Boolean)
+    const body = {
+      current_body_identity: proForm.value.current_body_identity,
+      current_location: proForm.value.current_location,
+      sanity_hint: proForm.value.sanity_hint,
+      contamination_level: Math.max(0, Math.min(100, Number(proForm.value.contamination_level) || 0)),
+      blue_star_bonds: bonds,
+      known_truths: truths,
+    }
+    const r = await protagonistApi.patch(currentProjectId.value, body)
+    protagonist.value = r.protagonist
+    proEdit.value = false
+    ElMessage.success('主角档案已保存')
+  } catch (e) {
+    ElMessage.error(`保存失败：${(e as Error).message}`)
+  } finally {
+    proSaving.value = false
+  }
+}
 
 const statusOptions = computed(() => {
   const base = ['active', 'retired']
@@ -159,11 +230,12 @@ async function doExtract() {
   }
 }
 
-onMounted(refresh)
+onMounted(() => { refresh(); loadProtagonist() })
 watch(currentProjectId, () => {
   extractVisible.value = false
   extractResult.value = null
   refresh()
+  loadProtagonist()
 })
 </script>
 
@@ -174,6 +246,88 @@ watch(currentProjectId, () => {
       <el-empty description="先在顶部选择一个小说项目" />
     </div>
     <template v-else>
+    <!-- 主角档案卡 -->
+    <el-card shadow="never" style="margin-bottom: 12px; border-left: 4px solid #e6a23c">
+      <template #header>
+        <div style="display: flex; justify-content: space-between; align-items: center">
+          <span style="font-weight: 600">
+            主角 · {{ protagonist?.current_body_name || '唐迟' }}
+            <el-tag size="small" type="warning" style="margin-left: 8px">污染 {{ protagonist?.contamination_level ?? 0 }}/100</el-tag>
+            <el-tag size="small" type="info" style="margin-left: 4px">已完成 {{ protagonist?.field_count ?? 0 }} 场</el-tag>
+          </span>
+          <el-button size="small" type="primary" plain @click="openProEdit">编辑档案</el-button>
+        </div>
+      </template>
+      <div v-if="protagonist" style="font-size: 13px; line-height: 1.7; color: #333">
+        <div style="margin-bottom: 6px">
+          <b>当前位置：</b>{{ protagonist.current_location || '—' }}
+          <span v-if="protagonist.current_day" style="margin-left: 12px"><b>天数：</b>第 {{ protagonist.current_day }} 天</span>
+        </div>
+        <div style="margin-bottom: 6px"><b>人设/身份：</b>{{ protagonist.current_body_identity || '（未填写）' }}</div>
+        <div style="margin-bottom: 6px"><b>精神状态：</b>{{ protagonist.sanity_hint || '状态稳定' }}</div>
+        <div v-if="protagonist.blue_star_bonds?.length" style="margin-bottom: 6px">
+          <b>蓝星羁绊：</b>
+          <span v-for="(b, i) in protagonist.blue_star_bonds" :key="i" style="margin-right: 12px">
+            <el-tag size="small" :type="b.depth === '深' ? 'danger' : b.depth === '中' ? 'warning' : 'info'">{{ b.name }}</el-tag>
+            <span style="color: #666; margin-left: 2px">{{ b.relation }}（{{ b.depth }}）</span>
+          </span>
+        </div>
+        <div v-if="protagonist.active_crafts?.length" style="margin-bottom: 6px">
+          <b>已掌握手艺：</b>{{ protagonist.active_crafts.map(c => c.name + (c.proficiency ? `(${c.proficiency})` : '')).join('、') }}
+        </div>
+        <div v-if="protagonist.dead_echoes?.length" style="margin-bottom: 6px">
+          <b>死者残影：</b>{{ protagonist.dead_echoes.map(e => e.name).join('、') }}
+        </div>
+        <div v-if="protagonist.god_marks?.length" style="margin-bottom: 6px">
+          <b>邪神标记：</b>{{ protagonist.god_marks.map(m => `${m.god}·${m.seal_form || '?'}`).join('、') }}
+        </div>
+        <div v-if="protagonist.brought_items?.length" style="margin-bottom: 6px">
+          <b>带回物品：</b>{{ protagonist.brought_items.map(b => `${b.name}(污${b.contam ?? 0})`).join('、') }}
+        </div>
+        <div v-if="protagonist.known_truths?.length" style="margin-bottom: 6px">
+          <b>已知真相：</b>
+          <ul style="margin: 4px 0 0 20px; padding: 0">
+            <li v-for="(t, i) in protagonist.known_truths" :key="i" style="list-style: disc">{{ t }}</li>
+          </ul>
+        </div>
+        <div v-if="protagonist.kill_record?.length" style="margin-bottom: 6px">
+          <b>杀青账：</b>
+          <ul style="margin: 4px 0 0 20px; padding: 0">
+            <li v-for="(k, i) in protagonist.kill_record" :key="i" style="list-style: disc; font-family: monospace">{{ k }}</li>
+          </ul>
+        </div>
+      </div>
+    </el-card>
+
+    <!-- 主角编辑弹窗 -->
+    <el-dialog v-model="proEdit" title="编辑主角档案" width="640px">
+      <el-form label-position="top" size="small">
+        <el-form-item label="人设/身份（长文本，可以直接写一段描述）">
+          <el-input v-model="proForm.current_body_identity" type="textarea" :rows="4" placeholder="怂、惜命、加班成瘾的普通社畜；..." />
+        </el-form-item>
+        <el-form-item label="当前位置">
+          <el-input v-model="proForm.current_location" placeholder="蓝星·出租屋 / ××副本·xx镇" />
+        </el-form-item>
+        <el-form-item label="精神/状态提示">
+          <el-input v-model="proForm.sanity_hint" placeholder="未触发副本，精神稳定；长期睡眠不足..." />
+        </el-form-item>
+        <el-form-item label="累积污染度（0-100）">
+          <el-input-number v-model="proForm.contamination_level" :min="0" :max="100" :step="1" />
+        </el-form-item>
+        <el-form-item label="蓝星羁绊（每行一条，格式：名字|关系|深度（浅/中/深）|备注）">
+          <el-input v-model="proForm.blue_star_bonds_text" type="textarea" :rows="4"
+            placeholder="煤球|猫（三花田园猫）|深|唐迟捡回来的，唯一情绪锚&#10;楼下阿姨|邻居|浅|总塞咸菜给唐迟" />
+        </el-form-item>
+        <el-form-item label="已知真相碎片（每行一条）">
+          <el-input v-model="proForm.known_truths_text" type="textarea" :rows="3" placeholder="讣告必须签收..." />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="proEdit = false">取消</el-button>
+        <el-button type="primary" :loading="proSaving" @click="saveProtagonist">保存</el-button>
+      </template>
+    </el-dialog>
+
     <el-card shadow="never">
       <template #header>
         <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px">

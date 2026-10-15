@@ -15,6 +15,7 @@ from app.review.reviewer import (
     ReviewItem,
     review_chapter,
 )
+from app.review.book_checks import book_review_checks
 
 __all__ = [
     "BLOCK_THRESHOLD",
@@ -27,6 +28,7 @@ __all__ = [
     "Marker",
     "MarkerStore",
     "ReviewItem",
+    "book_review_checks",
     "extract_markers",
     "markers_material",
     "review_chapter",

@@ -16,3 +16,16 @@ routing:
   chore:        { primary: trae_exec,  fallback: minimax }
   # distill = 拆书写法卡提炼（一本书一次，产出直接进后续写作上下文，质量优先）
   distill:      { primary: minimax,    fallback: trae_exec }
+  # 《第七日的亡者》场工作流（Phase 1 书化）
+  adapt_scenario:     { primary: minimax, fallback: trae_exec }
+  coc_keeper:         { primary: minimax, fallback: trae_exec }
+  coc_investigator:   { primary: minimax, fallback: trae_exec }
+  coc_outcome:        { primary: minimax, fallback: trae_exec }
+  tang_outline:       { primary: minimax, fallback: trae_exec }
+  split_chapters:     { primary: minimax, fallback: trae_exec }
+  distill_world:      { primary: minimax, fallback: trae_exec }
+  distill_obsession:  { primary: minimax, fallback: trae_exec }
+  distill_entity:     { primary: minimax, fallback: trae_exec }
+  epilogue_ash:       { primary: minimax, fallback: trae_exec }
+  interlude_expected: { primary: minimax, fallback: trae_exec }
+  interlude_outline:  { primary: minimax, fallback: trae_exec }

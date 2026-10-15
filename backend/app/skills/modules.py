@@ -67,6 +67,27 @@ MODULES: dict[str, dict] = {
         "stages": ["plot", "draft", "polish"],
         "default_for": [],
     },
+    # 书专属模块（《第七日的亡者》）
+    "coc_horror": {
+        "title": "克苏鲁恐怖：五层叠加/神不出场/侵蚀度显影/无空泛形容词",
+        "stages": ["plot", "draft", "polish"],
+        "default_for": [],
+    },
+    "infinite_loop_unit": {
+        "title": "七日单元剧：一场=一讣告=七日+幕间/执念机制代价三支柱/D4反转D7终局",
+        "stages": ["outline", "plot"],
+        "default_for": [],
+    },
+    "interlude_relief": {
+        "title": "幕间调剂：8:2 日常+暗刺/代价落地/活人关系/软钩收尾",
+        "stages": ["plot", "draft", "polish"],
+        "default_for": [],
+    },
+    "obsession_cost": {
+        "title": "执念代价：五维度代价轮换/对等分档/五窗口持续展示/记账法升级",
+        "stages": ["outline", "plot", "draft", "polish"],
+        "default_for": [],
+    },
 }
 
 

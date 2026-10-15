@@ -9,6 +9,23 @@ from app.pipeline.engine import (
     proxy_finish_reason,
     split_outline_into_chapters,
 )
+from app.pipeline.coc_simulator import (
+    apply_state_patch,
+    autorun_until_break,
+    finalize as coc_finalize,
+    init_run as coc_init_run,
+    intervene as coc_intervene,
+    step_investigator,
+    step_keeper,
+)
+from app.pipeline.field_pipeline import (
+    apply_entities,
+    apply_epilogue_to_book,
+    apply_obsession_to_book,
+    apply_split_to_field,
+    apply_world_rules,
+    run_field_node,
+)
 from app.pipeline.journal import (
     COMPLETED,
     FAILED,
@@ -50,10 +67,21 @@ __all__ = [
     "PromptVersion",
     "RenderedPrompt",
     "RunJournal",
+    "apply_entities",
+    "apply_epilogue_to_book",
+    "apply_obsession_to_book",
+    "apply_split_to_field",
+    "apply_world_rules",
+    "apply_state_patch",
+    "autorun_until_break",
     "build_novel",
+    "coc_finalize",
+    "coc_init_run",
+    "coc_intervene",
     "compute_run_key",
     "proxy_finish_reason",
     "render_generation_messages",
+    "run_field_node",
     "split_outline_into_chapters",
     "x_fingerprint",
 ]

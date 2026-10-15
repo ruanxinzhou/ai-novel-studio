@@ -1,4 +1,4 @@
-"""实体库（M3b）：五类实体存储 + LLM 抽取。"""
+"""实体库（世界状态热板）：五类实体存储 + 状态变动链 + 关系图 + LLM 抽取。"""
 from app.entities.extractor import (
     ENTITY_EXTRACT_SYSTEM,
     ExtractionResult,
@@ -8,25 +8,49 @@ from app.entities.extractor import (
     reconcile_foreshadows,
 )
 from app.entities.store import (
+    ENTITY_ATTRS,
     ENTITY_STATUSES,
     ENTITY_TYPES,
+    PROTAGONIST_ID,
+    REL_TYPE_LABELS,
     STATUS_LABELS,
     TYPE_LABELS,
+    VALID_REL_TYPES,
     Entity,
     EntityStore,
+    ForeshadowSuggestion,
+    NewEntitySuggestion,
+    ProtagonistState,
+    Relation,
+    RippleHint,
+    StateChange,
+    StateChangeSuggestion,
+    StateDiff,
 )
 
 __all__ = [
+    "ENTITY_ATTRS",
     "ENTITY_EXTRACT_SYSTEM",
     "ENTITY_STATUSES",
     "ENTITY_TYPES",
+    "PROTAGONIST_ID",
+    "REL_TYPE_LABELS",
     "STATUS_LABELS",
     "TYPE_LABELS",
+    "VALID_REL_TYPES",
     "Entity",
     "EntityStore",
     "ExtractionResult",
     "ForeshadowReport",
     "FORESHADOW_RECONCILE_SYSTEM",
+    "ForeshadowSuggestion",
+    "NewEntitySuggestion",
+    "ProtagonistState",
+    "Relation",
+    "RippleHint",
+    "StateChange",
+    "StateChangeSuggestion",
+    "StateDiff",
     "extract_entities",
     "reconcile_foreshadows",
 ]

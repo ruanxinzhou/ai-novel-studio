@@ -8,6 +8,7 @@ import {
   deskApi,
   projectsApi,
   refineApi,
+  sessionsApi,
   skillsApi,
   type ChapterReview,
   type DeskChapterDetail,
@@ -444,6 +445,23 @@ async function doFinalize() {
   }
 }
 
+async function summonDaily() {
+  /** 卡壳时召唤 AI：找一个本章的 active daily_write 会话；没有就新建。然后切到副本对话。*/
+  if (!currentProjectId.value || !currentNo.value) return
+  try {
+    const list = await sessionsApi.list(currentProjectId.value, { scope: 'chapter', chapter: currentNo.value })
+    let sid = list.sessions.find(s => s.status === 'active')?.id
+    if (!sid) {
+      const r = await sessionsApi.create(currentProjectId.value, { scope: 'chapter', chapter: currentNo.value })
+      sid = r.session.id
+    }
+    ;(window as any).__sessionFocus = sid
+    activeTab.value = 'session'
+  } catch (e) {
+    ElMessage.error(`打开对话失败：${(e as Error).message}`)
+  }
+}
+
 onMounted(async () => {
   const focus = (window as unknown as { __deskFocus?: { value: number } }).__deskFocus
   await loadOverview(false)
@@ -462,6 +480,18 @@ watch(currentProjectId, () => {
   deskPage.value = 1
   loadOverview(false)
 })
+
+// 支持从外部（App 自动路由/副本对话 schedule 锁定后）跳转到指定章
+watch(
+  () => (window as unknown as { __deskFocus?: { value: number } }).__deskFocus?.value,
+  async (n) => {
+    if (!n || !currentProjectId.value) return
+    if (!overview.value) await loadOverview(false)
+    await selectChapter(n)
+    const f = (window as unknown as { __deskFocus?: { value: number } }).__deskFocus
+    if (f) f.value = 0
+  },
+)
 
 // tab 用 v-show 常驻：在别处改了大纲（向导/创作导航），切回章台要重拉总览
 watch(activeTab, (tab) => {
@@ -595,6 +625,11 @@ function goContinueOutline() {
             <h3 style="margin: 0">第 {{ detail.chapter.no }} 章 · {{ detail.chapter.title || '（未命名）' }}</h3>
             <el-tag v-if="detail.chapter.finalized_at" type="success">已定稿 {{ detail.chapter.finalized_at.slice(0, 16) }}</el-tag>
             <el-tag v-else-if="currentNo === todayNo" type="primary" effect="plain">今日目标</el-tag>
+            <div style="flex: 1" />
+            <el-button size="small" type="warning" plain :disabled="!!detail.chapter.finalized_at"
+                       @click="summonDaily">
+              💬 召唤 AI（卡壳时聊聊这章）
+            </el-button>
           </div>
           <el-collapse v-model="showRefs" style="margin-top: 10px">
             <el-collapse-item title="本章大纲" name="outline">

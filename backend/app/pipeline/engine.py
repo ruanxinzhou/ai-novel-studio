@@ -54,6 +54,19 @@ SPECS: dict[str, PipelineSpec] = {
     "plot": PipelineSpec("plot", x_chunk_length=2_000, y_chunk_length=6_000, target_chars=2_500),
     "draft": PipelineSpec("draft", x_chunk_length=4_000, y_chunk_length=10_000, target_chars=8_000, anchor_enabled=True),
     "polish": PipelineSpec("polish", x_chunk_length=6_000, y_chunk_length=12_000, target_chars=8_000),
+    # 《第七日的亡者》场工作流步骤（Phase 1 书化）
+    "adapt_scenario":     PipelineSpec("adapt_scenario",     x_chunk_length=3_000, y_chunk_length=6_000, target_chars=2_500),
+    "coc_keeper":         PipelineSpec("coc_keeper",         x_chunk_length=3_000, y_chunk_length=4_000, target_chars=1_500),
+    "coc_investigator":   PipelineSpec("coc_investigator",   x_chunk_length=3_000, y_chunk_length=4_000, target_chars=1_500),
+    "coc_outcome":        PipelineSpec("coc_outcome",        x_chunk_length=4_000, y_chunk_length=4_000, target_chars=2_000),
+    "tang_outline":       PipelineSpec("tang_outline",       x_chunk_length=3_000, y_chunk_length=5_000, target_chars=2_500),
+    "split_chapters":     PipelineSpec("split_chapters",     x_chunk_length=4_000, y_chunk_length=4_000, target_chars=2_000),
+    "distill_world":      PipelineSpec("distill_world",      x_chunk_length=3_000, y_chunk_length=2_000, target_chars=1_200),
+    "distill_obsession":  PipelineSpec("distill_obsession",  x_chunk_length=3_000, y_chunk_length=2_000, target_chars=1_200),
+    "distill_entity":     PipelineSpec("distill_entity",     x_chunk_length=3_000, y_chunk_length=2_000, target_chars=1_200),
+    "epilogue_ash":       PipelineSpec("epilogue_ash",       x_chunk_length=3_000, y_chunk_length=2_000, target_chars=1_000),
+    "interlude_expected": PipelineSpec("interlude_expected", x_chunk_length=2_000, y_chunk_length=2_000, target_chars=1_000),
+    "interlude_outline":  PipelineSpec("interlude_outline",  x_chunk_length=3_000, y_chunk_length=4_000, target_chars=2_000),
 }
 
 
