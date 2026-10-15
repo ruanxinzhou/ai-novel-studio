@@ -7,6 +7,7 @@ import SpineNav from '../components/SpineNav.vue'
 import SettingsDrawer from '../components/SettingsDrawer.vue'
 import AIChatFloat from '../components/AIChatFloat.vue'
 import BookSetupView from './BookSetupView.vue'
+import ModuleAdaptView from './ModuleAdaptView.vue'
 import {
   currentProjectId,
   currentPhase,
@@ -133,13 +134,12 @@ defineExpose({ refresh: loadPhase })
           <!-- setup 阶段：开书设定面板 -->
           <BookSetupView v-if="phase === 'setup'" @done="loadPhase" />
 
-          <!-- adapt_empty：空新卷引导 -->
-          <div v-else-if="phase === 'adapt_empty'" class="empty-state">
-            <div class="empty-icon">📘</div>
-            <h2>开始新一卷</h2>
-            <p class="empty-desc">书卡已齐，可以开启新的副本卷了。</p>
-            <el-button type="primary" size="large" @click="onAddVolume">创建新副本卷</el-button>
-          </div>
+          <!-- adapt / adapt_empty 阶段：上传 PDF + 并行改编 + 选版 -->
+          <ModuleAdaptView
+            v-else-if="phase === 'adapt' || phase === 'adapt_empty'"
+            :vol-no="currentVolumeNo"
+            @done="loadPhase"
+          />
 
           <!-- 其他阶段：占位提示 -->
           <div v-else class="placeholder-view">

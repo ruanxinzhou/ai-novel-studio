@@ -4092,6 +4092,7 @@ class VolumeUpdateIn(BaseModel):
     contamination_goal: int | None = None
     satisfaction_beats: list[str] | None = None
     endgame_layer_hints: dict | None = None
+    adapted_module: str | None = None
 
 
 class SettlePreviewIn(BaseModel):
@@ -4287,5 +4288,18 @@ register_brief_routes(
     require_project=_require_project,
     volumes_for=_volumes_for,
     desk_for=_desk_for,
+)
+
+# ============================================================
+# 工作台 PDF 改编（adapt）路由
+# ============================================================
+from .adapt_routes import register_adapt_routes
+register_adapt_routes(
+    app,
+    require_project=_require_project,
+    volumes_for=_volumes_for,
+    project_dir=_project_dir,
+    chore_provider=_chore_provider,
+    prompt_store=_prompt_store,
 )
 

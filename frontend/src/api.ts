@@ -486,6 +486,51 @@ export const entitiesApi = {
     }),
 }
 
+// ---- 主角（唐迟）档案 ----
+export interface ProtagonistState {
+  current_body_name: string
+  current_body_identity: string
+  current_location: string
+  current_field_no: number | null
+  current_day: number | null
+  erosion_level: number
+  sanity_hint: string
+  held_items: string[]
+  active_crafts: Array<{ name: string; proficiency?: string; from_field?: string; note?: string }>
+  known_truths: string[]
+  key_relations: string[]
+  dead_echoes: Array<{ name: string; craft_hint?: string; obsession?: string; fade_stage?: string; from_field?: string }>
+  god_marks: Array<{ god: string; seal_form?: string; risk?: string; from_field?: string }>
+  brought_items: Array<{ name: string; contam?: number; effect?: string; from_field?: string }>
+  blue_star_bonds: Array<{ name: string; relation: string; depth: string; note?: string }>
+  kill_record: string[]
+  contamination_level: number
+  field_count: number
+  updated_at: string
+  updated_from_chapter: number | null
+}
+
+export interface ProtagonistPatch {
+  current_body_name?: string
+  current_body_identity?: string
+  current_location?: string
+  sanity_hint?: string
+  known_truths?: string[]
+  key_relations?: string[]
+  blue_star_bonds?: Array<{ name: string; relation: string; depth: string; note?: string }>
+  contamination_level?: number
+  profile_text?: string
+}
+
+export const protagonistApi = {
+  get: (pid: string) => req<{ protagonist: ProtagonistState }>(`/api/projects/${pid}/protagonist`),
+  patch: (pid: string, body: ProtagonistPatch) =>
+    req<{ ok: boolean; protagonist: ProtagonistState }>(`/api/projects/${pid}/protagonist`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+}
+
 export const vaultApi = {
   export: (pid: string, outDir?: string) =>
     req<VaultExportResult>(`/api/projects/${pid}/export/vault`, {
@@ -547,6 +592,517 @@ export const importApi = {
     req<{ seq: number; chapters: number }>(`/api/projects/${pid}/import/adopt_outline`, {
       method: 'POST',
     }),
+}
+
+// ---- 创作会话（P5：每月规划 + 日更对话）----
+export interface SessionMeta {
+  id: string
+  title: string
+  scope: 'field' | 'chapter'
+  field_no?: number
+  chapter?: number
+  current_phase: string
+  status: 'active' | 'completed' | 'abandoned'
+  updated_at: string
+  can_advance: boolean
+}
+export interface SessionMessage {
+  id: string
+  role: 'author' | 'ai' | 'system'
+  kind: string
+  text: string
+  meta: Record<string, unknown>
+  edited_from?: string | null
+  created_at: string
+}
+export interface Candidate {
+  id: string
+  phase: string
+  card_key: string
+  content: string
+  axis_label: string
+  axis_dimension: string
+  rationale: string
+  created_at: string
+}
+export interface EditingState {
+  candidate_id: string | null
+  card_key: string
+  current_text: string
+  started_at: string
+  edit_round: number
+  last_suggestion_msg_id: string | null
+  selected_fork: string | null
+}
+export interface SessionState {
+  id: string
+  project_id: string
+  scope: 'field' | 'chapter'
+  field_no?: number | null
+  chapter?: number | null
+  title: string
+  current_phase: string
+  outputs: Record<string, unknown>
+  messages: SessionMessage[]
+  status: 'active' | 'completed' | 'abandoned'
+  created_at: string
+  updated_at: string
+  artifacts: Record<string, unknown>
+  candidates?: Candidate[]
+  editing?: EditingState | null
+  locked_cards?: Record<string, string>
+  source_material?: {
+    kind?: string
+    premise?: string
+    renamed_cast?: unknown[]
+    changed_elements?: string[]
+    risk_flags?: string[]
+    original_excerpt?: string
+    original_chars?: number
+    filename?: string
+    adapted_at?: string
+    attempts?: number
+  } | null
+  phase_meta: {
+    title: string
+    prompt: string
+    ai_mode: string
+    next_phase: string | null
+    required_outputs: Record<string, string>
+  }
+  missing_outputs: string[]
+  can_advance: boolean
+}
+export interface KindleVariant {
+  vid: string
+  title: string
+  flavor?: string
+  flavor_hook?: string
+  one_liner: string
+  ending_label?: string
+  core_twist?: string
+  extra_npcs?: (string | { name?: string })[]
+  final_san: number
+  final_hp: number
+  turns: number
+  final_summary: string
+}
+
+export const sessionsApi = {
+  list: (pid: string, filter: { scope?: string; field_no?: number; chapter?: number; status?: string } = {}) => {
+    const p = new URLSearchParams()
+    Object.entries(filter).forEach(([k, v]) => {
+      if (v != null) p.set(k, String(v))
+    })
+    const qs = p.toString()
+    return req<{ sessions: SessionMeta[] }>(`/api/projects/${pid}/sessions${qs ? `?${qs}` : ''}`)
+  },
+  create: (pid: string, body: { scope: 'field' | 'chapter'; field_no?: number; chapter?: number; title?: string; start_phase?: string }) =>
+    req<{ ok: true; session: SessionState }>(`/api/projects/${pid}/sessions`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  get: (pid: string, sid: string) =>
+    req<{ session: SessionState }>(`/api/projects/${pid}/sessions/${sid}`),
+  send: (pid: string, sid: string, body: { text: string; kind?: string; as_ai?: boolean; output_key?: string; meta?: Record<string, unknown> }) =>
+    req<{ ok: true; session: SessionState; message: SessionMessage }>(
+      `/api/projects/${pid}/sessions/${sid}/send`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  gate: (pid: string, sid: string, key: string, value: unknown) =>
+    req<{ ok: true; session: SessionState; can_advance: boolean; missing: string[] }>(
+      `/api/projects/${pid}/sessions/${sid}/gate`,
+      { method: 'POST', body: JSON.stringify({ key, value }) },
+    ),
+  advance: (pid: string, sid: string) =>
+    req<{ ok: true; session: SessionState }>(`/api/projects/${pid}/sessions/${sid}/advance`, { method: 'POST' }),
+  rollback: (pid: string, sid: string, to_phase: string) =>
+    req<{ ok: true; session: SessionState }>(`/api/projects/${pid}/sessions/${sid}/rollback`, {
+      method: 'POST',
+      body: JSON.stringify({ to_phase }),
+    }),
+  abandon: (pid: string, sid: string) =>
+    req<{ ok: true; session: SessionState }>(`/api/projects/${pid}/sessions/${sid}`, { method: 'DELETE' }),
+  action: (pid: string, sid: string, body: { action: string; args?: Record<string, unknown>; n_variants?: number }) =>
+    req<{ ok: true; session: SessionState; variants?: KindleVariant[]; options?: string[] }>(
+      `/api/projects/${pid}/sessions/${sid}/action`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  // ---- 回转寿司（M2）----
+  generateCandidates: (
+    pid: string,
+    sid: string,
+    body: {
+      card_key: string
+      phase: string
+      axis_label?: string
+      axis_dimension?: string
+      n?: number
+      context_hint?: string
+    },
+  ) =>
+    req<{
+      ok: true
+      session: SessionState
+      candidates: Candidate[]
+      stub: boolean
+      axis_label: string
+      axis_dimension: string
+    }>(`/api/projects/${pid}/sessions/${sid}/generate-candidates`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  pickCandidate: (
+    pid: string,
+    sid: string,
+    body: { candidate_id?: string | null; card_key: string; initial_text?: string | null },
+  ) =>
+    req<{ ok: true; session: SessionState; editing: EditingState }>(
+      `/api/projects/${pid}/sessions/${sid}/pick-candidate`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  editingUpdate: (pid: string, sid: string, text: string) =>
+    req<{ ok: true; session: SessionState }>(`/api/projects/${pid}/sessions/${sid}/editing/update`, {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    }),
+  editingEnd: (pid: string, sid: string) =>
+    req<{ ok: true; session: SessionState }>(`/api/projects/${pid}/sessions/${sid}/editing/end`, {
+      method: 'POST',
+    }),
+  editingAiSuggest: (
+    pid: string,
+    sid: string,
+    body: { instruction: string; apply?: boolean },
+  ) =>
+    req<{
+      ok: true
+      session: SessionState
+      message_id: string
+      suggested_text: string
+      reason: string
+      applied: boolean
+    }>(`/api/projects/${pid}/sessions/${sid}/editing/ai-suggest`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  lockCard: (
+    pid: string,
+    sid: string,
+    body: {
+      card_key: string
+      text: string
+      scope?: string
+      field_no?: number | null
+      chapter?: number | null
+      source_msg_id?: string | null
+      note?: string
+    },
+  ) =>
+    req<{
+      ok: true
+      session: SessionState
+      locked_ref: Record<string, unknown>
+      diff_id: string | null
+    }>(`/api/projects/${pid}/sessions/${sid}/lock`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  // ---- 素材上传（跑团 PDF 版权规避改编）----
+  uploadSourcePdf: (pid: string, sid: string, file: File, userHint = '',
+                    onStage?: (stage: string) => void) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    if (userHint) fd.append('user_hint', userHint)
+    // XHR 支持上传进度（fetch 不支持 upload progress）
+    return new Promise<{
+      ok: true
+      session: SessionState
+      adapt: {
+        premise: string
+        renamed_cast: unknown[]
+        changed_elements: string[]
+        risk_flags: string[]
+        original_excerpt: string
+        original_chars: number
+        filename: string
+        attempts: number
+      }
+    }>((resolve, reject) => {
+      onStage?.('正在上传 PDF…')
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', `/api/projects/${pid}/sessions/${sid}/source-pdf`)
+      // 4 分钟客户端超时：后端单次 LLM 调用上限 300s，改编最多重试 2 次，
+      // 正常情况下 60-180s 就会回，4 分钟兜底避免用户无限等。
+      const timeoutMs = 4 * 60 * 1000
+      const timer = window.setTimeout(() => {
+        xhr.abort()
+        reject(new Error(`改编超时（>${Math.round(timeoutMs / 1000)}s），可能是大模型排队；可刷新页面后重试，或换一个小一点的 PDF。`))
+      }, timeoutMs)
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const pct = Math.round((e.loaded / e.total) * 100)
+          onStage?.(`正在上传 PDF… ${pct}%`)
+        }
+      }
+      xhr.onload = () => {
+        window.clearTimeout(timer)
+        if (xhr.status === 200) {
+          try {
+            resolve(JSON.parse(xhr.responseText))
+          } catch (err) {
+            reject(new Error(`解析响应失败：${err}`))
+          }
+        } else {
+          let detail = `${xhr.status} ${xhr.statusText}`
+          try {
+            const d = JSON.parse(xhr.responseText || '{}')
+            if (d?.detail) detail = d.detail
+          } catch { /* ignore */ }
+          reject(new Error(detail))
+        }
+      }
+      xhr.onerror = () => {
+        window.clearTimeout(timer)
+        reject(new Error('网络错误，上传失败'))
+      }
+      xhr.onabort = () => {
+        window.clearTimeout(timer)
+        reject(new Error('上传已中断'))
+      }
+      // 上传完成后服务端正在抽文本/调 LLM，切阶段提示
+      xhr.upload.onload = () => {
+        onStage?.('上传完成，正在抽取文本…')
+        // 5 秒后切换到"AI 改编中"提示，让用户知道还在工作
+        window.setTimeout(() => onStage?.('AI 正在做版权规避改编（正常需 1-3 分钟，请稍候）…'), 5000)
+        window.setTimeout(() => onStage?.('仍在改编中，长文档可能需要 2-3 分钟…'), 60000)
+        window.setTimeout(() => onStage?.('快好了，模型在输出改编稿…'), 150000)
+      }
+      xhr.send(fd)
+    })
+  },
+}
+
+// ---- 后台长任务（jobs：PDF 5 版 / COC 批量模拟 / 大纲 5 版）----
+export type JobKind = 'pdf5' | 'coc_batch' | 'outline5'
+export type JobStatus = 'pending' | 'running' | 'done' | 'error' | 'cancelled'
+
+export interface Pdf5Variant {
+  vid?: string
+  title?: string
+  one_liner?: string
+  premise?: string
+  player_cards?: unknown[]
+  changed_elements?: string[]
+  risk_flags?: string[]
+  flavor?: string
+  flavor_hook?: string
+}
+export interface CocDayBreakdown {
+  day?: number | string
+  summary?: string
+  title?: string
+}
+export interface CocVariant {
+  label?: string            // 同PL好运 / 同PL厄运 / 异PL反转
+  one_liner?: string
+  premise?: string
+  day_breakdown?: CocDayBreakdown[]
+  final_san?: number
+  final_hp?: number
+  turns?: number
+  final_summary?: string
+}
+export interface Outline5Variant {
+  label?: string
+  one_liner?: string
+  tangchi_entry?: string
+  climax?: string
+  day_breakdown?: CocDayBreakdown[]
+  truth?: string
+}
+
+export interface Job {
+  job_id: string
+  kind: JobKind
+  status: JobStatus
+  progress: number       // 0-100
+  message: string
+  meta?: Record<string, unknown>
+  sub_results?: unknown[]
+  /** 完成后的结果：pdf5 → Pdf5Variant[]；coc_batch → CocVariant[]；outline5 → Outline5Variant[] */
+  result?: Pdf5Variant[] | CocVariant[] | Outline5Variant[] | unknown
+  error?: string | null
+  created_at?: string
+  updated_at?: string
+}
+
+export interface StartJobResp {
+  job_id: string
+  job: Job
+}
+
+export const jobsApi = {
+  /** 启动 COC 三场批量模拟 */
+  startCoc: (
+    pid: string,
+    sid: string,
+    body: {
+      tangchi_replace_idx?: number | null
+      user_directive?: string
+      max_pairs_per_session?: number
+      max_turns_per_session?: number
+    },
+  ) =>
+    req<StartJobResp>(`/api/projects/${pid}/sessions/${sid}/jobs/coc`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /** 启动唐迟大纲 5 版 */
+  startOutline5: (
+    pid: string,
+    sid: string,
+    body: {
+      tangchi_role?: string
+      must_have?: string
+      user_directive?: string
+      selected_coc_idx?: number | null
+      n?: number
+    },
+  ) =>
+    req<StartJobResp>(`/api/projects/${pid}/sessions/${sid}/jobs/outline5`, {
+      method: 'POST',
+      body: JSON.stringify({ n: 5, ...body }),
+    }),
+
+  /** 列出会话下所有 jobs（用于进入页面时一次性同步状态） */
+  list: (pid: string, sid: string) =>
+    req<{ jobs: Job[] }>(`/api/projects/${pid}/sessions/${sid}/jobs`),
+
+  /** 选中某一版，写入 session */
+  pick: (pid: string, sid: string, jobId: string, pickIndex: number) =>
+    req<{ ok: true; job: Job }>(`/api/projects/${pid}/sessions/${sid}/jobs/${jobId}/pick`, {
+      method: 'POST',
+      body: JSON.stringify({ pick_index: pickIndex }),
+    }),
+
+  /** 取消一个 pending/running 的 job */
+  cancel: (pid: string, sid: string, jobId: string) =>
+    req<{ ok: true; job: Job }>(`/api/projects/${pid}/sessions/${sid}/jobs/${jobId}/cancel`, {
+      method: 'POST',
+    }),
+
+  /**
+   * PDF 上传 5 版改编（multipart/form-data）
+   * 字段：file, user_hint, n=5
+   * onProgress 可选：上传阶段 0-100（仅 xhr.upload，服务端生成中进度由 SSE 返回）
+   */
+  uploadPdf5: (
+    pid: string,
+    sid: string,
+    file: File,
+    userHint = '',
+    onProgress?: (pct: number) => void,
+  ) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    if (userHint) fd.append('user_hint', userHint)
+    fd.append('n', '5')
+    return new Promise<StartJobResp>((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', `/api/projects/${pid}/sessions/${sid}/jobs/pdf5`)
+      // 15 分钟兜底：PDF → 5 版改编串行跑，模型慢时可能较长
+      const timeoutMs = 15 * 60 * 1000
+      const timer = window.setTimeout(() => {
+        xhr.abort()
+        reject(new Error(`提交超时（>${Math.round(timeoutMs / 1000)}s），请刷新页面查看任务列表或重试。`))
+      }, timeoutMs)
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress) {
+          onProgress(Math.round((e.loaded / e.total) * 100))
+        }
+      }
+      xhr.onload = () => {
+        window.clearTimeout(timer)
+        if (xhr.status === 200) {
+          try { resolve(JSON.parse(xhr.responseText)) }
+          catch (err) { reject(new Error(`解析响应失败：${err}`)) }
+        } else {
+          let detail = `${xhr.status} ${xhr.statusText}`
+          try {
+            const d = JSON.parse(xhr.responseText || '{}')
+            if (d?.detail) detail = d.detail
+          } catch { /* ignore */ }
+          reject(new Error(detail))
+        }
+      }
+      xhr.onerror = () => {
+        window.clearTimeout(timer)
+        reject(new Error('网络错误，上传失败'))
+      }
+      xhr.onabort = () => {
+        window.clearTimeout(timer)
+        reject(new Error('上传已中断'))
+      }
+      xhr.send(fd)
+    })
+  },
+
+  /**
+   * 订阅 jobs SSE 流（EventSource）
+   * 事件类型：job_update（单 job 更新）、job_init（初次批量 jobs 列表）、job_idle（空闲）
+   * 返回 { close } 用于卸载时关闭连接。
+   * 注意：EventSource 不支持自定义 header；若后端需要 auth token，可通过 query 参数或 cookie 带。
+   */
+  subscribe: (
+    pid: string,
+    sid: string,
+    onEvent: (ev: { type: 'job_update' | 'job_init' | 'job_idle'; job?: Job; jobs?: Job[] }) => void,
+  ) => {
+    const url = `/api/projects/${pid}/sessions/${sid}/jobs/stream`
+    const es = new EventSource(url)
+    const handle = (type: 'job_update' | 'job_init' | 'job_idle') => (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data)
+        if (type === 'job_init') onEvent({ type, jobs: Array.isArray(data) ? data : data.jobs })
+        else if (type === 'job_update') onEvent({ type, job: data as Job })
+        else onEvent({ type })
+      } catch { /* ignore parse errors */ }
+    }
+    es.addEventListener('job_update', handle('job_update'))
+    es.addEventListener('job_init', handle('job_init'))
+    es.addEventListener('job_idle', handle('job_idle'))
+    es.onerror = () => { /* SSE 断连浏览器会自动重连，这里仅静默 */ }
+    return {
+      close: () => {
+        es.close()
+      },
+    }
+  },
+}
+
+export const JOB_KIND_LABELS: Record<JobKind, string> = {
+  pdf5: 'PDF 5版改编',
+  coc_batch: 'COC 三场模拟',
+  outline5: '唐迟大纲 5版',
+}
+
+export const PHASE_TITLES: Record<string, string> = {
+  settle_up: '杀青间章',
+  kindle: '副本点火',
+  scaffold: '跑团与大纲',
+  walkthrough: '章节细纲',
+  schedule: '章节分配',
+  daily_write: '日更',
+}
+export const AI_MODE_LABELS: Record<string, string> = {
+  review: '列账',
+  diverge: '发散',
+  challenge: '挑刺',
+  narrate: '朗读',
+  plan: '排期',
+  silent: '闭嘴',
 }
 
 // ---- M5 引导式写作：向导 + 章台 ----
@@ -672,6 +1228,7 @@ export interface DeskRunResult {
   run_id: string
   resumed_indices: number[]
   calls: { completion_status: string; attempts: number }[]
+  checklist_injected?: boolean
 }
 export interface FinalizeResult {
   chapter: number
@@ -771,4 +1328,90 @@ export const deskApi = {
       method: 'POST',
       body: JSON.stringify({ auto_entities: autoEntities, payoff: payoff ?? null }),
     }),
+}
+
+// ---- 工作台 adapt 阶段：PDF 上传 → 5 版并行改编 → 选版 ----
+
+export interface AdaptStartResp {
+  ok: boolean
+  job_id: string
+  job: Job
+}
+
+export const adaptApi = {
+  /** 获取卷详情（走 workbench 路径） */
+  getVolume: (pid: string, volNo: number) =>
+    req<{ volume: any }>(`/api/projects/${pid}/workbench/volumes/${volNo}`),
+
+  /** 创建新副本卷（dungeon），title 可空 */
+  createVolume: (pid: string, title = '') =>
+    req<{ ok: boolean; volume_no: number; volume: any }>(
+      `/api/projects/${pid}/workbench/volumes`,
+      { method: 'POST', body: JSON.stringify({ title }) },
+    ),
+
+  /** multipart 上传 PDF 并启动 n 版并行改编 */
+  startPdf5: (pid: string, volNo: number, file: File, userHint: string, n: number) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    fd.append('user_hint', userHint)
+    fd.append('n', String(n))
+    return fetch(`/api/projects/${pid}/workbench/volumes/${volNo}/adapt/pdf5`, {
+      method: 'POST',
+      body: fd,
+    }).then(async (r) => {
+      if (!r.ok) {
+        const detail = await r.json().catch(() => ({}))
+        throw new Error(detail.detail ?? `${r.status} ${r.statusText}`)
+      }
+      return r.json() as Promise<AdaptStartResp>
+    })
+  },
+
+  /** 列出该卷下所有 adapt jobs */
+  listJobs: (pid: string, volNo: number) =>
+    req<{ jobs: Job[] }>(`/api/projects/${pid}/workbench/volumes/${volNo}/adapt/jobs`),
+
+  /** 订阅 adapt SSE 流，监听 job_update / job_update_batch / job_idle */
+  subscribeJobs: (
+    pid: string,
+    volNo: number,
+    onEvent: (ev: {
+      type: 'job_update' | 'job_update_batch' | 'job_idle'
+      job?: Job
+      jobs?: Job[]
+    }) => void,
+  ) => {
+    const url = `/api/projects/${pid}/workbench/volumes/${volNo}/adapt/stream`
+    const es = new EventSource(url)
+    const handle = (type: 'job_update' | 'job_update_batch' | 'job_idle') => (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data)
+        if (type === 'job_update') onEvent({ type, job: data as Job })
+        else if (type === 'job_update_batch') onEvent({ type, jobs: Array.isArray(data) ? data : [] })
+        else onEvent({ type })
+      } catch { /* ignore parse errors */ }
+    }
+    es.addEventListener('job_update', handle('job_update'))
+    es.addEventListener('job_update_batch', handle('job_update_batch'))
+    es.addEventListener('job_idle', handle('job_idle'))
+    es.onerror = () => { /* 浏览器自动重连，静默 */ }
+    return {
+      close: () => { es.close() },
+    }
+  },
+
+  /** 选定一版，写入 volume.adapted_module 并标记 adapt 完成 */
+  pickAdapt: (pid: string, volNo: number, jobId: string, pickIndex: number, extraEdits = '') =>
+    req<{ ok: boolean; volume: any }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/adapt/pick`,
+      { method: 'POST', body: JSON.stringify({ job_id: jobId, pick_index: pickIndex, extra_edits: extraEdits }) },
+    ),
+
+  /** 通用阶段完成标记 */
+  markStageComplete: (pid: string, volNo: number, stage: string) =>
+    req<{ ok: boolean; volume: any }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/stage-complete`,
+      { method: 'POST', body: JSON.stringify({ stage }) },
+    ),
 }

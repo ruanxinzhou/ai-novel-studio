@@ -337,6 +337,7 @@ class VolumeStore:
             "title", "tone_arc", "planned_interludes", "foreshadows_to_plant",
             "bonds_to_deepen", "gods_to_hint", "contamination_goal",
             "satisfaction_beats", "endgame_layer_hints",
+            "adapted_module",
         }
         for k, val in kwargs.items():
             if k in planning_fields and val is not None:
