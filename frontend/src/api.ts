@@ -1745,3 +1745,55 @@ export const scaffoldApi = {
     ),
 }
 
+// ============================================================
+// 节奏骨架（rhythm）
+// ============================================================
+export interface RhythmBeat {
+  day: number
+  intensity: number
+  label: string
+}
+export interface RhythmWarning {
+  type: 'dearth' | 'cluster' | 'front_load' | 'back_load' | string
+  day?: number
+  msg: string
+}
+export interface RhythmChapterPlan {
+  chapter: number
+  day: number
+  focus: string
+  words: number
+  beat_type: string
+}
+export interface RhythmBlueprint {
+  pacing_ratio: Record<string, number>
+  key_beats_progress: RhythmBeat[]
+  warnings: RhythmWarning[]
+  suggested_length: number
+  suggested_chapter_range: [number, number]
+  chapter_plan: RhythmChapterPlan[]
+  notes: string
+}
+export interface DensityMap {
+  // day(1~7) → { death, climax, clue, total }
+  [day: number]: { death: number; climax: number; clue: number; total: number }
+}
+
+export const rhythmApi = {
+  getVolume: adaptApi.getVolume,
+  analyze: (pid: string, volNo: number) =>
+    req<{ ok: boolean; blueprint: RhythmBlueprint; density_map: DensityMap; is_mock?: boolean }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/rhythm/analyze`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+  get: (pid: string, volNo: number) =>
+    req<{ volume: any; blueprint: RhythmBlueprint | null; density_map: DensityMap }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/rhythm`,
+    ),
+  finalize: (pid: string, volNo: number) =>
+    req<{ ok: boolean; stage_completed: Record<string, boolean>; volume: any }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/rhythm/finalize`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+}
+

@@ -11,6 +11,7 @@ import ModuleAdaptView from './ModuleAdaptView.vue'
 import CocSimView from './CocSimView.vue'
 import EmbodyView from './EmbodyView.vue'
 import DungeonScaffoldView from './DungeonScaffoldView.vue'
+import RhythmView from './RhythmView.vue'
 import {
   currentProjectId,
   currentPhase,
@@ -161,6 +162,13 @@ defineExpose({ refresh: loadPhase })
           <!-- scaffold 阶段：副本详设 6 卡 -->
           <DungeonScaffoldView
             v-else-if="phase === 'scaffold'"
+            :vol-no="currentVolumeNo"
+            @done="loadPhase"
+          />
+
+          <!-- rhythm 阶段：节奏骨架 -->
+          <RhythmView
+            v-else-if="phase === 'rhythm'"
             :vol-no="currentVolumeNo"
             @done="loadPhase"
           />

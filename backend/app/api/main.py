@@ -4366,3 +4366,14 @@ register_scaffold_routes(
     chore_provider=_chore_provider,
 )
 
+# ============================================================
+# 节奏骨架（rhythm）7 天强度曲线 + 章节分配
+# ============================================================
+from .rhythm_routes import register_rhythm_routes
+register_rhythm_routes(
+    app,
+    require_project=_require_project,
+    volumes_for=_volumes_for,
+    chore_provider=_chore_provider,
+)
+

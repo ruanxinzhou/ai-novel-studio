@@ -343,6 +343,8 @@ class VolumeStore:
             # Task 8：副本详设 6 卡
             "death_nodes", "climax_nodes", "clue_nodes",
             "pasted_nodes", "scaffold_cards",
+            # Task 9：节奏骨架
+            "rhythm_blueprint",
             "stage_completed",
         }
         # 这些字段允许显式传 None 来清空重跑
@@ -351,7 +353,8 @@ class VolumeStore:
         _allow_falsey = {"death_nodes", "climax_nodes", "clue_nodes",
                          "pasted_nodes", "scaffold_cards", "stage_completed",
                          "satisfaction_beats", "foreshadows_to_plant",
-                         "bonds_to_deepen", "gods_to_hint"}
+                         "bonds_to_deepen", "gods_to_hint",
+                         "rhythm_blueprint"}
         for k, val in kwargs.items():
             if k not in planning_fields:
                 continue
