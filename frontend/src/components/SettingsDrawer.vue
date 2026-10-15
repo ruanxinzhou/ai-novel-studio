@@ -452,7 +452,7 @@ function layerCompleted(layer: string): boolean {
           </div>
         </div>
         <div class="btn-row" style="margin-top: 8px">
-          <el-tooltip content="技能编辑器将在 Task 14 从旧 WorkshopView 迁移" placement="top">
+          <el-tooltip content="技能编辑器规划中" placement="top">
             <el-button size="small" disabled>查看/编辑模块</el-button>
           </el-tooltip>
         </div>

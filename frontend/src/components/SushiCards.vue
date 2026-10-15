@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 回转寿司：N 份并排候选 → 选一份 → 进入编辑 → AI 改一版 / 手动改 / 锁定
 // 支持两种模式：
-//   - diverge（默认）：编辑流程（出 N 盘→选一盘→进入 AI 改稿→锁定），向后兼容 SessionView
+//   - diverge（默认）：编辑流程（出 N 盘→选一盘→进入 AI 改稿→锁定），向后兼容旧 diverge 编辑流
 //   - ensemble        ：通用 N 选 1 只读对比面板（pdf5/coc/outline5 等批量产出展示）
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
