@@ -161,16 +161,30 @@ def _determine_phase(pid: str) -> dict:
                 "is_last_chapter": False,
             }
 
-    # 5. 日更 desk：存在未定稿章
+    # 5. 日更：存在未定稿章
     unfinished = [no for no in all_chapter_nos if not bool(desk.get(no) and desk.get(no).finalized_at)]
     if unfinished:
-        # brief/章节属性防御（Task 2 才加 brief 字段，这里 getattr 防御）
-        # 对于没有 brief 的旧数据，未定稿章直接进 desk
         earliest = min(unfinished)
         max_ch = max(all_chapter_nos) if all_chapter_nos else 0
         ch = desk.get(earliest)
-        ch_has_brief = bool(getattr(ch, "brief", None)) if ch else False
-        # 有 brief 属性且非空时才需要特别判断；目前无 brief 字段，直接进 desk
+        # 间章（is_interlude）直接进 desk，不经过章前 5 分钟
+        if ch and ch.is_interlude:
+            return {
+                "phase": "desk",
+                "volume_no": last_vol.volume_no,
+                "volume_kind": last_vol.volume_kind,
+                "chapter_no": earliest,
+                "is_last_chapter": (earliest == max_ch),
+            }
+        # 章前 5 分钟卡：未定稿章没有 brief.selected → 先到 briefing 阶段
+        if ch and not (ch.brief and isinstance(ch.brief, dict) and ch.brief.get("selected")):
+            return {
+                "phase": "briefing",
+                "volume_no": last_vol.volume_no,
+                "volume_kind": last_vol.volume_kind,
+                "chapter_no": earliest,
+                "is_last_chapter": (earliest == max_ch),
+            }
         return {
             "phase": "desk",
             "volume_no": last_vol.volume_no,

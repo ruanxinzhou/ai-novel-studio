@@ -3503,68 +3503,13 @@ def session_action(pid: str, sid: str, body: SessionActionIn) -> dict:
         return {"ok": True, "session": s.as_dict(), "variants": variants}
 
     if body.action == "daily_summon":
-        if phase != "daily_write":
-            raise HTTPException(status_code=422, detail="只有日更阶段可以召唤")
-        # 桩实现：返回三个短小选项
-        options = [
-            "从唐迟的一个小动作切入（比如摸伞骨/数呼吸），再推进情节",
-            "用环境的小异常先给读者一个预警，再让唐迟进入下一个场景",
-            "让一个 NPC 突然说一句有两层意思的话，把钩子埋下去",
-        ]
-        s.add_message("ai", "三个小方向，挑一个（或都不用）：\n" +
-                      "\n".join(f"{i+1}. {o}" for i, o in enumerate(options)),
-                      kind="suggestion", meta={"phase": phase, "action": "daily_summon"})
-        ss.save(s)
-        return {"ok": True, "session": s.as_dict(), "options": options}
+        return {"status": "construction", "message": "日更召唤建设中，后续版本接入 AI 卡壳建议"}
 
     if body.action == "walkthrough_step":
-        if phase != "walkthrough":
-            raise HTTPException(status_code=422, detail="只有走查阶段可以朗读")
-        # 桩实现
-        s.add_message("ai",
-                      "（走查·桩）AI 会按 Day1→Day7 + 间章逐段朗读骨架，"
-                      "作者可以随时喊停修改；完整版接入真实 LLM 后开放。",
-                      kind="narration", meta={"phase": phase, "action": "walkthrough_step"})
-        ss.save(s)
-        return {"ok": True, "session": s.as_dict()}
+        return {"status": "construction", "message": "走查朗读建设中"}
 
     if body.action == "plan_chapters":
-        """schedule 阶段：根据 truth_outline 生成一份初始 chapter_plan（桩实现，后续接真实 LLM）。
-        真实版本：按 Day+间章自动拆章，给每章 title/summary/字数/钩子/伏笔回收。"""
-        if phase != "schedule":
-            raise HTTPException(status_code=422, detail="只有排期阶段可以拆章")
-        truth = (s.outputs.get("truth_outline") or "").strip()
-        if not truth:
-            raise HTTPException(status_code=422, detail="先完成骨架的「Day1-7 真相梗概」才能拆章")
-        # 桩：给一个 9 章模板（Day1-3 章 + Day4-5 章 + Day6-7 章 + 间章）；真实版用 LLM 按 truth 拆
-        existing = _desk_for(pid).all_nos()
-        start_no = (max(existing) + 1) if existing else 1
-        plan = []
-        titles = [
-            ("D1·陌生躯壳", "唐迟醒来确认换身、线索三件套、发现七日死线"),
-            ("D1·茶馆铁观音", "茶馆三人对质、朱砂纸发热、章末'拍到了'钩子"),
-            ("D2·", "Day2 开端（待填）"),
-            ("D3·", "Day3 中段（待填）"),
-            ("D4·", "Day4 转折（待填）"),
-            ("D5·", "Day5 第一个高潮（待填）"),
-            ("D6·", "Day6 代价升级（待填）"),
-            ("D7·讣告兑现", "第七日死线收网"),
-            ("间章·归来", "回到出租屋、煤球、账本"),
-        ]
-        for i, (t, summ) in enumerate(titles):
-            plan.append({
-                "no": start_no + i,
-                "title": t,
-                "day": "D1" if i < 2 else f"D{i+1}" if i < 8 else "interlude",
-                "summary": summ,
-            })
-        s.set_output("chapter_plan", plan)
-        s.add_message("ai",
-                      "（拆章·桩）我按 Day1→Day7+间章先给了一份 9 章模板，你可以改/合并/拆分。"
-                      "改完点右侧「锁定章节表」就会在章台建好章位。",
-                      kind="plan", meta={"phase": phase, "action": "plan_chapters", "plan_count": len(plan)})
-        ss.save(s)
-        return {"ok": True, "session": s.as_dict(), "plan": plan}
+        return {"status": "deprecated", "message": "plan_chapters 已废弃，章前5分钟（brief）替代一次性拆章；请通过 /workbench 新流程逐章生成 brief"}
 
     raise HTTPException(status_code=422, detail=f"未知 action：{body.action}")
 
@@ -4323,5 +4268,24 @@ register_phase_routes(
     volumes_for=_volumes_for,
     desk_for=_desk_for,
     book_cards=_BookStoreCls.CARDS,
+)
+
+# ============================================================
+# 杀青归账（settle）+ 章前卡（brief）路由
+# ============================================================
+from .settle_routes import register_settle_routes
+from .brief_routes import register_brief_routes
+register_settle_routes(
+    app,
+    require_project=_require_project,
+    volumes_for=_volumes_for,
+    desk_for=_desk_for,
+    entities_for=_entities_for,
+)
+register_brief_routes(
+    app,
+    require_project=_require_project,
+    volumes_for=_volumes_for,
+    desk_for=_desk_for,
 )
 

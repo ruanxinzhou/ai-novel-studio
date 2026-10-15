@@ -170,6 +170,35 @@ def _work(text: str, run_id: str = "") -> dict:
 
 
 @dataclass
+class Scene:
+    """章内单场（M4 plot 回转寿司使用，M1 先建字段）。"""
+    idx: int
+    summary: str = ""
+    emotion: str = ""
+    hook: str = ""
+    pov: str = "唐迟"
+    target_words: int = 600
+    status: str = "planned"   # planned | editing | locked
+    locked_at: str = ""
+    locked_by_msg_id: str | None = None
+
+    def as_dict(self) -> dict: return asdict(self)
+    @classmethod
+    def from_dict(cls, d: dict) -> "Scene":
+        return cls(
+            idx=int(d.get("idx", 0) or 0),
+            summary=str(d.get("summary", "") or ""),
+            emotion=str(d.get("emotion", "") or ""),
+            hook=str(d.get("hook", "") or ""),
+            pov=str(d.get("pov", "唐迟") or "唐迟"),
+            target_words=int(d.get("target_words", 600) or 600),
+            status=str(d.get("status", "planned") or "planned"),
+            locked_at=str(d.get("locked_at", "") or ""),
+            locked_by_msg_id=d.get("locked_by_msg_id"),
+        )
+
+
+@dataclass
 class ChapterWork:
     no: int
     title: str = ""
@@ -180,12 +209,27 @@ class ChapterWork:
     finalized_at: str = ""
     payoff: str = ""                             # 本章兑现规模：none/small/medium/climax，空=未记录
     strands: list[str] = field(default_factory=list)  # 本章推进的线：quest/fire/bond 多选，空=未记录
+    # 书化字段（《第七日的亡者》四层结构）
+    field_no: int | None = None                  # 所属场号（None = 未分配到具体场）
+    day: int | None = None                       # 1-7 戏内七日；None = 现实间章 / 未分配
+    is_interlude: bool = False                   # 是否现实间章
+    interlude_kind: str = ""                     # 间章类型：爽点/羁绊/伏笔/污染征兆/杀青账
+    # M1 新增
+    scenes: list[Scene] = field(default_factory=list)
+    state_snapshot_at_lock: dict = field(default_factory=dict)  # 定稿时刻实体状态快照
+    # 章前 5 分钟卡：{direction, hooks, carryover, entities_present} 或 AI 3 张方向卡选中结果
+    brief: dict | None = None
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d["scenes"] = [s.as_dict() for s in self.scenes]
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "ChapterWork":
+        fn = d.get("field_no")
+        dy = d.get("day")
+        brief_raw = d.get("brief")
         return cls(
             no=int(d["no"]), title=str(d.get("title", "") or ""),
             plot=dict(d.get("plot") or {}), draft=dict(d.get("draft") or {}),
@@ -193,6 +237,13 @@ class ChapterWork:
             finalized_at=str(d.get("finalized_at", "") or ""),
             payoff=str(d.get("payoff", "") or ""),
             strands=[s for s in (d.get("strands") or []) if s in STRANDS],
+            field_no=(int(fn) if fn is not None else None),
+            day=(int(dy) if dy is not None else None),
+            is_interlude=bool(d.get("is_interlude", False)),
+            interlude_kind=str(d.get("interlude_kind", "") or ""),
+            scenes=[Scene.from_dict(s) for s in (d.get("scenes") or [])],
+            state_snapshot_at_lock=dict(d.get("state_snapshot_at_lock") or {}),
+            brief=(brief_raw if isinstance(brief_raw, dict) else None),
         )
 
 
@@ -249,6 +300,23 @@ class DeskStore:
         self._flush()
         return work
 
+    def set_brief(self, no: int, brief: dict | None) -> ChapterWork:
+        """整章写入章前 5 分钟卡；传 None 清空。"""
+        work = self.ensure(no)
+        work.brief = brief if brief else None
+        self._flush()
+        return work
+
+    def update_brief_field(self, no: int, **updates) -> ChapterWork:
+        """PATCH 章前卡字段（与前端 partial update 对齐）。"""
+        work = self.ensure(no)
+        if not isinstance(work.brief, dict):
+            work.brief = {}
+        for k, v in updates.items():
+            work.brief[k] = v
+        self._flush()
+        return work
+
     def mark_finalized(self, no: int) -> ChapterWork:
         work = self.ensure(no)
         work.finalized_at = _now()
@@ -271,5 +339,72 @@ class DeskStore:
             raise ValueError(f"未知线标签：{bad}（可选 {STRANDS}）")
         work = self.ensure(no)
         work.strands = list(dict.fromkeys(strands))   # 去重保序
+        self._flush()
+        return work
+
+    def assign_field(self, no: int, field_no: int | None,
+                     day: int | None = None, is_interlude: bool = False,
+                     interlude_kind: str = "") -> ChapterWork:
+        """绑定本章到某场某日（或标记为间章）；day=None 且 is_interlude=True 即现实间章。"""
+        work = self.ensure(no)
+        work.field_no = field_no
+        if is_interlude:
+            work.is_interlude = True
+            work.day = None
+            work.interlude_kind = interlude_kind or work.interlude_kind
+        else:
+            work.is_interlude = False
+            work.interlude_kind = ""
+            work.day = day if day is not None and 1 <= day <= 7 else None
+        self._flush()
+        return work
+
+    # ---- M1 新增：场次锁 + 状态快照 ----
+
+    def _find_scene(self, work: ChapterWork, idx: int) -> Scene:
+        for s in work.scenes:
+            if s.idx == idx:
+                return s
+        raise ValueError(f"章{work.no}不存在场{idx}")
+
+    def ensure_scene(self, no: int, idx: int, summary: str = "",
+                     emotion: str = "", hook: str = "",
+                     pov: str = "唐迟", target_words: int = 600) -> Scene:
+        work = self.ensure(no)
+        for s in work.scenes:
+            if s.idx == idx:
+                if summary:
+                    s.summary = summary
+                if emotion:
+                    s.emotion = emotion
+                if hook:
+                    s.hook = hook
+                if pov:
+                    s.pov = pov
+                if target_words:
+                    s.target_words = target_words
+                self._flush()
+                return s
+        s = Scene(idx=idx, summary=summary, emotion=emotion, hook=hook,
+                  pov=pov, target_words=target_words, status="planned")
+        work.scenes.append(s)
+        work.scenes.sort(key=lambda x: x.idx)
+        self._flush()
+        return s
+
+    def lock_scene(self, no: int, idx: int, summary: str,
+                   source_msg_id: str | None = None) -> Scene:
+        work = self.ensure(no)
+        s = self._find_scene(work, idx)
+        s.summary = summary
+        s.status = "locked"
+        s.locked_at = _now()
+        s.locked_by_msg_id = source_msg_id
+        self._flush()
+        return s
+
+    def save_snapshot(self, no: int, snapshot: dict) -> ChapterWork:
+        work = self.ensure(no)
+        work.state_snapshot_at_lock = dict(snapshot)
         self._flush()
         return work
