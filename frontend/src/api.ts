@@ -1414,4 +1414,109 @@ export const adaptApi = {
       `/api/projects/${pid}/workbench/volumes/${volNo}/stage-complete`,
       { method: 'POST', body: JSON.stringify({ stage }) },
     ),
+
+  /** PATCH 卷（支持 simulated_run=null 清空重跑） */
+  patchVolume: (pid: string, volNo: number, body: Record<string, unknown>) =>
+    req<{ ok: boolean; volume: any }>(
+      `/api/projects/${pid}/volumes/${volNo}`,
+      { method: 'PATCH', body: JSON.stringify(body) },
+    ),
+}
+
+// ---- 工作台 simulate 阶段：3 场并行 COC → 单选/拼贴 ----
+
+export interface SimStartBody {
+  user_directive?: string
+  max_pairs_per_session?: number
+  max_turns_per_session?: number
+  tangchi_replace_idx?: number | null
+}
+
+export interface SimVariant {
+  label?: string
+  index?: number
+  flavor?: string
+  one_liner?: string
+  full_log?: string
+  [k: string]: unknown
+}
+
+export interface SimCollageSelection {
+  section: string
+  from_index: number
+  note?: string
+}
+
+export const simulateApi = {
+  /** 复用 adaptApi.getVolume */
+  getVolume: adaptApi.getVolume,
+
+  /** 清空 simulated_run 以重跑 */
+  resetRun: (pid: string, volNo: number) =>
+    adaptApi.patchVolume(pid, volNo, { simulated_run: null }),
+
+  /** 启动 3 场并行 COC 仿真 */
+  startSim: (pid: string, volNo: number, body: SimStartBody) =>
+    req<{ ok: boolean; job_id: string; job: Job }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/simulate/start`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  /** 列出该卷下所有 simulate jobs */
+  listJobs: (pid: string, volNo: number) =>
+    req<{ jobs: Job[] }>(`/api/projects/${pid}/workbench/volumes/${volNo}/simulate/jobs`),
+
+  /** 订阅 simulate SSE 流 */
+  subscribeJobs: (
+    pid: string,
+    volNo: number,
+    onEvent: (ev: {
+      type: 'job_update' | 'job_update_batch' | 'job_idle'
+      job?: Job
+      jobs?: Job[]
+    }) => void,
+  ) => {
+    const url = `/api/projects/${pid}/workbench/volumes/${volNo}/simulate/stream`
+    const es = new EventSource(url)
+    const handle = (type: 'job_update' | 'job_update_batch' | 'job_idle') => (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data)
+        if (type === 'job_update') onEvent({ type, job: data as Job })
+        else if (type === 'job_update_batch') onEvent({ type, jobs: Array.isArray(data) ? data : [] })
+        else onEvent({ type })
+      } catch { /* ignore parse errors */ }
+    }
+    es.addEventListener('job_update', handle('job_update'))
+    es.addEventListener('job_update_batch', handle('job_update_batch'))
+    es.addEventListener('job_idle', handle('job_idle'))
+    es.onerror = () => { /* 静默，浏览器自动重连 */ }
+    return {
+      close: () => { es.close() },
+    }
+  },
+
+  /** 单选一场作为主线 */
+  pickOne: (pid: string, volNo: number, jobId: string, pickIndex: number) =>
+    req<{ ok: boolean; volume: any }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/simulate/pick-one`,
+      { method: 'POST', body: JSON.stringify({ job_id: jobId, pick_index: pickIndex }) },
+    ),
+
+  /** 拼贴合成 */
+  collage: (
+    pid: string,
+    volNo: number,
+    body: {
+      job_id: string
+      collage: {
+        base_index: number
+        selections: SimCollageSelection[]
+        user_note?: string
+      }
+    },
+  ) =>
+    req<{ ok: boolean; volume: any }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/simulate/collage`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
 }

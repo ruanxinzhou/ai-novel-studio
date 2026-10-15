@@ -4093,6 +4093,7 @@ class VolumeUpdateIn(BaseModel):
     satisfaction_beats: list[str] | None = None
     endgame_layer_hints: dict | None = None
     adapted_module: str | None = None
+    simulated_run: dict | None = None
 
 
 class SettlePreviewIn(BaseModel):
@@ -4150,7 +4151,10 @@ def volumes_update(pid: str, vol_no: int, body: VolumeUpdateIn) -> dict:
     """更新卷规划板字段。"""
     _require_project(pid)
     vs = _volumes_for(pid)
+    # model_dump 默认 exclude_none，但 simulated_run 显式传 None 需要保留以清空
     kwargs = body.model_dump(exclude_none=True) if hasattr(body, "model_dump") else body.dict(exclude_none=True)
+    if body.simulated_run is None and "simulated_run" in body.model_fields_set:
+        kwargs["simulated_run"] = None
     try:
         v = vs.update_planning(vol_no, **kwargs)
     except ValueError as e:
@@ -4301,5 +4305,21 @@ register_adapt_routes(
     project_dir=_project_dir,
     chore_provider=_chore_provider,
     prompt_store=_prompt_store,
+)
+
+# ============================================================
+# 工作台 COC 并行跑团仿真（simulate）路由
+# ============================================================
+from .simulate_routes import register_simulate_routes
+register_simulate_routes(
+    app,
+    require_project=_require_project,
+    volumes_for=_volumes_for,
+    project_dir=_project_dir,
+    book_for=_book_for,
+    fields_for=_fields_for,
+    coc_run_for=_coc_run_for,
+    field_run_for=_field_run_for,
+    chore_provider=_chore_provider,
 )
 

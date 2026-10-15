@@ -8,6 +8,7 @@ import SettingsDrawer from '../components/SettingsDrawer.vue'
 import AIChatFloat from '../components/AIChatFloat.vue'
 import BookSetupView from './BookSetupView.vue'
 import ModuleAdaptView from './ModuleAdaptView.vue'
+import CocSimView from './CocSimView.vue'
 import {
   currentProjectId,
   currentPhase,
@@ -137,6 +138,13 @@ defineExpose({ refresh: loadPhase })
           <!-- adapt / adapt_empty 阶段：上传 PDF + 并行改编 + 选版 -->
           <ModuleAdaptView
             v-else-if="phase === 'adapt' || phase === 'adapt_empty'"
+            :vol-no="currentVolumeNo"
+            @done="loadPhase"
+          />
+
+          <!-- simulate 阶段：3场并行 COC 跑团 + 单选/拼贴 -->
+          <CocSimView
+            v-else-if="phase === 'simulate'"
             :vol-no="currentVolumeNo"
             @done="loadPhase"
           />

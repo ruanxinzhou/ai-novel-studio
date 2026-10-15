@@ -337,11 +337,13 @@ class VolumeStore:
             "title", "tone_arc", "planned_interludes", "foreshadows_to_plant",
             "bonds_to_deepen", "gods_to_hint", "contamination_goal",
             "satisfaction_beats", "endgame_layer_hints",
-            "adapted_module",
+            "adapted_module", "simulated_run",
         }
         for k, val in kwargs.items():
-            if k in planning_fields and val is not None:
-                setattr(v, k, val)
+            if k in planning_fields:
+                # simulated_run 允许显式传 None 来清空重跑
+                if val is not None or k == "simulated_run":
+                    setattr(v, k, val)
         self.save(v)
         return v
 
