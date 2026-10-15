@@ -16,7 +16,7 @@ import DeskView from './DeskView.vue'
 import SettleView from './SettleView.vue'
 import InterludeView from './InterludeView.vue'
 import ChapterBriefModal from '../components/ChapterBriefModal.vue'
-import { deskApi } from '../api'
+import { deskApi, volumesApi, adaptApi } from '../api'
 import {
   currentProjectId,
   currentPhase,
@@ -42,10 +42,11 @@ const PHASE_LABELS: Record<string, string> = {
 
 const bookTitle = ref('')
 const loading = ref(false)
-// TODO: Task 10 接入书脊真实数据
 const spineVolumes = ref<any[]>([])
-// TODO: Task 11 接 protagonist API 读取真实污染值
-const contamination = ref<number>(0)
+// 外部触发 StatusBar 刷新污染值（杀青后使用）
+const statusRefreshKey = ref(0)
+// 触发 SpineNav 重载
+const spineVolumesRefreshKey = ref(0)
 
 const phase = computed(() => currentPhase.value)
 const phaseLabel = computed(() => (PHASE_LABELS[phase.value] ?? phase.value) || '—')
@@ -125,6 +126,9 @@ async function loadPhase() {
     currentVolumeKind.value = d.volume_kind ?? 'dungeon'
     currentIsLastChapter.value = !!d.is_last_chapter
     if (d.book_title) bookTitle.value = d.book_title
+    // 阶段变化后刷新书脊 & 污染值
+    spineVolumesRefreshKey.value += 1
+    statusRefreshKey.value += 1
   } catch (e: any) {
     console.error('[HomeView] loadPhase failed:', e)
     ElMessage.error('加载项目阶段失败：' + (e?.message ?? e))
@@ -133,20 +137,95 @@ async function loadPhase() {
   }
 }
 
+// ---- SpineNav 书脊加载 ----
+async function loadSpine() {
+  const pid = currentProjectId.value
+  if (!pid) {
+    spineVolumes.value = []
+    return
+  }
+  try {
+    // 并发拉 volumes 列表 + desk 详情
+    const [volRes, deskRes] = await Promise.all([
+      volumesApi.list(pid).catch(() => ({ volumes: [], total: 0 })),
+      deskApi.detail(pid).catch(() => ({ chapters: [], volumes: [] })),
+    ])
+    const vols = (volRes as any).volumes ?? []
+    const chapters = (deskRes as any).chapters ?? []
+    // 按 field_no 把章分组到卷；volume_no → chapters[]
+    const volsByField = new Map<number, any>()
+    for (const v of vols) {
+      volsByField.set(v.field_no, v)
+    }
+    // 兼容：若没 field_no（老数据），按 volume_no 顺序归组
+    const orderedVols = [...vols].sort((a: any, b: any) => a.volume_no - b.volume_no)
+    const chaptersByVol = new Map<number, any[]>()
+    let interludeFlag = new Set<number>()
+    for (const v of orderedVols) {
+      if (v.volume_kind === 'interlude') interludeFlag.add(v.volume_no)
+      chaptersByVol.set(v.volume_no, [])
+    }
+    // 建立 field_no → volume_no 的映射
+    const fieldToVolNo = new Map<number, number>()
+    for (const v of orderedVols) {
+      if (v.field_no != null) fieldToVolNo.set(v.field_no, v.volume_no)
+    }
+    for (const c of chapters) {
+      let targetVol = 0
+      if (c.field_no != null && fieldToVolNo.has(c.field_no)) {
+        targetVol = fieldToVolNo.get(c.field_no)!
+      } else {
+        // fallback：把章按数量近似分配到最后一卷
+        if (orderedVols.length > 0) targetVol = orderedVols[orderedVols.length - 1].volume_no
+      }
+      if (targetVol > 0) {
+        if (!chaptersByVol.has(targetVol)) chaptersByVol.set(targetVol, [])
+        chaptersByVol.get(targetVol)!.push(c)
+      }
+    }
+    // 再拉每个 volume 的详细信息拿 contamination & 标题
+    const detailedVols = await Promise.all(
+      orderedVols.map(async (v: any) => {
+        try {
+          const full = await adaptApi.getVolume(pid, v.volume_no)
+          return { ...v, ...(full.volume || {}) }
+        } catch {
+          return v
+        }
+      }),
+    )
+    spineVolumes.value = detailedVols.map((v: any) => {
+      const chs = (chaptersByVol.get(v.volume_no) || []).sort((a: any, b: any) => a.no - b.no)
+      const isInterlude = v.volume_kind === 'interlude'
+      return {
+        no: v.volume_no,
+        title: v.title || (isInterlude ? '蓝星间章' : '新副本'),
+        icon: isInterlude ? '🌌' : '📕',
+        contamination:
+          v.settle?.contamination_after ??
+          v.settle?.contamination_delta ??
+          v.protagonist_snapshot?.contamination_level ??
+          0,
+        chapters: chs.map((c: any) => ({
+          no: c.no,
+          title: c.title || '（未命名）',
+          finalized: !!c.finalized_at,
+          brief: (c.outline_preview || '').slice(0, 40),
+        })),
+      }
+    })
+  } catch (e: any) {
+    console.debug('[HomeView] loadSpine failed:', e)
+  }
+}
+
+watch(spineVolumesRefreshKey, loadSpine)
+
 async function onAddVolume() {
   const pid = currentProjectId.value
   if (!pid) return
   try {
-    const r = await fetch(`/api/projects/${pid}/workbench/volumes`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: '' }),
-    })
-    if (!r.ok) {
-      const detail = await r.json().catch(() => ({}))
-      throw new Error(detail.detail ?? `${r.status}`)
-    }
-    const d = await r.json()
+    const d = await volumesApi.createDungeon(pid, '')
     ElMessage.success(`已创建第 ${d.volume_no} 卷`)
     await loadPhase()
   } catch (e: any) {
@@ -159,14 +238,23 @@ function onGoSetup() {
 }
 
 function onSelectVolume(no: number) {
-  console.log('[SpineNav] selectVolume', no)
+  console.debug('[SpineNav] selectVolume', no)
+  ElMessage.info('卷目浏览暂不支持切回旧卷，将在后续版本开放')
 }
 function onSelectChapter(vn: number, cn: number) {
-  console.log('[SpineNav] selectChapter', vn, cn)
+  console.debug('[SpineNav] selectChapter', vn, cn)
+  ElMessage.info('卷目浏览暂不支持切回旧卷，将在后续版本开放')
+}
+
+function onChatRefresh() {
+  console.debug('[AIChatFloat] refresh requested')
+  ElMessage.info('已请求重新生成')
 }
 
 onMounted(() => {
-  if (currentProjectId.value) loadPhase()
+  if (currentProjectId.value) {
+    loadPhase()
+  }
 })
 
 watch(currentProjectId, () => {
@@ -175,7 +263,12 @@ watch(currentProjectId, () => {
     currentPhase.value = ''
     currentVolumeNo.value = 0
     currentChapterNo.value = 0
+    spineVolumes.value = []
   }
+})
+
+watch(() => currentVolumeNo.value, () => {
+  spineVolumesRefreshKey.value += 1
 })
 
 defineExpose({ refresh: loadPhase })
@@ -183,7 +276,7 @@ defineExpose({ refresh: loadPhase })
 
 <template>
   <div class="home-view">
-    <StatusBar :book-title="bookTitle" :contamination="contamination" />
+    <StatusBar :book-title="bookTitle" :refresh-key="statusRefreshKey" />
     <div class="home-body">
       <SpineNav
         :volumes="spineVolumes"
@@ -289,7 +382,7 @@ defineExpose({ refresh: loadPhase })
     </div>
 
     <SettingsDrawer />
-    <AIChatFloat />
+    <AIChatFloat @refresh="onChatRefresh" />
   </div>
 </template>
 

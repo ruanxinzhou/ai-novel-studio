@@ -40,6 +40,10 @@ const customText = ref('')
 // 就地编辑
 const editingIndex = ref<number | null>(null)
 const editingText = ref('')
+const editingVisible = computed({
+  get: () => editingIndex.value !== null,
+  set: (v: boolean) => { if (!v) editingIndex.value = null },
+})
 
 const BEAT_LABELS: Record<string, string> = {
   hook: '钩子章',
@@ -317,7 +321,7 @@ async function confirmSelect() {
     </el-dialog>
 
     <!-- 就地编辑对话框 -->
-    <el-dialog v-model="editingIndex !== null" title="✏️ 编辑这版方向" width="560px" append-to-body @close="editingIndex = null">
+    <el-dialog v-model="editingVisible" title="✏️ 编辑这版方向" width="560px" append-to-body @close="editingIndex = null">
       <el-input
         v-model="editingText"
         type="textarea"

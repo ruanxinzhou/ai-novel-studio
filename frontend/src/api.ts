@@ -1082,19 +1082,24 @@ export const jobsApi = {
   },
 }
 
-export const JOB_KIND_LABELS: Record<JobKind, string> = {
-  pdf5: 'PDF 5版改编',
+export const JOB_KIND_LABELS: Record<string, string> = {
+  pdf_adapt5: 'PDF 5版改编',
   coc_batch: 'COC 三场模拟',
   outline5: '唐迟大纲 5版',
 }
 
 export const PHASE_TITLES: Record<string, string> = {
-  settle_up: '杀青间章',
-  kindle: '副本点火',
-  scaffold: '跑团与大纲',
-  walkthrough: '章节细纲',
-  schedule: '章节分配',
-  daily_write: '日更',
+  setup: '开书设定',
+  adapt: '剧本改编',
+  adapt_empty: '新卷待改',
+  simulate: '模拟跑团',
+  embody: '魂穿设计',
+  scaffold: '卷内详设',
+  rhythm: '节奏骨架',
+  briefing: '章前规划',
+  desk: '日更',
+  settle: '杀青归账',
+  interlude: '蓝星间章',
 }
 export const AI_MODE_LABELS: Record<string, string> = {
   review: '列账',
@@ -2021,5 +2026,13 @@ export const interludeApi = {
       `/api/projects/${pid}/workbench/volumes/${volNo}/interlude/finalize`,
       { method: 'POST', body: JSON.stringify({}) },
     ),
+}
+
+// ---- volumesApi 快捷封装 ----
+export const volumesApi = {
+  list: (pid: string) => req<{ volumes: any[]; total: number }>(`/api/projects/${pid}/volumes`),
+  latest: (pid: string) => req<{ volume: any | null }>(`/api/projects/${pid}/volumes/latest`),
+  get: (pid: string, volNo: number) => adaptApi.getVolume(pid, volNo),
+  createDungeon: (pid: string, title = '') => adaptApi.createVolume(pid, title),
 }
 

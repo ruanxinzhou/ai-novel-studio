@@ -1,10 +1,18 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
+import { ElMessage } from 'element-plus'
 import { ChatDotRound, Close } from '@element-plus/icons-vue'
 import { currentPhase } from '../state'
 
+const emit = defineEmits<{
+  (e: 'refresh'): void
+}>()
+
 const open = ref(false)
 const inputText = ref('')
+const msgList = ref<Array<{ role: 'ai' | 'user'; text: string }>>([
+  { role: 'ai', text: '你好！有什么想聊的，随时告诉我。' },
+])
 
 const PHASE_HINTS: Record<string, { hint: string; shortcuts: string[] }> = {
   setup: {
@@ -55,7 +63,7 @@ const PHASE_HINTS: Record<string, { hint: string; shortcuts: string[] }> = {
 
 const phaseInfo = computed(() => {
   return PHASE_HINTS[currentPhase.value] ?? {
-    hint: '我是 AI 聊一谈，随时可以和我讨论剧情、设定或写作问题。',
+    hint: '我是 AI 聊一聊，随时可以和我讨论剧情、设定或写作问题。',
     shortcuts: ['帮我润色一段', '检查逻辑漏洞', '生成灵感'],
   }
 })
@@ -68,17 +76,44 @@ function useShortcut(text: string) {
   inputText.value = text
 }
 
+function doRefresh() {
+  console.debug('[AIChatFloat] refresh requested for phase', currentPhase.value)
+  emit('refresh')
+  ElMessage.info('已请求重新生成')
+}
+
+function doNote() {
+  inputText.value = '记一笔：'
+}
+
+const msgListEl = ref<HTMLElement | null>(null)
+
+async function scrollToBottom() {
+  await nextTick()
+  if (msgListEl.value) {
+    msgListEl.value.scrollTop = msgListEl.value.scrollHeight
+  }
+}
+
 function send() {
-  // TODO: Task 后续接入 sessionsApi.send，这里暂不处理
-  console.log('[AIChatFloat] send TODO:', inputText.value)
+  const text = inputText.value.trim()
+  if (!text) return
+  msgList.value.push({ role: 'user', text })
+  inputText.value = ''
+  scrollToBottom()
+  // mock 回复
+  setTimeout(() => {
+    msgList.value.push({ role: 'ai', text: '这个问题我记下了，稍后帮你处理~' })
+    scrollToBottom()
+  }, 1000)
 }
 
 function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
-    // 回车暂不发送，等接好 API 后再放开
-    // send()
+    send()
   }
+  // Shift+Enter 默认行为是换行，不需要处理
 }
 </script>
 
@@ -87,7 +122,7 @@ function onKeydown(e: KeyboardEvent) {
     <Transition name="fade">
       <div v-if="open" class="ai-panel">
         <div class="ai-panel-header">
-          <span>💬 AI 聊一谈</span>
+          <span>💬 AI 聊一聊</span>
           <el-button :icon="Close" circle size="small" text @click="open = false" />
         </div>
         <div class="ai-panel-body">
@@ -106,10 +141,31 @@ function onKeydown(e: KeyboardEvent) {
             >
               {{ s }}
             </el-tag>
+            <el-tag
+              class="sc-tag action-tag"
+              effect="plain"
+              type="warning"
+              @click="doRefresh"
+            >
+              🔄 重新生成
+            </el-tag>
+            <el-tag
+              class="sc-tag action-tag"
+              effect="plain"
+              type="success"
+              @click="doNote"
+            >
+              📝 帮我记一笔
+            </el-tag>
           </div>
-          <div class="ai-msg-list">
-            <div class="ai-msg ai">
-              <div class="ai-msg-bubble">你好！有什么想聊的，随时告诉我。</div>
+          <div class="ai-msg-list" ref="msgListEl">
+            <div
+              v-for="(m, idx) in msgList"
+              :key="idx"
+              class="ai-msg"
+              :class="m.role"
+            >
+              <div class="ai-msg-bubble">{{ m.text }}</div>
             </div>
           </div>
         </div>
@@ -205,6 +261,9 @@ function onKeydown(e: KeyboardEvent) {
 .sc-tag:hover {
   background: #ecf5ff;
 }
+.action-tag:hover {
+  opacity: 0.85;
+}
 .ai-msg-list {
   display: flex;
   flex-direction: column;
@@ -216,6 +275,9 @@ function onKeydown(e: KeyboardEvent) {
 .ai-msg.ai {
   justify-content: flex-start;
 }
+.ai-msg.user {
+  justify-content: flex-end;
+}
 .ai-msg-bubble {
   max-width: 80%;
   padding: 8px 12px;
@@ -224,6 +286,13 @@ function onKeydown(e: KeyboardEvent) {
   line-height: 1.5;
   background: #fff;
   border: 1px solid #ebeef5;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.ai-msg.user .ai-msg-bubble {
+  background: #409eff;
+  color: #fff;
+  border-color: #409eff;
 }
 .ai-panel-footer {
   border-top: 1px solid #ebeef5;
