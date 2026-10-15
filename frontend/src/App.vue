@@ -1,24 +1,24 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
-import CorpusView from './views/CorpusView.vue'
-import DeskView from './views/DeskView.vue'
-import EntitiesView from './views/EntitiesView.vue'
-import ImportView from './views/ImportView.vue'
-import MarkersView from './views/MarkersView.vue'
-import PipelineView from './views/PipelineView.vue'
-import ProjectsView from './views/ProjectsView.vue'
-import ProjectView from './views/ProjectView.vue'
-import SkillsView from './views/SkillsView.vue'
-import WizardView from './views/WizardView.vue'
-import WorkshopView from './views/WorkshopView.vue'
-import { projectsApi, type ProjectMeta } from './api'
-import { activeTab, currentProjectId } from './state'
+import { onMounted, ref } from 'vue'
+import HomeView from './views/HomeView.vue'
+import { currentProjectId } from './state'
+
+interface ProjectMeta {
+  id: string
+  title: string
+  intro: string
+  created_at: string
+  updated_at: string
+}
 
 const projects = ref<ProjectMeta[]>([])
 
 async function refreshProjects() {
   try {
-    projects.value = (await projectsApi.list()).projects
+    const r = await fetch('/api/projects')
+    const d = await r.json()
+    // 兼容后端返回 {projects:[...]} 或直接数组
+    projects.value = d.projects || (Array.isArray(d) ? d : [])
     if (currentProjectId.value && !projects.value.some((p) => p.id === currentProjectId.value)) {
       currentProjectId.value = ''
     }
@@ -26,53 +26,82 @@ async function refreshProjects() {
     projects.value = []
   }
 }
-onMounted(refreshProjects)
-// 管理页新建/删除/进入后，顶部下拉同步刷新
-watch(currentProjectId, () => refreshProjects())
+
+onMounted(() => {
+  refreshProjects()
+})
 </script>
 
 <template>
-  <el-container style="max-width: 1400px; margin: 0 auto; padding: 16px">
-    <el-header style="height: auto; padding: 0 0 12px">
-      <div style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap">
-        <h1 style="margin: 0; font-size: 22px">Novel Studio</h1>
-        <el-select
-          v-model="currentProjectId"
-          placeholder="快速切换小说项目"
-          style="width: 240px"
-          clearable
-          filterable
-        >
-          <el-option v-for="p in projects" :key="p.id" :value="p.id" :label="`《${p.title}》`" />
-        </el-select>
-        <span style="color: #888; font-size: 13px">主路：向导开书 · 章台日更；高级工具保留侧门</span>
-      </div>
-      <el-tabs v-model="activeTab" style="margin-top: 8px">
-        <el-tab-pane label="项目管理" name="projects" />
-        <el-tab-pane label="创作向导" name="wizard" />
-        <el-tab-pane label="今日章台" name="desk" />
-        <el-tab-pane label="创作导航" name="project" />
-        <el-tab-pane label="实体库" name="entities" />
-        <el-tab-pane label="导入拆解" name="import" />
-        <el-tab-pane label="运行台" name="pipeline" />
-        <el-tab-pane label="审稿与标记" name="markers" />
-        <el-tab-pane label="Prompt 工坊" name="workshop" />
-        <el-tab-pane label="写作模块" name="skills" />
-        <el-tab-pane label="范文语料" name="corpus" />
-      </el-tabs>
-    </el-header>
-    <el-main style="padding: 0">
-      <ProjectsView v-show="activeTab === 'projects'" />
-      <WizardView v-show="activeTab === 'wizard'" />
-      <DeskView v-show="activeTab === 'desk'" />
-      <ProjectView v-show="activeTab === 'project'" />
-      <EntitiesView v-show="activeTab === 'entities'" />
-      <ImportView v-show="activeTab === 'import'" />
-      <PipelineView v-show="activeTab === 'pipeline'" />
-      <MarkersView v-show="activeTab === 'markers'" />
-      <WorkshopView v-show="activeTab === 'workshop'" />
-      <SkillsView v-show="activeTab === 'skills'" />
-      <CorpusView v-show="activeTab === 'corpus'" />
-    </el-main>
-  </el-container>
+  <!-- 项目选择门 -->
+  <div v-if="!currentProjectId" class="project-gate">
+    <div class="gate-card">
+      <h1 class="gate-title">《第七日的亡者》· 写作间</h1>
+      <p class="gate-sub">选择一个小说项目开始工作</p>
+      <el-select
+        v-model="currentProjectId"
+        placeholder="选小说项目"
+        style="width: 320px"
+        size="large"
+        filterable
+      >
+        <el-option
+          v-for="p in projects"
+          :key="p.id"
+          :value="p.id"
+          :label="`《${p.title}》  (${p.id})`"
+        />
+      </el-select>
+      <p class="gate-hint" v-if="projects.length === 0">暂无项目，请先创建项目。</p>
+    </div>
+  </div>
+
+  <!-- 主界面 -->
+  <HomeView v-else />
 </template>
+
+<style>
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+#app {
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  color: #222;
+}
+</style>
+
+<style scoped>
+.project-gate {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #f5f7fa 0%, #e4ecfb 100%);
+}
+.gate-card {
+  background: #fff;
+  padding: 48px 56px;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
+  text-align: center;
+}
+.gate-title {
+  margin: 0 0 8px;
+  font-size: 24px;
+  color: #303133;
+}
+.gate-sub {
+  margin: 0 0 24px;
+  color: #909399;
+  font-size: 14px;
+}
+.gate-hint {
+  margin: 16px 0 0;
+  font-size: 12px;
+  color: #c0c4cc;
+}
+</style>
