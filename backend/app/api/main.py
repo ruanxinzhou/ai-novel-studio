@@ -1,4 +1,4 @@
-"""Novel Studio API 骨架（M0）：健康检查 + 通道状态 + 路由生成测试。
+﻿"""Novel Studio API 骨架（M0）：健康检查 + 通道状态 + 路由生成测试。
 
 M1-T5：Prompt 工坊（查看/编辑/重置/干跑）。
 """
@@ -6,15 +6,16 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import time
 from pathlib import Path
 from queue import Queue
-from typing import Iterator, Literal
+from typing import Any, Iterator, Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from ..config import REPO
+from .. import config as _config
 from ..context import Material, MaterialFamily
 from ..context.ledger import (
     build_state_materials,
@@ -26,7 +27,11 @@ from ..corpus import article_exists as corpus_article_exists
 from ..corpus import count as corpus_count
 from ..corpus import list_tags, list_types, search as corpus_search
 from ..corpus import replace_article as corpus_replace_article
-from ..entities import ENTITY_TYPES, TYPE_LABELS, EntityStore, extract_entities
+from ..entities import (
+    ENTITY_TYPES, TYPE_LABELS, EntityStore, PROTAGONIST_ID,
+    StateChange, StateDiff, ProtagonistState, Relation,
+    extract_entities,
+)
 from ..entities.vault import export_vault
 from ..generation import PROSE_TOKENS_PER_CHAR, complete_structured
 from ..importer import ImportJournal, analyze_chapter, split_import
@@ -35,13 +40,19 @@ from ..pipeline import (
     PipelineRunner,
     PromptStore,
     RunJournal,
+    apply_epilogue_to_book,
+    apply_entities,
+    apply_obsession_to_book,
+    apply_split_to_field,
+    apply_world_rules,
     compute_run_key,
     render_generation_messages,
+    run_field_node,
 )
 from ..pipeline.prompts import OUTPUT_CONTRACT, SYSTEM_CONTRACT
 from ..projects import ProjectStore
 from ..providers import Router, get_router
-from ..review import STATUS_PENDING, MarkerStore, review_chapter
+from ..review import STATUS_PENDING, MarkerStore, book_review_checks, review_chapter
 from ..review.markers import markers_material
 from ..skills import MODULES, available_modules, module_rules, skill_materials
 from ..wizard import (
@@ -50,6 +61,7 @@ from ..wizard import (
     STRANDS,
     STRAND_LABELS,
     DeskStore,
+    Scene,
     WizardStore,
     chapter_title_of,
     finalize_chapter,
@@ -60,15 +72,27 @@ from ..wizard import (
     run_chapter_stage,
     work_text,
 )
+from ..fields import DayWork
+from ..fields import FIELD_PIPELINE_NODES
+from ..fields import (
+    ALL_CARD_KEYS, SCAFFOLD_CARD_KEYS, SCHEDULE_CARD_KEY,
+    WALKTHROUGH_CARD_KEY, CardLock,
+)
 
 app = FastAPI(title="Novel Studio API", version="0.4.0")
 
-_prompt_store = PromptStore(persist_path=REPO / "backend" / "data" / "prompt_store.json")
-_marker_store = MarkerStore(REPO / "backend" / "data" / "markers.json")
-_project_store = ProjectStore(REPO / "backend" / "data" / "projects")
+_prompt_store = PromptStore(persist_path=_config.REPO / "backend" / "data" / "prompt_store.json")
+_marker_store = MarkerStore(_config.REPO / "backend" / "data" / "markers.json")
+_project_store = ProjectStore(_config.REPO / "backend" / "data" / "projects")
 
 _project_marker_stores: dict[str, MarkerStore] = {}
 _project_entity_stores: dict[str, EntityStore] = {}
+_project_book_stores: dict = {}     # pid -> BookStore (lazy)
+_project_field_stores: dict = {}    # pid -> FieldStore (lazy)
+_project_field_run_stores: dict = {}  # pid -> FieldRunStore (lazy)
+_project_coc_run_stores: dict = {}    # pid -> CocRunStore (lazy)
+_project_session_stores: dict = {}    # pid -> SessionStore (lazy)
+_project_volume_stores: dict = {}     # pid -> VolumeStore (lazy)
 
 
 def _markers_for(project: str | None) -> MarkerStore:
@@ -77,7 +101,7 @@ def _markers_for(project: str | None) -> MarkerStore:
         return _marker_store
     if project not in _project_marker_stores:
         _project_marker_stores[project] = MarkerStore(
-            REPO / "backend" / "data" / "projects" / project / "markers.json"
+            _config.REPO / "backend" / "data" / "projects" / project / "markers.json"
         )
     return _project_marker_stores[project]
 
@@ -93,9 +117,91 @@ def _entities_for(pid: str) -> EntityStore:
     """实体库按项目隔离；缓存实例避免重复读盘。"""
     if pid not in _project_entity_stores:
         _project_entity_stores[pid] = EntityStore(
-            REPO / "backend" / "data" / "projects" / pid / "entities.json"
+            _config.REPO / "backend" / "data" / "projects" / pid / "entities.json"
         )
     return _project_entity_stores[pid]
+
+
+def _project_dir(pid: str) -> Path:
+    return _config.REPO / "backend" / "data" / "projects" / pid
+
+
+def _book_for(pid: str):
+    """书级硬卡存储（惰性创建；book/ 目录自动生成默认卡）。"""
+    if pid not in _project_book_stores:
+        from ..book import BookStore
+        _project_book_stores[pid] = BookStore(_project_dir(pid) / "book")
+    return _project_book_stores[pid]
+
+
+def _fields_for(pid: str):
+    """场存储（惰性创建；fields/ 目录在首次写入时创建）。"""
+    if pid not in _project_field_stores:
+        from ..fields import FieldStore
+        _project_field_stores[pid] = FieldStore(_project_dir(pid) / "fields")
+    return _project_field_stores[pid]
+
+
+def _field_run_for(pid: str):
+    """场流水线节点中间产物存储（惰性创建）。"""
+    if pid not in _project_field_run_stores:
+        from ..fields import FieldRunStore
+        _project_field_run_stores[pid] = FieldRunStore(_project_dir(pid) / "fields" / "nodes")
+    return _project_field_run_stores[pid]
+
+
+def _coc_run_for(pid: str):
+    """COC 多轮跑团会话存储（惰性创建）。"""
+    if pid not in _project_coc_run_stores:
+        from ..fields import CocRunStore
+        _project_coc_run_stores[pid] = CocRunStore(_project_dir(pid) / "fields" / "coc")
+    return _project_coc_run_stores[pid]
+
+
+def _sessions_for(pid: str):
+    if pid not in _project_session_stores:
+        from ..sessions import SessionStore
+        _project_session_stores[pid] = SessionStore(_project_dir(pid) / "sessions")
+    return _project_session_stores[pid]
+
+
+def _volumes_for(pid: str):
+    """卷存储（惰性创建；volumes/ 目录自动建）。"""
+    if pid not in _project_volume_stores:
+        from ..book import VolumeStore
+        _project_volume_stores[pid] = VolumeStore(_project_dir(pid) / "volumes")
+    return _project_volume_stores[pid]
+
+
+class SessionCreateIn(BaseModel):
+    scope: str = "field"                # field | chapter
+    field_no: int | None = None
+    chapter: int | None = None
+    title: str = ""
+    start_phase: str | None = None
+
+
+class SessionSendIn(BaseModel):
+    text: str
+    kind: str = "chat"                 # chat | card_edit | answer
+    as_ai: bool = False                # true=AI 消息（测试/预置），false=作者
+    output_key: str | None = None      # 如果填了，把这段文本同时写入 outputs[key]
+    meta: dict | None = None
+
+
+class SessionGateIn(BaseModel):
+    key: str                           # 必填产物键
+    value: Any                         # 值（bool/str/dict/list）
+
+
+class SessionRollbackIn(BaseModel):
+    to_phase: str
+
+
+class SessionActionIn(BaseModel):
+    action: str                        # kindle_diverge | daily_summon | walkthrough_step | ...
+    args: dict | None = None           # 动作参数
+    n_variants: int = 3                # kindle_diverge 默认 3 个雏形
 
 
 class GenerateIn(BaseModel):
@@ -284,8 +390,8 @@ _FAMILIES = {"required": MaterialFamily.REQUIRED, "finalized": MaterialFamily.FI
 
 def _journal_path(run_id: str, project: str | None = None):
     if project:
-        return REPO / "backend" / "data" / "projects" / project / "runs" / f"{run_id}.json"
-    return REPO / "backend" / "data" / "runs" / f"{run_id}.json"
+        return _config.REPO / "backend" / "data" / "projects" / project / "runs" / f"{run_id}.json"
+    return _config.REPO / "backend" / "data" / "runs" / f"{run_id}.json"
 
 
 def _router_provider(step: str):
@@ -344,7 +450,8 @@ def _prepare_layer(layer: str, body: LayerRunIn) -> dict:
         if not body.project:
             raise HTTPException(status_code=422, detail="project_state 需要同时提供 project")
         state_mats = build_state_materials(
-            _project_store, _entities_for(body.project), _desk_for(body.project), body.project)
+            _project_store, _entities_for(body.project), _desk_for(body.project), body.project,
+            book_store=_book_for(body.project), field_store=_fields_for(body.project))
     if body.chapter_no is not None:
         marker_mat = markers_material(
             _markers_for(body.project).pending_for(body.chapter_no), body.chapter_no)
@@ -771,7 +878,60 @@ def project_adopt(pid: str, layer: str, body: AdoptIn) -> dict:
     if not body.y.strip():
         raise HTTPException(status_code=422, detail="采纳内容不能为空")
     v = _project_store.adopt(pid, layer, body.x_pairs, body.y, body.note)
+    # 采纳 outline 时同步章→场/日/间章绑定到 DeskStore，并维护 FieldStore 章分配
+    if layer == "outline":
+        _sync_outline_meta(pid, body.y)
     return v.as_dict()
+
+
+def _sync_outline_meta(pid: str, text: str) -> None:
+    """大纲采纳时：根据「第N场/第X天/现实」头，把 chapter 的 field_no/day/is_interlude
+    写入 DeskStore，并同步 FieldStore 的 Day.chapters / interlude_chapters。"""
+    try:
+        from ..wizard import parse_outline_ext
+        _, _, chapter_meta = parse_outline_ext(text)
+        if not chapter_meta:
+            return
+        desk = _desk_for(pid)
+        fs = _fields_for(pid)
+        # 先清场：把 field/day/is_interlude 设为 None/False 避免旧数据残留
+        for no in desk.all_nos():
+            w = desk.get(no)
+            if w is not None and (w.field_no is not None or w.day is not None or w.is_interlude):
+                desk.assign_field(no, None, None, False)
+        # 按 field/day 分组，便于批量写入 FieldStore
+        field_day_chapters: dict[tuple, list[int]] = {}
+        field_interlude_chapters: dict[int, list[int]] = {}
+        for no, m in chapter_meta.items():
+            fno = m.get("field_no")
+            day = m.get("day")
+            inter = bool(m.get("is_interlude"))
+            desk.assign_field(no, fno, day, inter)
+            if fno is None:
+                continue
+            if inter:
+                field_interlude_chapters.setdefault(fno, []).append(no)
+            elif day is not None:
+                field_day_chapters.setdefault((fno, day), []).append(no)
+        # 同步 FieldStore（仅对已存在的场；未创建的场不自动生成，由用户先建场）
+        # 先把所有已存在场的 day/interlude 章分配清空，再按新 outline 重建
+        for fno in fs.all_nos():
+            fw = fs.get(fno)
+            if fw is None:
+                continue
+            for dw in fw.days.values():
+                dw.chapters = []
+            fw.interlude_chapters = []
+            fs._flush(fw)
+        for (fno, day), chs in field_day_chapters.items():
+            if fs.get(fno) is not None:
+                fs.assign_chapters_to_day(fno, day, sorted(chs))
+        for fno, chs in field_interlude_chapters.items():
+            if fs.get(fno) is not None:
+                fs.assign_interlude_chapters(fno, sorted(chs))
+    except Exception:
+        # 同步失败不阻断采纳（旧格式/解析异常不影响使用）
+        pass
 
 
 @app.post("/api/projects/{pid}/layers/{layer}/rollback")
@@ -842,6 +1002,49 @@ def entities_list(pid: str, type: str | None = None, status: str | None = None,
     }
 
 
+# ---- 主角（唐迟）档案 ----
+class ProtagonistPatchIn(BaseModel):
+    current_body_name: str | None = None
+    current_body_identity: str | None = None
+    current_location: str | None = None
+    sanity_hint: str | None = None
+    known_truths: list[str] | None = None
+    key_relations: list[str] | None = None
+    blue_star_bonds: list[dict] | None = None
+    contamination_level: int | None = None
+    # 允许整段替换 profile_text（给 AI 一段自由文本描述，覆盖 current_body_identity/sanity_hint 的短字段）
+    profile_text: str | None = None
+
+
+@app.get("/api/projects/{pid}/protagonist")
+def protagonist_get(pid: str) -> dict:
+    _require_project(pid)
+    es = _entities_for(pid)
+    return {"protagonist": es.protagonist.as_dict()}
+
+
+@app.patch("/api/projects/{pid}/protagonist")
+def protagonist_patch(pid: str, body: ProtagonistPatchIn) -> dict:
+    _require_project(pid)
+    es = _entities_for(pid)
+    p = es.protagonist
+    data = body.model_dump(exclude_none=True) if hasattr(body, "model_dump") else body.dict(exclude_none=True)
+    profile_text = data.pop("profile_text", None)
+    for k, v in data.items():
+        if hasattr(p, k):
+            setattr(p, k, v)
+    if profile_text is not None:
+        # profile_text 作为长文本人设简介，存进 sanity_hint 后面追加标记不适合——
+        # 另起一个字段要改 dataclass，简化：直接覆盖 current_body_identity（身份长描述）
+        p.current_body_identity = profile_text
+    if p.contamination_level is not None:
+        p.contamination_level = max(0, min(100, int(p.contamination_level or 0)))
+    from datetime import datetime
+    p.updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    es._flush()
+    return {"ok": True, "protagonist": p.as_dict()}
+
+
 @app.post("/api/projects/{pid}/entities")
 def entities_add(pid: str, body: EntityIn) -> dict:
     _require_project(pid)
@@ -902,7 +1105,7 @@ def projects_export_vault(pid: str, body: VaultExportIn | None = None) -> dict:
     """导出 Obsidian Vault：MOC 首页 + 层级/章节/实体互链目录。"""
     _require_project(pid)
     out_root = Path((body.out_dir if body and body.out_dir else "")
-                    or (REPO / "backend" / "data" / "exports" / pid))
+                    or (_config.REPO / "backend" / "data" / "exports" / pid))
     result = export_vault(_project_store, _entities_for(pid), pid, out_root)
     return {
         "out_dir": result.out_dir,
@@ -922,7 +1125,7 @@ _import_journals: dict[str, ImportJournal] = {}
 def _import_journal_for(pid: str) -> ImportJournal:
     if pid not in _import_journals:
         _import_journals[pid] = ImportJournal(
-            REPO / "backend" / "data" / "projects" / pid / "import_journal.json"
+            _config.REPO / "backend" / "data" / "projects" / pid / "import_journal.json"
         )
     return _import_journals[pid]
 
@@ -1049,6 +1252,7 @@ def import_adopt_outline(pid: str) -> dict:
     y = "\n\n".join(f"第{no}章\n{outline}" for no, outline in outlines)
     v = _project_store.adopt(pid, "outline", x_pairs=[], y=y,
                              note=f"导入拆解汇总（{len(outlines)} 章）")
+    _sync_outline_meta(pid, y)
     return {"seq": v.seq, "chapters": len(outlines)}
 
 
@@ -1476,19 +1680,19 @@ _desk_stores: dict[str, DeskStore] = {}
 def _wizard_for(pid: str) -> WizardStore:
     if pid not in _wizard_stores:
         _wizard_stores[pid] = WizardStore(
-            REPO / "backend" / "data" / "projects" / pid / "wizard.json")
+            _config.REPO / "backend" / "data" / "projects" / pid / "wizard.json")
     return _wizard_stores[pid]
 
 
 def _desk_for(pid: str) -> DeskStore:
     if pid not in _desk_stores:
         _desk_stores[pid] = DeskStore(
-            REPO / "backend" / "data" / "projects" / pid / "desk.json")
+            _config.REPO / "backend" / "data" / "projects" / pid / "desk.json")
     return _desk_stores[pid]
 
 
 def _journal_dir(pid: str) -> Path:
-    return REPO / "backend" / "data" / "projects" / pid / "runs"
+    return _config.REPO / "backend" / "data" / "projects" / pid / "runs"
 
 
 def _desk_summary(pid: str) -> dict:
@@ -1706,7 +1910,8 @@ def desk_run(pid: str, chapter: int, body: DeskRunIn) -> dict:
             journal_dir=_journal_dir(pid),
             extra_materials=_desk_extra_materials(body),
             entity_store=_entities_for(pid) if body.checklist else None,
-            modules=body.modules, full_modules=body.full_modules)
+            modules=body.modules, full_modules=body.full_modules,
+            book_store=_book_for(pid), field_store=_fields_for(pid))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
@@ -1743,7 +1948,8 @@ def desk_run_stream(pid: str, chapter: int, body: DeskRunIn) -> StreamingRespons
                     journal_dir=_journal_dir(pid), extra_materials=_desk_extra_materials(body),
                     entity_store=_entities_for(pid) if body.checklist else None,
                     on_event=on_event,
-                    modules=body.modules, full_modules=body.full_modules)
+                    modules=body.modules, full_modules=body.full_modules,
+                    book_store=_book_for(pid), field_store=_fields_for(pid))
                 q.put(("result", result))
             except ValueError as e:
                 q.put(("fail", {"detail": str(e)}))
@@ -1785,6 +1991,10 @@ def desk_review(pid: str, chapter: int) -> dict:
     s_warns = strand_warnings(desk, chapter)
     if s_warns:
         record["strand_warnings"] = s_warns
+    b_warns = book_review_checks(desk, chapter,
+                                book_store=_book_for(pid), field_store=_fields_for(pid))
+    if b_warns:
+        record["book_warnings"] = b_warns
     desk.record_review(chapter, record)
     return {"chapter": chapter, **record}
 
@@ -1876,3 +2086,2242 @@ def desk_finalize(pid: str, chapter: int, body: DeskFinalizeIn | None = None) ->
             chapter, auto_entities=auto, payoff=payoff)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
+
+
+# ============================================================
+# 书级硬卡（book/）CRUD
+# ============================================================
+
+@app.get("/api/projects/{pid}/book")
+def book_get_all(pid: str) -> dict:
+    """返回 7 张书卡完整内容 + 渲染后的 Markdown 预览。"""
+    _require_project(pid)
+    bs = _book_for(pid)
+    return {
+        "cards": {c: bs._read(c) for c in bs.CARDS},
+        "rendered": bs.render_all(),
+    }
+
+
+@app.get("/api/projects/{pid}/book/render")
+def book_render(pid: str) -> dict:
+    """单独返回渲染后的 Markdown（任务书里注入的那段），便于前端预览。"""
+    _require_project(pid)
+    return {"rendered": _book_for(pid).render_all()}
+
+
+@app.get("/api/projects/{pid}/book/{card}")
+def book_get_card(pid: str, card: str) -> dict:
+    _require_project(pid)
+    bs = _book_for(pid)
+    if card not in bs.CARDS:
+        raise HTTPException(status_code=404, detail=f"未知书卡：{card}")
+    return {"card": card, "data": bs._read(card)}
+
+
+class BookCardUpdateIn(BaseModel):
+    data: dict
+
+
+@app.put("/api/projects/{pid}/book/{card}")
+def book_update_card(pid: str, card: str, body: BookCardUpdateIn) -> dict:
+    _require_project(pid)
+    bs = _book_for(pid)
+    if card not in bs.CARDS:
+        raise HTTPException(status_code=404, detail=f"未知书卡：{card}")
+    try:
+        bs.update(card, body.data)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"card": card, "data": bs._read(card), "ok": True}
+
+
+# ============================================================
+# 场（fields/）CRUD
+# ============================================================
+
+@app.get("/api/projects/{pid}/fields")
+def field_list(pid: str) -> dict:
+    """列出所有场（索引级信息）。"""
+    _require_project(pid)
+    fs = _fields_for(pid)
+    return {"fields": fs.list_all()}
+
+
+@app.post("/api/projects/{pid}/fields")
+def field_create(pid: str, body: dict | None = None) -> dict:
+    """新建一场（自动分配场号，初始化 Day1-7）。"""
+    _require_project(pid)
+    fs = _fields_for(pid)
+    try:
+        fw = fs.create(
+            title=(body or {}).get("title", ""),
+            volume_no=int((body or {}).get("volume_no", 1) or 1),
+            world_type=(body or {}).get("world_type", "克苏鲁小镇"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"field": fw.as_dict(), "ok": True}
+
+
+@app.get("/api/projects/{pid}/fields/{no}")
+def field_get(pid: str, no: int) -> dict:
+    _require_project(pid)
+    fs = _fields_for(pid)
+    fw = fs.get(no)
+    if fw is None:
+        raise HTTPException(status_code=404, detail=f"场不存在：{no}")
+    return {"field": fw.as_dict()}
+
+
+class FieldUpdateIn(BaseModel):
+    title: str | None = None
+    volume_no: int | None = None
+    world_type: str | None = None
+    world_premise: str | None = None
+    obituary: dict | None = None
+    drama_status: str | None = None
+    interlude_status: str | None = None
+
+
+@app.put("/api/projects/{pid}/fields/{no}")
+def field_update(pid: str, no: int, body: FieldUpdateIn) -> dict:
+    _require_project(pid)
+    fs = _fields_for(pid)
+    kwargs = {k: v for k, v in body.model_dump().items() if v is not None}
+    try:
+        fw = fs.update(no, **kwargs)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"field": fw.as_dict(), "ok": True}
+
+
+class DayUpdateIn(BaseModel):
+    summary: str | None = None
+    required_hook: str | None = None
+
+
+@app.put("/api/projects/{pid}/fields/{no}/days/{day}")
+def field_update_day(pid: str, no: int, day: int, body: DayUpdateIn) -> dict:
+    """更新单日（Day1-7）的 summary / required_hook。"""
+    _require_project(pid)
+    if not (1 <= day <= 7):
+        raise HTTPException(status_code=422, detail="日号必须在 1-7 之间")
+    fs = _fields_for(pid)
+    try:
+        dw = fs.ensure_day(no, day, summary=body.summary or "",
+                            required_hook=body.required_hook or "")
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    fw = fs.get(no)
+    return {"field": fw.as_dict() if fw else None, "day": dw.as_dict(), "ok": True}
+
+
+class ChapterAssignIn(BaseModel):
+    chapters: list[int]
+
+
+@app.put("/api/projects/{pid}/fields/{no}/days/{day}/chapters")
+def field_assign_day_chapters(pid: str, no: int, day: int, body: ChapterAssignIn) -> dict:
+    """把若干章分配到指定 Day（会从其他 Day/幕间中移除）。"""
+    _require_project(pid)
+    if not (1 <= day <= 7):
+        raise HTTPException(status_code=422, detail="日号必须在 1-7 之间")
+    fs = _fields_for(pid)
+    try:
+        fw = fs.assign_chapters_to_day(no, day, body.chapters or [])
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    # 同步 DeskStore
+    desk = _desk_for(pid)
+    for c in body.chapters or []:
+        w = desk.get(c)
+        if w is not None:
+            desk.assign_field(c, field_no=no, day=day, is_interlude=False)
+    return {"field": fw.as_dict(), "ok": True}
+
+
+@app.put("/api/projects/{pid}/fields/{no}/interlude/chapters")
+def field_assign_interlude_chapters(pid: str, no: int, body: ChapterAssignIn) -> dict:
+    """把若干章标记为该场幕间。"""
+    _require_project(pid)
+    fs = _fields_for(pid)
+    try:
+        fw = fs.assign_interlude_chapters(no, body.chapters or [])
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    desk = _desk_for(pid)
+    for c in body.chapters or []:
+        w = desk.get(c)
+        if w is not None:
+            desk.assign_field(c, field_no=no, day=None, is_interlude=True)
+    return {"field": fw.as_dict(), "ok": True}
+
+
+@app.post("/api/projects/{pid}/fields/{no}/finalize")
+def field_finalize(pid: str, no: int, body: dict | None = None) -> dict:
+    """定稿一场的戏里部分（drama）。"""
+    _require_project(pid)
+    fs = _fields_for(pid)
+    try:
+        fw = fs.mark_finalized(no)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"field": fw.as_dict(), "ok": True}
+
+
+@app.post("/api/projects/{pid}/fields/{no}/finalize_interlude")
+def field_finalize_interlude(pid: str, no: int) -> dict:
+    """定稿一场的幕间部分。"""
+    _require_project(pid)
+    fs = _fields_for(pid)
+    try:
+        fw = fs.mark_interlude_finalized(no)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"field": fw.as_dict(), "ok": True}
+
+
+class VariantsAddIn(BaseModel):
+    node_type: str
+    variants: list[dict]
+
+
+@app.post("/api/projects/{pid}/fields/{no}/variants")
+def field_add_variants(pid: str, no: int, body: VariantsAddIn) -> dict:
+    """追加候选池（adapt/coc/tang_outline/interlude_outline 等步骤输出）。"""
+    _require_project(pid)
+    fs = _fields_for(pid)
+    try:
+        fw = fs.add_variants(no, body.node_type, body.variants or [])
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"field": fw.as_dict(), "ok": True}
+
+
+class VariantChooseIn(BaseModel):
+    node_type: str
+    vid: str
+
+
+@app.post("/api/projects/{pid}/fields/{no}/variants/choose")
+def field_choose_variant(pid: str, no: int, body: VariantChooseIn) -> dict:
+    """选定某个候选（chosen=True，其他 False）。"""
+    _require_project(pid)
+    fs = _fields_for(pid)
+    try:
+        fw = fs.choose_variant(no, body.node_type, body.vid)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"field": fw.as_dict(), "chosen_text": fs.chosen_variant_text(no, body.node_type),
+            "ok": True}
+
+
+# ============================================================
+# 场级流水线（adapt → COC → tang大纲 → 分章 → 沉淀 → 间章）
+# ============================================================
+
+@app.get("/api/projects/{pid}/fields/{no}/pipeline")
+def field_pipeline_status(pid: str, no: int) -> dict:
+    """列出本场所有节点状态。"""
+    _require_project(pid)
+    fs = _fields_for(pid)
+    if fs.get(no) is None:
+        raise HTTPException(status_code=404, detail=f"场不存在：{no}")
+    rs = _field_run_for(pid)
+    return {
+        "field_no": no,
+        "drama_status": fs.get(no).drama_status,
+        "interlude_status": fs.get(no).interlude_status,
+        "nodes": rs.list_artifacts(no),
+        "node_order": [n[0] for n in FIELD_PIPELINE_NODES],
+    }
+
+
+@app.get("/api/projects/{pid}/fields/{no}/pipeline/{node_id}")
+def field_pipeline_node_get(pid: str, no: int, node_id: str) -> dict:
+    """获取单个节点产物（含 raw_text / variants / chosen）。"""
+    _require_project(pid)
+    rs = _field_run_for(pid)
+    art = rs.get(no, node_id)
+    if art is None:
+        raise HTTPException(status_code=404, detail=f"节点未执行：{node_id}")
+    return {"artifact": art.as_dict()}
+
+
+class FieldNodeRunIn(BaseModel):
+    user_directive: str | None = None
+    force: bool = False
+    n_variants: int | None = None
+
+
+@app.post("/api/projects/{pid}/fields/{no}/pipeline/{node_id}/run")
+def field_pipeline_node_run(pid: str, no: int, node_id: str, body: FieldNodeRunIn | None = None) -> dict:
+    """运行（或重跑）指定节点。"""
+    _require_project(pid)
+    fs = _fields_for(pid)
+    if fs.get(no) is None:
+        raise HTTPException(status_code=404, detail=f"场不存在：{no}")
+    rs = _field_run_for(pid)
+    coc_s = _coc_run_for(pid)
+    runner = PipelineRunner(_chore_provider(), prompt_store=_prompt_store)
+    try:
+        art = run_field_node(
+            runner, pid, no, node_id,
+            book_store=_book_for(pid), field_store=fs, run_store=rs,
+            desk=_desk_for(pid), coc_store=coc_s,
+            user_directive=body.user_directive if body else None,
+            force=body.force if body else False,
+            n_variants=body.n_variants if body else None,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:500])
+    return {"artifact": art.as_dict(), "ok": True}
+
+
+@app.post("/api/projects/{pid}/fields/{no}/pipeline/{node_id}/run/stream")
+def field_pipeline_node_run_stream(pid: str, no: int, node_id: str, body: FieldNodeRunIn | None = None) -> StreamingResponse:
+    """流式运行节点（SSE）。"""
+    _require_project(pid)
+    fs = _fields_for(pid)
+    if fs.get(no) is None:
+        raise HTTPException(status_code=404, detail=f"场不存在：{no}")
+    from fastapi.responses import StreamingResponse as _SR
+
+    def gen():
+        runner = PipelineRunner(_chore_provider(), prompt_store=_prompt_store)
+        rs = _field_run_for(pid)
+        cs = _coc_run_for(pid)
+
+        def on_event(kind: str, payload: dict):
+            try:
+                evt = json.dumps({"kind": kind, **payload}, ensure_ascii=False)
+            except Exception:
+                evt = json.dumps({"kind": kind}, ensure_ascii=False)
+            yield f"data: {evt}\n\n"
+
+        # 直接用支持 on_event 的 run_field_node —— run_layer 会回调 delta/thinking/block_done
+        q: Queue = Queue()
+
+        def bridge(k, p):
+            q.put((k, p))
+        try:
+            t = threading.Thread(
+                target=lambda: (
+                    run_field_node(
+                        runner, pid, no, node_id,
+                        book_store=_book_for(pid), field_store=fs, run_store=rs,
+                        desk=_desk_for(pid), coc_store=cs,
+                        user_directive=body.user_directive if body else None,
+                        force=body.force if body else False,
+                        n_variants=body.n_variants if body else None,
+                        on_event=bridge,
+                    ),
+                    q.put(("__end__", None)),
+                ),
+                daemon=True,
+            )
+            t.start()
+            while True:
+                k, p = q.get()
+                if k == "__end__":
+                    break
+                try:
+                    evt = json.dumps({"kind": k, **(p or {})}, ensure_ascii=False)
+                except Exception:
+                    evt = json.dumps({"kind": k}, ensure_ascii=False)
+                yield f"data: {evt}\n\n"
+        except ValueError as e:
+            yield f"data: {json.dumps({'kind':'error','detail':str(e)}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'kind':'error','detail':str(e)[:500]}, ensure_ascii=False)}\n\n"
+
+    return _SR(gen(), media_type="text/event-stream")
+
+
+class FieldNodeChooseIn(BaseModel):
+    vid: str
+
+
+@app.post("/api/projects/{pid}/fields/{no}/pipeline/{node_id}/choose")
+def field_pipeline_node_choose(pid: str, no: int, node_id: str, body: FieldNodeChooseIn) -> dict:
+    """在 variant-pool 节点里选定一个候选（自动写入下游依赖）。"""
+    _require_project(pid)
+    rs = _field_run_for(pid)
+    try:
+        art = rs.choose_variant(no, node_id, body.vid)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"artifact": art.as_dict(), "ok": True}
+
+
+class FieldNodeEditIn(BaseModel):
+    raw_text: str | None = None
+    parsed: dict | list | None = None
+    variants: list[dict] | None = None
+    chosen_vid: str | None = None
+
+
+@app.put("/api/projects/{pid}/fields/{no}/pipeline/{node_id}")
+def field_pipeline_node_edit(pid: str, no: int, node_id: str, body: FieldNodeEditIn) -> dict:
+    """人工编辑节点产物（改分章/改大纲/改残页文字）。"""
+    _require_project(pid)
+    rs = _field_run_for(pid)
+    art = rs.get(no, node_id)
+    if art is None:
+        from ..fields import NodeArtifact
+        node_def = next((d for d in FIELD_PIPELINE_NODES if d[0] == node_id), None)
+        if node_def is None:
+            raise HTTPException(status_code=404, detail=f"未知节点：{node_id}")
+        art = NodeArtifact(node_id=node_id, layer=node_def[1])
+    if body.raw_text is not None:
+        art.raw_text = body.raw_text
+    if body.parsed is not None:
+        art.parsed = body.parsed
+    if body.variants is not None:
+        art.variants = body.variants
+    if body.chosen_vid is not None:
+        art.chosen_vid = body.chosen_vid
+    rs.save(no, art)
+    return {"artifact": art.as_dict(), "ok": True}
+
+
+class SplitApplyIn(BaseModel):
+    start_chapter: int
+    override: dict | None = None  # 允许传编辑后的 chapters JSON
+
+
+@app.post("/api/projects/{pid}/fields/{no}/pipeline/split_chapters/apply")
+def field_pipeline_apply_split(pid: str, no: int, body: SplitApplyIn) -> dict:
+    """把 split_chapters 的结果应用到 FieldStore + DeskStore（分章定锤）。"""
+    _require_project(pid)
+    fs = _fields_for(pid)
+    rs = _field_run_for(pid)
+    try:
+        r = apply_split_to_field(fs, rs, _desk_for(pid), no,
+                                  start_chapter=body.start_chapter,
+                                  override=body.override)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    # 场进入 writing 状态
+    fs.update(no, drama_status="writing")
+    r["field"] = fs.get(no).as_dict()
+    return {**r, "ok": True}
+
+
+@app.post("/api/projects/{pid}/fields/{no}/pipeline/epilogue_ash/apply")
+def field_pipeline_apply_epilogue(pid: str, no: int, body: dict | None = None) -> dict:
+    """把 epilogue_ash 的残页+杀青一句话写入 BookStore。"""
+    _require_project(pid)
+    rs = _field_run_for(pid)
+    bs = _book_for(pid)
+    try:
+        r = apply_epilogue_to_book(bs, rs, no, override=(body or {}).get("override"))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {**r, "ok": True}
+
+
+@app.post("/api/projects/{pid}/fields/{no}/pipeline/distill_obsession/apply")
+def field_pipeline_apply_obsession(pid: str, no: int, body: dict | None = None) -> dict:
+    """把执念代价/侵蚀度/crafts 更新写入 BookStore。"""
+    _require_project(pid)
+    rs = _field_run_for(pid)
+    bs = _book_for(pid)
+    try:
+        r = apply_obsession_to_book(bs, rs, no, override=(body or {}).get("override"))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {**r, "ok": True}
+
+
+@app.post("/api/projects/{pid}/fields/{no}/pipeline/distill_world/apply")
+def field_pipeline_apply_world(pid: str, no: int) -> dict:
+    """把世界规则卡（可选）挂到实体库。"""
+    _require_project(pid)
+    rs = _field_run_for(pid)
+    r = apply_world_rules(_entities_for(pid), rs, no)
+    return {**r, "ok": True}
+
+
+@app.post("/api/projects/{pid}/fields/{no}/pipeline/interlude_outline/apply")
+def field_pipeline_apply_interlude(pid: str, no: int, body: SplitApplyIn | None = None) -> dict:
+    """间章大纲定锤：在 DeskStore 创建幕间章节（接到 split 的场章后）。"""
+    _require_project(pid)
+    fs = _fields_for(pid)
+    rs = _field_run_for(pid)
+    fw = fs.get(no)
+    if fw is None:
+        raise HTTPException(status_code=404, detail=f"场不存在：{no}")
+    chosen = rs.chosen_parsed(no, "interlude_outline")
+    if not chosen:
+        # fallback：用 override
+        chosen = (body.override if body else None)
+    if not chosen:
+        raise HTTPException(status_code=422, detail="interlude_outline 未选定或解析失败")
+    # 起章号：当前 DeskStore 最大章号 +1
+    desk = _desk_for(pid)
+    existing = desk.all_nos()
+    start = (max(existing) + 1) if existing else 1
+    if body is not None and body.start_chapter:
+        start = body.start_chapter
+    chs: list[int] = []
+    # 简易：每个候选就是一章（作者可后续切分）
+    # 如果 parsed 带 chapters 数组就用它
+    if isinstance(chosen, dict) and isinstance(chosen.get("chapters"), list):
+        chapters_in = chosen["chapters"]
+    else:
+        chapters_in = [{"title": (chosen.get("title") if isinstance(chosen, dict) else f"第{no}场间章"),
+                        "summary": (chosen.get("structure") if isinstance(chosen, dict) else chosen) or ""}]
+    for ch in chapters_in:
+        w = desk.ensure(start, title=str(ch.get("title", "") or f"第{no}场间章"))
+        desk.assign_field(start, field_no=no, day=None, is_interlude=True)
+        chs.append(start)
+        start += 1
+    fs.assign_interlude_chapters(no, chs)
+    fs.update(no, interlude_status="writing")
+    return {"interlude_chapters": chs, "field": fs.get(no).as_dict(), "ok": True}
+
+
+# ============================================================
+# COC 多轮跑团仿真（Phase 3）
+# ============================================================
+
+def _coc_runner() -> PipelineRunner:
+    return PipelineRunner(_chore_provider(), prompt_store=_prompt_store)
+
+# Alias used in endpoints below (matches style of existing endpoints)
+_runner = _coc_runner
+
+
+class CocStartIn(BaseModel):
+    force_reset: bool = False
+    san: int | None = None
+    hp: int | None = None
+    max_turns: int = 40
+    player_card_patch: dict | None = None
+
+
+class CocAutorunIn(BaseModel):
+    max_steps: int | None = 8
+    user_directive: str | None = None
+
+
+class CocInterveneIn(BaseModel):
+    text: str
+    as_role: str = "author"          # author | investigator
+    user_directive: str | None = None
+
+
+class CocPatchIn(BaseModel):
+    san: int | None = None
+    hp: int | None = None
+    mp: int | None = None
+    current_day: int | None = None
+    obsession_uses: int | None = None
+    npcs: dict | None = None
+    clue: str | None = None
+    cost_note: str | None = None
+
+
+def _require_coc_ready(pid: str, no: int):
+    """校验场存在 + adapt_scenario 已选定，返回 (fs, rs, coc_store, adapt_parsed)。"""
+    _require_project(pid)
+    fs = _fields_for(pid)
+    rs = _field_run_for(pid)
+    coc_store = _coc_run_for(pid)
+    fw = fs.get(no)
+    if fw is None:
+        raise HTTPException(status_code=404, detail=f"场不存在：{no}")
+    adapt = rs.chosen_parsed(no, "adapt_scenario")
+    if not adapt:
+        raise HTTPException(status_code=422, detail="请先选定 adapt_scenario 候选再启动跑团")
+    return fs, rs, coc_store, adapt
+
+
+@app.get("/api/projects/{pid}/fields/{no}/coc")
+def coc_get(pid: str, no: int) -> dict:
+    """获取本场 COC 跑团当前状态（若不存在返回 null）。"""
+    _require_project(pid)
+    coc_store = _coc_run_for(pid)
+    state = coc_store.get(no)
+    if state is None:
+        return {"exists": False, "state": None}
+    return {"exists": True, "state": state.as_dict()}
+
+
+@app.post("/api/projects/{pid}/fields/{no}/coc/start")
+def coc_start(pid: str, no: int, body: CocStartIn | None = None) -> dict:
+    """初始化/重置一场 COC 跑团会话。KP 先不发言（等待 /autorun 或单步推进）。"""
+    fs, rs, coc_store, adapt = _require_coc_ready(pid, no)
+    body = body or CocStartIn()
+    if coc_store.exists(no) and not body.force_reset:
+        state = coc_store.get(no)
+        return {"ok": True, "reset": False, "state": state.as_dict()}
+    from ..pipeline import coc_init_run
+    state = coc_init_run(
+        coc_store, no, adapt,
+        player_card_patch=body.player_card_patch,
+        san=body.san, hp=body.hp, max_turns=body.max_turns,
+    )
+    return {"ok": True, "reset": True, "state": state.as_dict()}
+
+
+@app.post("/api/projects/{pid}/fields/{no}/coc/keeper")
+def coc_step_keeper(pid: str, no: int, body: CocAutorunIn | None = None) -> dict:
+    """手动执行一轮 KP。"""
+    fs, rs, coc_store, adapt = _require_coc_ready(pid, no)
+    state = coc_store.get(no)
+    if state is None:
+        raise HTTPException(status_code=422, detail="跑团尚未启动，请先 POST /coc/start")
+    from ..pipeline import step_keeper as _sk
+    runner = _runner()
+    turn = _sk(runner, state, adapt_parsed=adapt, book_store=_book_for(pid),
+               user_directive=(body.user_directive if body else None))
+    coc_store.save(state)
+    return {"ok": True, "turn": turn.as_dict(), "state": state.as_dict()}
+
+
+@app.post("/api/projects/{pid}/fields/{no}/coc/investigator")
+def coc_step_investigator(pid: str, no: int, body: CocAutorunIn | None = None) -> dict:
+    """手动执行一轮 PL（唐迟）。"""
+    fs, rs, coc_store, adapt = _require_coc_ready(pid, no)
+    state = coc_store.get(no)
+    if state is None:
+        raise HTTPException(status_code=422, detail="跑团尚未启动")
+    from ..pipeline import step_investigator as _si
+    runner = _runner()
+    turn = _si(runner, state, user_directive=(body.user_directive if body else None))
+    coc_store.save(state)
+    return {"ok": True, "turn": turn.as_dict(), "state": state.as_dict()}
+
+
+@app.post("/api/projects/{pid}/fields/{no}/coc/autorun")
+def coc_autorun(pid: str, no: int, body: CocAutorunIn | None = None) -> dict:
+    """自动交替跑 KP↔PL，直到终止条件或达到 max_steps 对。"""
+    fs, rs, coc_store, adapt = _require_coc_ready(pid, no)
+    state = coc_store.get(no)
+    if state is None:
+        raise HTTPException(status_code=422, detail="跑团尚未启动，请先 POST /coc/start")
+    from ..pipeline import autorun_until_break
+    runner = _runner()
+    body = body or CocAutorunIn()
+    result = autorun_until_break(
+        runner, state, adapt_parsed=adapt, book_store=_book_for(pid),
+        run_store=coc_store, field_no=no,
+        max_steps=body.max_steps, user_directive=body.user_directive,
+    )
+    return {"ok": True, **result, "state": state.as_dict()}
+
+
+@app.post("/api/projects/{pid}/fields/{no}/coc/autorun/stream")
+def coc_autorun_stream(pid: str, no: int, body: CocAutorunIn | None = None) -> StreamingResponse:
+    """SSE 流式自动跑团，边跑边推 turn 事件。"""
+    from queue import Queue
+    import threading
+    _require_project(pid)
+    fs = _fields_for(pid); rs = _field_run_for(pid); coc_store = _coc_run_for(pid)
+    adapt = rs.chosen_parsed(no, "adapt_scenario")
+    if not adapt:
+        raise HTTPException(status_code=422, detail="请先选定 adapt_scenario")
+    state = coc_store.get(no)
+    if state is None:
+        raise HTTPException(status_code=422, detail="跑团尚未启动")
+    runner = _runner()
+    bs = _book_for(pid)
+    body = body or CocAutorunIn()
+    q: Queue = Queue()
+
+    def on_ev(kind: str, payload: dict):
+        q.put({"event": kind, "data": payload})
+
+    def worker():
+        try:
+            from ..pipeline import autorun_until_break
+            res = autorun_until_break(
+                runner, state, adapt_parsed=adapt, book_store=bs,
+                run_store=coc_store, field_no=no,
+                max_steps=body.max_steps, user_directive=body.user_directive,
+                on_event=on_ev,
+            )
+            q.put({"event": "done", "data": {**res, "state": state.as_dict()}})
+        except Exception as e:
+            q.put({"event": "error", "data": {"error": f"{type(e).__name__}: {e}"}})
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def gen():
+        while True:
+            ev = q.get()
+            yield f"event: {ev['event']}\ndata: {json_dumps(ev['data'])}\n\n"
+            if ev["event"] in ("done", "error"):
+                break
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.post("/api/projects/{pid}/fields/{no}/coc/intervene")
+def coc_intervene(pid: str, no: int, body: CocInterveneIn) -> dict:
+    """作者介入：插入一段作者指令或替代 PL 行动。"""
+    fs, rs, coc_store, adapt = _require_coc_ready(pid, no)
+    state = coc_store.get(no)
+    if state is None:
+        raise HTTPException(status_code=422, detail="跑团尚未启动")
+    from ..pipeline import coc_intervene as _intervene
+    turn = _intervene(state, body.text, coc_store, as_role=body.as_role or "author")
+    return {"ok": True, "turn": turn.as_dict(), "state": state.as_dict()}
+
+
+@app.patch("/api/projects/{pid}/fields/{no}/coc/state")
+def coc_patch_state(pid: str, no: int, body: CocPatchIn) -> dict:
+    """手动修正 SAN/HP/Day/clues 等字段（补扣/纠错）。"""
+    fs, rs, coc_store, adapt = _require_coc_ready(pid, no)
+    state = coc_store.get(no)
+    if state is None:
+        raise HTTPException(status_code=422, detail="跑团尚未启动")
+    from ..pipeline import apply_state_patch
+    applied = apply_state_patch(state, body.model_dump(exclude_none=True), coc_store)
+    return {"ok": True, "applied": applied, "state": state.as_dict()}
+
+
+@app.post("/api/projects/{pid}/fields/{no}/coc/finalize")
+def coc_finalize(pid: str, no: int, body: CocAutorunIn | None = None) -> dict:
+    """结束跑团：用 coc_outcome 层把完整日志压成 Day1-7 真相，写入 coc_outcome 节点。
+    finalize 之后 tang_outline 可以正常运行。"""
+    fs, rs, coc_store, adapt = _require_coc_ready(pid, no)
+    state = coc_store.get(no)
+    if state is None:
+        raise HTTPException(status_code=422, detail="跑团尚未启动")
+    from ..pipeline import coc_finalize as _finalize
+    runner = _runner()
+    art = _finalize(runner, state, coc_store, rs, field_no=no,
+                    adapt_parsed=adapt, book_store=_book_for(pid))
+    return {"ok": True, "artifact": art.as_dict(), "state": state.as_dict()}
+
+
+@app.post("/api/projects/{pid}/fields/{no}/coc/finalize/stream")
+def coc_finalize_stream(pid: str, no: int, body: CocAutorunIn | None = None) -> StreamingResponse:
+    """SSE 流式 finalize。"""
+    from queue import Queue
+    import threading
+    fs, rs, coc_store, adapt = _require_coc_ready(pid, no)
+    state = coc_store.get(no)
+    if state is None:
+        raise HTTPException(status_code=422, detail="跑团尚未启动")
+    runner = _runner()
+    bs = _book_for(pid)
+    q: Queue = Queue()
+
+    def on_ev(kind, payload):
+        q.put({"event": kind, "data": payload})
+
+    def worker():
+        try:
+            from ..pipeline import coc_finalize as _finalize
+            art = _finalize(runner, state, coc_store, rs, field_no=no,
+                            adapt_parsed=adapt, book_store=bs, on_event=on_ev)
+            q.put({"event": "done", "data": {"artifact": art.as_dict(), "state": state.as_dict()}})
+        except Exception as e:
+            q.put({"event": "error", "data": {"error": f"{type(e).__name__}: {e}"}})
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def gen():
+        while True:
+            ev = q.get()
+            yield f"event: {ev['event']}\ndata: {json_dumps(ev['data'])}\n\n"
+            if ev["event"] in ("done", "error"):
+                break
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.delete("/api/projects/{pid}/fields/{no}/coc")
+def coc_reset(pid: str, no: int) -> dict:
+    """重置本场跑团（会清掉 turns 与状态）。注意：不会清 coc_outcome 节点产物——
+    想一并清，请显式 PUT /pipeline/coc_outcome 覆盖或重跑 tang_outline。"""
+    _require_project(pid)
+    coc_store = _coc_run_for(pid)
+    if coc_store.exists(no):
+        coc_store.delete(no)
+    return {"ok": True, "deleted": True}
+
+
+@app.post("/api/projects/{pid}/fields/{no}/coc/transcript")
+def coc_transcript(pid: str, no: int, last_n: int | None = None) -> dict:
+    """导出跑团完整/最近日志（纯文本，供作者查看或外部使用）。"""
+    _require_project(pid)
+    state = _coc_run_for(pid).get(no)
+    if state is None:
+        return {"exists": False, "transcript": ""}
+    return {"exists": True, "transcript": state.transcript(last_n=last_n),
+            "turns_total": len(state.turns),
+            "status": state.status}
+
+
+# ============================================================
+# 创作会话（Phase 5：对话驱动 + 阶段门控）
+# ============================================================
+
+@app.get("/api/projects/{pid}/sessions")
+def session_list(pid: str, scope: str | None = None,
+                 field_no: int | None = None, chapter: int | None = None,
+                 status: str | None = None) -> dict:
+    _require_project(pid)
+    ss = _sessions_for(pid)
+    items = ss.list_sessions(scope=scope, field_no=field_no, chapter=chapter, status=status)
+    return {"sessions": items}
+
+
+@app.post("/api/projects/{pid}/sessions")
+def session_create(pid: str, body: SessionCreateIn) -> dict:
+    _require_project(pid)
+    # 校验 scope 合法性
+    if body.scope not in ("field", "chapter"):
+        raise HTTPException(status_code=422, detail="scope 必须是 field 或 chapter")
+    if body.scope == "field" and body.field_no is None:
+        raise HTTPException(status_code=422, detail="副本会话必须传 field_no")
+    if body.scope == "chapter" and body.chapter is None:
+        raise HTTPException(status_code=422, detail="日更会话必须传 chapter")
+    ss = _sessions_for(pid)
+    # 副本会话：如果 field_no 对应的 FieldWork 还不存在，先自动建一份
+    # （避免 kindle 阶段锁 core 时报「场不存在」）
+    if body.scope == "field" and body.field_no is not None:
+        fs = _fields_for(pid)
+        if fs.get(body.field_no) is None:
+            fs.create(title=body.title or f"第{body.field_no}场",
+                      volume_no=1, no=body.field_no)
+    s = ss.create(
+        project_id=pid, scope=body.scope,
+        field_no=body.field_no, chapter=body.chapter,
+        title=body.title, start_phase=body.start_phase,
+    )
+    # ---- M3：settle_up 阶段自动建卷（幂等） ----
+    if s.scope == "field" and s.field_no is not None and s.current_phase == "settle_up":
+        try:
+            vs = _volumes_for(pid)
+            vol = vs.create_next(_book_for(pid), s.field_no)
+            s.volume_no = vol.volume_no
+        except Exception:
+            pass
+    # 加一条开场 AI 欢迎消息（按阶段）
+    from ..sessions import PHASE_META
+    pm = PHASE_META[s.current_phase]
+    s.add_message("ai", f"【{pm['title']}】{pm['prompt']}", kind="suggestion",
+                  meta={"phase": s.current_phase, "ai_mode": pm["ai_mode"]})
+    ss.save(s)
+    return {"ok": True, "session": s.as_dict()}
+
+
+@app.get("/api/projects/{pid}/sessions/{sid}")
+def session_get(pid: str, sid: str) -> dict:
+    _require_project(pid)
+    s = _sessions_for(pid).get(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {"session": s.as_dict()}
+
+
+def _build_chat_context_block(pid: str, s) -> str:
+    """给自由聊天用的紧凑上下文块：书级 premise + 主角档案 + 已写章节摘要 + 最近章尾 +
+    当前会话阶段已锁卡片 + 当前卷规划。总长度控制在 ~6000 字以内，避免撑爆上下文窗口。"""
+    parts: list[str] = []
+
+    # (1) 书级硬卡（premise）
+    try:
+        bs = _book_for(pid)
+        premise_text = ""
+        if hasattr(bs, "premise"):
+            prof = bs.premise()
+            if prof and hasattr(prof, "render"):
+                premise_text = (prof.render() or "").strip()
+        if premise_text:
+            parts.append(f"【书级设定·Premise（已锁定）】\n{_truncate(premise_text, 1500)}")
+        # world rules 短版（不重复 WORLD_RULES_SHORT，避免和系统提示重复）
+        try:
+            hardcards = bs.render_all() if hasattr(bs, "render_all") else ""
+            if hardcards:
+                # premise 已经带过了，这里只取「唐迟刻度/七日基线/终局锚」类硬卡
+                # 简化：直接截后半段（避免和 premise 重复）
+                lines = hardcards.split("\n")
+                tail = "\n".join(lines[-60:])
+                if tail and tail not in premise_text:
+                    parts.append(f"【书级硬卡·核心刻度】\n{_truncate(tail, 1500)}")
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # (2) 主角档案（跨场累积状态）
+    try:
+        es = _entities_for(pid)
+        p = es.protagonist
+        plines = ["【主角唐迟·跨场档案】"]
+        plines.append(f"当前身份/位置：{(p.current_body_name or '唐迟')}（{p.current_body_identity or '身份未明'}）· {p.current_location or '位置未明'}"
+                      + (f" · 第{p.current_day}天" if p.current_day else ""))
+        plines.append(f"本场侵蚀度：{p.erosion_level}（{p.sanity_hint or '状态稳定'}）")
+        plines.append(f"跨卷累积污染度：{p.contamination_level}/100 ｜ 已完成副本 {p.field_count} 场")
+        if p.active_crafts:
+            plines.append("已掌握手艺：" + "；".join(
+                f"{c.get('name','?')}({c.get('proficiency','初窥')}，{c.get('from_field','?')})"
+                for c in p.active_crafts[-6:]))
+        if p.dead_echoes:
+            plines.append("死者残影：" + "、".join(
+                f"{e.get('name','?')}({e.get('obsession','?')}，{e.get('fade_stage','?')})"
+                for e in p.dead_echoes[-4:]))
+        if p.god_marks:
+            plines.append("邪神标记：" + "、".join(
+                f"{m.get('god','?')}·{m.get('seal_form','?')}" for m in p.god_marks[-4:]))
+        if p.brought_items:
+            plines.append("带回复本物品：" + "、".join(
+                f"{b.get('name','?')}(污染{b.get('contam',0)})" for b in p.brought_items[-6:]))
+        if p.blue_star_bonds:
+            plines.append("蓝星羁绊：" + "、".join(
+                f"{b.get('name','?')}({b.get('relation','?')}，羁绊{b.get('depth','浅')})"
+                for b in p.blue_star_bonds))
+        if p.kill_record:
+            plines.append("杀青账本：" + " | ".join(p.kill_record[-6:]))
+        parts.append("\n".join(plines))
+    except Exception:
+        pass
+
+    # (3) 已写章节摘要 + 最近一章正文尾
+    try:
+        desk = _desk_for(pid)
+        nos = sorted(desk.all_nos())
+        if nos:
+            # 摘要表（章号/标题/状态/长度/概要）
+            rows = []
+            for no in nos:
+                w = desk.get(no)
+                if w is None:
+                    continue
+                title = w.title or f"第{no}章"
+                status_bits = []
+                if work_text(w, "polish"):
+                    status_bits.append("润色已定")
+                elif work_text(w, "draft"):
+                    status_bits.append("草稿完")
+                if work_text(w, "plot") and not work_text(w, "draft"):
+                    status_bits.append("有剧情卡")
+                body = work_text(w, "polish") or work_text(w, "draft") or ""
+                chars = len(body or "")
+                preview = (w.outline_preview or "")[:80].replace("\n", " ")
+                rows.append(f"  第{no}章《{title}》｜{'/'.join(status_bits) or '空'}｜{chars}字｜{preview}")
+            # 最近一章正文结尾（最多 1200 字，句边界截断）
+            recent_no = nos[-1]
+            w_recent = desk.get(recent_no)
+            recent_tail = ""
+            if w_recent is not None:
+                recent_body = work_text(w_recent, "polish") or work_text(w_recent, "draft") or ""
+                if recent_body:
+                    recent_tail = _tail_at_sentence(recent_body, 1200)
+            chap_block = ["【已写章节总览（含章号/状态/字数）】"]
+            chap_block.extend(rows[-20:])  # 最多列最近 20 章
+            if len(rows) > 20:
+                chap_block.insert(1, f"（共 {len(rows)} 章，以下只列最近 20 章；更早的章默认已在剧情中发生过）")
+            if recent_tail:
+                chap_block.append(f"\n【最近一章（第{recent_no}章）正文尾·请据此衔接】\n{recent_tail}")
+            parts.append("\n".join(chap_block))
+    except Exception:
+        pass
+
+    # (4) 场会话：复用 _build_context_block 拿本场上锁卡片 / 当前卷规划
+    if s.scope == "field" and s.field_no is not None:
+        try:
+            from ..pipeline.sushi_generator import _build_context_block as _bcb
+            fs = _fields_for(pid)
+            es = _entities_for(pid)
+            bs = _book_for(pid)
+            vs = None
+            try:
+                vs = _volumes_for(pid)
+            except Exception:
+                vs = None
+            # 当前阶段在写什么卡？kindle→core；scaffold→obituary_card/entity_card；
+            # walkthrough/schedule/daily_write 没对应卡，统一用 core 让上下文带上已锁副本核即可
+            card_hint = {
+                "kindle": "core",
+                "scaffold": "entity_card",
+                "walkthrough": "entity_card",
+                "schedule": "entity_card",
+                "daily_write": "entity_card",
+                "settle_up": "wrapup",
+            }.get(s.current_phase, "core")
+            field_ctx = _bcb(
+                book_store=bs, fs=fs, es=es, field_no=s.field_no, card_key=card_hint,
+                extra_context=(s.artifacts.get("selected_pdf_adapt") or "") if isinstance(s.artifacts, dict) else "",
+                volume_store=vs, volume_no=getattr(s, "volume_no", None),
+                phase=s.current_phase, is_interlude=bool(getattr(s, "is_interlude", False)),
+            )
+            if field_ctx.strip():
+                parts.append(f"【本场（第{s.field_no}场）已锁素材·卷规·当前阶段={s.current_phase}】\n{field_ctx}")
+        except Exception:
+            pass
+
+    return "\n\n".join(p for p in parts if p and p.strip())
+
+
+def _truncate(text: str, n: int) -> str:
+    if not text:
+        return ""
+    if len(text) <= n:
+        return text
+    return text[:n] + f"\n…（截断，余 {len(text)-n} 字）"
+
+
+def _tail_at_sentence(text: str, n: int) -> str:
+    if not text:
+        return ""
+    if len(text) <= n:
+        return text
+    tail = text[-n:]
+    # 跳过前导的半句话
+    for i, ch in enumerate(tail):
+        if ch in "。！？…\n":
+            return tail[i + 1 :]
+    return tail
+
+
+@app.post("/api/projects/{pid}/sessions/{sid}/send")
+def session_send(pid: str, sid: str, body: SessionSendIn) -> dict:
+    """发送一条消息。作者消息会触发 AI 回应：优先走 chore 通道接真 LLM（带项目完整上下文
+    + 当前阶段系统提示 + 缺卡提示 + 近 12 条对话），失败时降级为阶段引导桩。
+    若指定 output_key，同时把文本写入 outputs。"""
+    import logging
+    log = logging.getLogger("session.chat")
+    _require_project(pid)
+    ss = _sessions_for(pid)
+    s = ss.get(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if s.status != "active":
+        raise HTTPException(status_code=422, detail=f"会话状态为 {s.status}，不能发消息")
+    role = "ai" if body.as_ai else "author"
+    msg = s.add_message(role, body.text, kind=body.kind, meta=body.meta or {})
+    if body.output_key:
+        s.set_output(body.output_key, body.text)
+
+    reply_text: str | None = None
+    if role == "author":
+        from ..sessions import PHASE_META
+        pm = PHASE_META.get(s.current_phase, {})
+        mode = pm.get("ai_mode", "review")
+        ok, miss = s.can_advance()
+        # silent 模式默认不主动回复（除非有缺卡提示）
+        if mode != "silent" or miss:
+            # 组装消息列表：system(世界观+阶段+缺卡) + 最近 12 条历史
+            from ..pipeline.sushi_generator import WORLD_RULES_SHORT
+            system_parts = [
+                "你是长篇克苏鲁×无限流男频小说《第七日的亡者》的写作陪练 AI。",
+                WORLD_RULES_SHORT,
+                f"当前阶段：{pm.get('title', s.current_phase)}。",
+                f"阶段任务：{pm.get('prompt', '')}",
+                f"你的模式：{mode}。",
+            ]
+            if mode == "diverge":
+                system_parts.append(
+                    "你要发散：直接给灵感、抛画面、开脑洞，不要急着收敛。\n"
+                    "【重要】作者现在主动跟你聊，**优先回答他的问题/满足他的请求**（要灵感就立刻给 2-3 条具体、可写的灵感），"
+                    "不要用「还有 X 项必填」来回避作答。缺项提醒最多放在回复末尾用一句话带过，不要喧宾夺主。"
+                )
+            elif mode == "challenge":
+                system_parts.append("你要挑刺：追问逻辑漏洞、人物动机、伏笔回收，不要一味附和。先回应作者的具体问题，再挑刺。")
+            elif mode == "narrate":
+                system_parts.append("你要朗读/复述骨架，节奏要稳，帮助作者走查。")
+            elif mode == "plan":
+                system_parts.append("你要排期：把内容按 Day/章拆成可执行计划。先回应作者当前提问。")
+            elif mode == "review":
+                system_parts.append("你是记账员风格，客观列账、标红警告。先回应作者当前提问，再视情况提示缺漏。")
+            if miss:
+                system_parts.append(
+                    f"目前还有 {len(miss)} 项必填产物未完成：{'；'.join(miss[:5])}。"
+                    "在回答完作者的问题后，可以用一句话提一句怎么填这些产物，但不要整段都在说缺项。"
+                )
+            else:
+                system_parts.append("本阶段必填产物已齐，可以提示作者推进。")
+            system_parts.append(
+                "输出格式：直接给正文，不要写「收到/好的/我理解了」这类客套开场；"
+                "正文可以分段，但不要写 markdown 标题/列表符号，保持可读散文或短段落风格。"
+                "用中文回复，语气直接、有干货。"
+            )
+            # 注入完整项目上下文（书级 premise + 主角档案 + 已写章节 + 当前场状态）
+            try:
+                ctx_block = _build_chat_context_block(pid, s)
+                if ctx_block.strip():
+                    system_parts.append(
+                        "===== 你现在必须阅读的项目实况（真实已写内容，不要假装没看过）=====\n"
+                        + ctx_block
+                        + "\n===== 以上是项目实况，回答作者问题时必须基于这些内容，不得声称'检索不到/没看到'。====="
+                    )
+            except Exception as _ctx_err:
+                log.warning("chat context block build failed: %s", _ctx_err)
+            messages = [{"role": "system", "content": "\n".join(system_parts)}]
+            # 最近 12 条历史（跳过系统/纯 gate 噪音）；LLM 只认 assistant，内部 ai 角色需转换
+            history = [m for m in s.messages if m.role in ("author","ai")][-12:]
+            for m in history:
+                llm_role = "user" if m.role == "author" else "assistant"
+                messages.append({"role": llm_role, "content": m.text or ""})
+            try:
+                provider = _chore_provider("chat")
+                result = provider.chat(messages)
+                text = (getattr(result, "text", None) or "").strip()
+                if text:
+                    reply_text = text
+            except Exception as e:
+                log.warning("session chat LLM failed, falling back to stub: %s", e)
+
+        # 兜底桩：LLM 挂了也要给出干货，不能只说"收到"
+        if reply_text is None:
+            if miss:
+                miss_tail = f"（还差：{'；'.join(miss[:3])}" + ("…" if len(miss) > 3 else "") + "）"
+            else:
+                miss_tail = "（本段必填已齐，可以推进到下一阶段。）"
+            phase = s.current_phase
+            if mode == "diverge" and phase == "kindle":
+                reply_text = (
+                    "先抛四条方向种子（题材各异，都可以做），挑一个揉或者直接拿来写副本核：\n"
+                    "1)【民俗阴冷·老筒子楼】梅雨季节，唐迟附身在一个刚搬回外婆旧居的夜班校对员身上，"
+                    "第一晚发现楼道里每家门口都摆着一双湿透的红布鞋，但整层楼没住过女人；"
+                    "规则：不能在凌晨 2:47 回应门外喊自己名字的声音，否则鞋尖会转向你家。\n"
+                    "2)【规则冷峻·乡镇医院】替位成来报到的实习医生，夜里巡房发现 3 号病房总在熄灯后多出一个病人，"
+                    "病历上写着同一个名字但每天换一张脸；规则：不能给那个不存在的病人开处方，"
+                    "否则处方上的药会出现在你自己第二天的医嘱里。\n"
+                    "3)【诡异日常·末班地铁】替位成末班车临时调度员，车总在不存在的「青水湾」站停车，"
+                    "上来的人影子没有脚；规则：不能查那个站的任何资料，"
+                    "查了就会被安排去那个站值第二天的夜班。\n"
+                    "4)【科幻外壳·深空观测站】替位成火星轨道观测站的值班工程师，"
+                    "第七天值班周期结束时换班船永远不会来；规则：每次舷窗外出现「地球」时"
+                    "不能看超过 7 秒，否则你会开始数自己到底有几根手指。\n"
+                    f"挑一个顺着外壳→地点→日常→开场异常→规则→钩子→唐迟入场锚（替换谁、为什么七天后死）写副本核就行。{miss_tail}"
+                )
+            elif mode == "diverge":
+                reply_text = (
+                    "暂时没接到大模型，我先按当前阶段给你点可写的抓手："
+                    "盯住一个具体的空间细节（墙皮、气味、声音），往里塞进一个违背常识的小动作，"
+                    "再给这个动作加一个不遵守就出事的代价——钩子基本就出来了。"
+                    f"{miss_tail}"
+                )
+            elif mode == "review":
+                reply_text = f"目前本阶段账面上：{miss_tail} 你可以继续往下写，写完我再帮你盘点。"
+            elif mode == "challenge":
+                reply_text = f"先标记一下：{miss_tail} 等大模型恢复后我帮你挑细节逻辑。"
+            elif mode == "narrate":
+                reply_text = f"复述暂不可用。{miss_tail}"
+            elif mode == "plan":
+                reply_text = f"暂时没法拆计划。{miss_tail}"
+            else:
+                reply_text = miss_tail
+
+        s.add_message("ai", reply_text, kind="chat",
+                      meta={"phase": s.current_phase, "ai_mode": mode,
+                            "responding_to": msg.id, "can_advance": ok, "missing": miss})
+    ss.save(s)
+    return {"ok": True, "session": s.as_dict(), "message": msg.as_dict()}
+
+
+@app.post("/api/projects/{pid}/sessions/{sid}/gate")
+def session_set_gate(pid: str, sid: str, body: SessionGateIn) -> dict:
+    """设置一个阶段必填产物的值（比如 settlement_confirmed=true，core_pitch=一段文本）。"""
+    _require_project(pid)
+    ss = _sessions_for(pid)
+    s = ss.get(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    s.set_output(body.key, body.value)
+    s.add_message("system", f"已填：{body.key}", kind="gate",
+                  meta={"key": body.key, "value": body.value})
+    ok, miss = s.can_advance()
+    if ok:
+        s.add_message("ai", "本段所有必填产物已齐，可以推进到下一阶段。",
+                      kind="gate", meta={"can_advance": True})
+    ss.save(s)
+    return {"ok": True, "session": s.as_dict(), "can_advance": ok, "missing": miss}
+
+
+@app.post("/api/projects/{pid}/sessions/{sid}/advance")
+def session_advance(pid: str, sid: str) -> dict:
+    _require_project(pid)
+    ss = _sessions_for(pid)
+    prev_phase = None
+    try:
+        cur = ss.get(sid)
+        prev_phase = cur.current_phase if cur else None
+        s = ss.advance_phase(sid)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    # 进入新阶段时插入 AI 开场提示
+    from ..sessions import PHASE_META
+    pm = PHASE_META.get(s.current_phase)
+    if pm and s.current_phase != prev_phase and s.status == "active":
+        s.add_message("ai", f"【{pm['title']}】{pm['prompt']}", kind="suggestion",
+                      meta={"phase": s.current_phase, "ai_mode": pm["ai_mode"]})
+    # 副作用：schedule 阶段定稿 → 自动在 DeskStore 创建章位；全副本会话结束
+    if s.status == "completed" and prev_phase == "schedule" and s.scope == "field":
+        _materialize_schedule_to_desk(pid, s)
+    ss.save(s)
+    return {"ok": True, "session": s.as_dict()}
+
+
+def _materialize_schedule_to_desk(pid: str, s) -> None:
+    """schedule 阶段锁定排期后，按 outputs.chapter_plan 在 DeskStore 里建章位。
+    chapter_plan 格式：list[dict]，每项 {no, title, day, summary}。缺省用 outputs 里的整数起点。"""
+    desk = _desk_for(pid)
+    plan = s.outputs.get("chapter_plan")
+    created: list[dict] = []
+    if isinstance(plan, list):
+        for item in plan:
+            if not isinstance(item, dict): continue
+            no = int(item.get("no") or 0)
+            if no <= 0: continue
+            title = str(item.get("title") or "")
+            desk.ensure(no, title=title)
+            # 若带 plot 摘要就作为 plot 初始值（留空则留给作者）
+            summary = str(item.get("summary") or "").strip()
+            if summary:
+                desk.record(no, "plot", summary, run_id=f"session:{s.id}", title=title)
+            created.append({"no": no, "title": title})
+    elif s.outputs.get("chapter_count"):
+        # 没有精细 plan，就按 chapter_count 建空章位（从已有最大章号 +1 起）
+        try:
+            n = int(s.outputs["chapter_count"])
+        except Exception:
+            n = 0
+        if n > 0:
+            existing = desk.all_nos()
+            start = (max(existing) + 1) if existing else 1
+            for i in range(n):
+                desk.ensure(start + i, title="")
+                created.append({"no": start + i, "title": ""})
+    if created:
+        s.add_message(
+            "system",
+            "排期已锁定：在章台创建了 {} 个章位（{}）。下次打开工具会自动定位到第 {} 章。".format(
+                len(created),
+                ", ".join(f"第{c['no']}章" for c in created[:6]) + ("…" if len(created) > 6 else ""),
+                created[0]["no"],
+            ),
+            kind="gate",
+            meta={"created_chapters": created},
+        )
+
+
+@app.post("/api/projects/{pid}/sessions/{sid}/rollback")
+def session_rollback(pid: str, sid: str, body: SessionRollbackIn) -> dict:
+    _require_project(pid)
+    ss = _sessions_for(pid)
+    try:
+        s = ss.rollback_phase(sid, body.to_phase)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    # 回退时解锁回退点之后阶段写进 FieldStore 的卡，让作者能重新编辑
+    # 阶段→该阶段产出的 card_key 映射；只清回退后阶段以后的
+    phase_cards = {
+        "settle_up": ["wrapup"],
+        "kindle": ["core"],
+        "scaffold": list(SCAFFOLD_CARD_KEYS),  # obituary_card/entity_card/truth_outline/...
+        "walkthrough": ["walkthrough"],
+        "schedule": ["chapter_plan"],
+        "daily_write": [],
+    }
+    phase_order = ["settle_up", "kindle", "scaffold", "walkthrough", "schedule", "daily_write"]
+    try:
+        target_idx = phase_order.index(body.to_phase)
+    except ValueError:
+        target_idx = -1
+    to_unlock: list[str] = []
+    clear_outputs: list[str] = []
+    if target_idx >= 0:
+        # 清目标阶段之后所有阶段的卡（目标阶段本身也"重新来"，所以把目标阶段自己的也清掉）
+        for ph in phase_order[target_idx:]:
+            for k in phase_cards.get(ph, []):
+                if k not in to_unlock:
+                    to_unlock.append(k)
+            # kindle 的 core 在 outputs 里叫 core_pitch
+            if ph == "kindle":
+                clear_outputs.append("core_pitch")
+            else:
+                clear_outputs.extend(phase_cards.get(ph, []))
+        # 清会话侧的 locked_cards / editing / 阶段相关 outputs
+        for k in list(s.locked_cards.keys()):
+            card_key = "core" if k == "core_pitch" else k
+            if card_key in to_unlock:
+                s.locked_cards.pop(k, None)
+        for k in clear_outputs:
+            s.outputs.pop(k, None)
+        # 回退后任何卡都不在编辑态
+        s.editing = None
+        # 同时清 FieldStore 里的锁文本
+        fs = _fields_for(pid)
+        if s.scope == "field" and s.field_no is not None:
+            fs.unlock_cards(s.field_no, to_unlock)
+    ss.save(s)
+    s2 = ss.get(sid)
+    return {"ok": True, "session": s2.as_dict()}
+
+
+# 三种风味，圆桌结论里 kindle 阶段要的「民俗/心理/都市怪谈」三栏雏形
+_KINDLE_FLAVORS = [
+    {"label": "民俗怪谈", "hook": "老物件、旧俗、乡里禁忌",
+     "obsession_power": "伞面能映出死者生前最后一眼",
+     "obsession_cost": "每用一次，自己的记忆会被死者借走一段",
+     "world_premise": "乡镇旧俗里残留的怪异，根源是被遗忘的祭祀"},
+    {"label": "心理诡异", "hook": "内心执念的实体化、分不清是谁的记忆",
+     "obsession_power": "在心跳之间能短暂进入死者的主观视角",
+     "obsession_cost": "现实中自己的情绪会被死者的情绪污染",
+     "world_premise": "SAN 越低越分不清现实与死者记忆，恐怖来自主观体验"},
+    {"label": "都市怪谈", "hook": "现代城市缝隙里的规则怪谈、匿名的他者",
+     "obsession_power": "在监控/玻璃/水面反射里能看到死者指向的线索",
+     "obsession_cost": "每次看见反射，自己也会被某个看不见的东西多看一眼",
+     "world_premise": "现代都市日常表层下藏着按规则运行的诡异网络"},
+]
+
+
+def _kindle_diverge(pid: str, s, *, n_variants: int = 3,
+                    user_directive: str | None = None) -> list[dict]:
+    """kindle 阶段：用作者的 core_pitch 构造 3 个风味伪 adapt，跑 N 场 COC 仿真，
+    返回 variants 列表（summary card 结构）。不写入正式 field_run_store，
+    只存在 session.artifacts["kindle_variants"] 里供作者选/揉。"""
+    from ..pipeline.coc_simulator import run_coc_simulation_batch
+    core_pitch = (s.outputs.get("core_pitch") or "").strip()
+    if not core_pitch:
+        raise HTTPException(status_code=422, detail="先写一段副本核（core_pitch）再发散")
+    field_no = int(s.field_no or 1)
+    # 若 flavor 数少于 n_variants，重复补
+    flavors = list(_KINDLE_FLAVORS)
+    while len(flavors) < n_variants:
+        flavors.append(flavors[len(flavors) % len(_KINDLE_FLAVORS)])
+    flavors = flavors[:n_variants]
+
+    book_store = _book_for(pid)
+    field_store = _fields_for(pid)
+    field_run_store = _field_run_for(pid)
+    coc_store = _coc_run_for(pid)
+    runner = _coc_runner()
+
+    # 用第一个 flavor 构造一份迷你 adapt，作为三场共同的骨架（每场通过 variant_seed 再注入差异）
+    base_adapt = {
+        "vid": "kindle",
+        "title": f"副本雏形（来自：{core_pitch[:24]}…）",
+        "world_premise": core_pitch,
+        "hook": core_pitch,
+        "obsession_power": "",
+        "obsession_cost": "",
+        "entry_mood": "潮湿、不安",
+    }
+    directive_parts = []
+    if user_directive:
+        directive_parts.append(user_directive)
+    directive_parts.append(
+        "【副本核】" + core_pitch + "\n"
+        "本场是 kindle 发散阶段的一个雏形，不需要严谨收敛，"
+        "重点是给出一个有画面感、有诡异气质、有 1-2 个让人后背发凉的 NPC/反转的 Day1-7 雏形。"
+    )
+
+    events: list[dict] = []
+    def _on_event(kind: str, payload: dict) -> None:
+        events.append({"kind": kind, "payload": payload})
+
+    variants = run_coc_simulation_batch(
+        runner,
+        book_store=book_store, field_store=field_store,
+        field_no=field_no, coc_store=coc_store, field_run_store=field_run_store,
+        adapt_parsed=base_adapt,
+        n_sessions=n_variants,
+        max_pairs_per_session=4,     # kindle 阶段少跑几轮，只给雏形
+        max_turns_per_session=16,
+        on_event=_on_event,
+        user_directive="\n".join(directive_parts),
+    )
+    # 给每个 variant 打 flavor 标签
+    for i, v in enumerate(variants):
+        fl = flavors[i % len(flavors)]
+        v["flavor"] = fl["label"]
+        v["flavor_hook"] = fl["hook"]
+    return variants
+
+
+@app.post("/api/projects/{pid}/sessions/{sid}/action")
+def session_action(pid: str, sid: str, body: SessionActionIn) -> dict:
+    """会话内动作：阶段特有的「主动让 AI 干活」接口（区别于 send 闲聊）。
+    支持的 action：
+      - kindle_diverge：kindle 阶段用 core_pitch 跑 3 场 COC 雏形，结果存 artifacts
+      - daily_summon：  daily_write 阶段召唤 AI 给 2-3 个卡壳选项（桩实现）
+      - walkthrough_step：walkthrough 阶段让 AI 朗读下一段骨架（桩实现）
+    """
+    _require_project(pid)
+    ss = _sessions_for(pid)
+    s = ss.get(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if s.status != "active":
+        raise HTTPException(status_code=422, detail=f"会话状态为 {s.status}")
+    from ..sessions import PHASE_META
+    phase = s.current_phase
+    pm = PHASE_META.get(phase, {})
+    args = body.args or {}
+
+    if body.action == "kindle_diverge":
+        if phase != "kindle":
+            raise HTTPException(status_code=422, detail=f"当前阶段是 {pm.get('title', phase)}，不能 kindle_diverge")
+        n = max(1, min(5, int(body.n_variants or 3)))
+        s.add_message("system", f"开始跑 {n} 场 COC 雏形（kindle 发散）…", kind="gate")
+        ss.save(s)
+        try:
+            variants = _kindle_diverge(pid, s, n_variants=n,
+                                       user_directive=args.get("user_directive"))
+        except HTTPException:
+            raise
+        except Exception as e:
+            s.add_message("ai", f"发散失败：{type(e).__name__}: {e}", kind="suggestion")
+            ss.save(s)
+            raise HTTPException(status_code=500, detail=str(e))
+        s.artifacts["kindle_variants"] = variants
+        # 拼一个结构化的 AI 消息：三栏雏形摘要
+        lines = ["我先跑了 {} 个雏形，方向都基于你写的副本核：".format(len(variants))]
+        for i, v in enumerate(variants, 1):
+            lines.append(f"\n### 雏形 {i}·{v.get('flavor','')}（{v.get('ending_label','?')}）\n")
+            lines.append(f"- 一句话：{v.get('one_liner','')}")
+            if v.get("core_twist"):
+                lines.append(f"- 核心反转：{v['core_twist']}")
+            if v.get("extra_npcs"):
+                raw_npcs = v["extra_npcs"] or []
+                npc_names = [
+                    (n.get("name","?") if isinstance(n, dict) else str(n))
+                    for n in raw_npcs
+                ]
+                lines.append(f"- 新增 NPC：{', '.join(npc_names[:4])}")
+            lines.append(f"- 结局 SAN {v.get('final_san')} / HP {v.get('final_hp')} / {v.get('turns')} 回合")
+        lines.append("\n选一个你最喜欢的（或揉几个），把它改写成你的 300-500 字副本核发我，我再陪你进骨架。")
+        s.add_message("ai", "\n".join(lines), kind="suggestion",
+                      meta={"phase": phase, "action": "kindle_diverge",
+                            "variant_count": len(variants),
+                            "variant_titles": [v.get("title") for v in variants]})
+        ss.save(s)
+        return {"ok": True, "session": s.as_dict(), "variants": variants}
+
+    if body.action == "daily_summon":
+        if phase != "daily_write":
+            raise HTTPException(status_code=422, detail="只有日更阶段可以召唤")
+        # 桩实现：返回三个短小选项
+        options = [
+            "从唐迟的一个小动作切入（比如摸伞骨/数呼吸），再推进情节",
+            "用环境的小异常先给读者一个预警，再让唐迟进入下一个场景",
+            "让一个 NPC 突然说一句有两层意思的话，把钩子埋下去",
+        ]
+        s.add_message("ai", "三个小方向，挑一个（或都不用）：\n" +
+                      "\n".join(f"{i+1}. {o}" for i, o in enumerate(options)),
+                      kind="suggestion", meta={"phase": phase, "action": "daily_summon"})
+        ss.save(s)
+        return {"ok": True, "session": s.as_dict(), "options": options}
+
+    if body.action == "walkthrough_step":
+        if phase != "walkthrough":
+            raise HTTPException(status_code=422, detail="只有走查阶段可以朗读")
+        # 桩实现
+        s.add_message("ai",
+                      "（走查·桩）AI 会按 Day1→Day7 + 间章逐段朗读骨架，"
+                      "作者可以随时喊停修改；完整版接入真实 LLM 后开放。",
+                      kind="narration", meta={"phase": phase, "action": "walkthrough_step"})
+        ss.save(s)
+        return {"ok": True, "session": s.as_dict()}
+
+    if body.action == "plan_chapters":
+        """schedule 阶段：根据 truth_outline 生成一份初始 chapter_plan（桩实现，后续接真实 LLM）。
+        真实版本：按 Day+间章自动拆章，给每章 title/summary/字数/钩子/伏笔回收。"""
+        if phase != "schedule":
+            raise HTTPException(status_code=422, detail="只有排期阶段可以拆章")
+        truth = (s.outputs.get("truth_outline") or "").strip()
+        if not truth:
+            raise HTTPException(status_code=422, detail="先完成骨架的「Day1-7 真相梗概」才能拆章")
+        # 桩：给一个 9 章模板（Day1-3 章 + Day4-5 章 + Day6-7 章 + 间章）；真实版用 LLM 按 truth 拆
+        existing = _desk_for(pid).all_nos()
+        start_no = (max(existing) + 1) if existing else 1
+        plan = []
+        titles = [
+            ("D1·陌生躯壳", "唐迟醒来确认换身、线索三件套、发现七日死线"),
+            ("D1·茶馆铁观音", "茶馆三人对质、朱砂纸发热、章末'拍到了'钩子"),
+            ("D2·", "Day2 开端（待填）"),
+            ("D3·", "Day3 中段（待填）"),
+            ("D4·", "Day4 转折（待填）"),
+            ("D5·", "Day5 第一个高潮（待填）"),
+            ("D6·", "Day6 代价升级（待填）"),
+            ("D7·讣告兑现", "第七日死线收网"),
+            ("间章·归来", "回到出租屋、煤球、账本"),
+        ]
+        for i, (t, summ) in enumerate(titles):
+            plan.append({
+                "no": start_no + i,
+                "title": t,
+                "day": "D1" if i < 2 else f"D{i+1}" if i < 8 else "interlude",
+                "summary": summ,
+            })
+        s.set_output("chapter_plan", plan)
+        s.add_message("ai",
+                      "（拆章·桩）我按 Day1→Day7+间章先给了一份 9 章模板，你可以改/合并/拆分。"
+                      "改完点右侧「锁定章节表」就会在章台建好章位。",
+                      kind="plan", meta={"phase": phase, "action": "plan_chapters", "plan_count": len(plan)})
+        ss.save(s)
+        return {"ok": True, "session": s.as_dict(), "plan": plan}
+
+    raise HTTPException(status_code=422, detail=f"未知 action：{body.action}")
+
+
+@app.delete("/api/projects/{pid}/sessions/{sid}")
+def session_abandon(pid: str, sid: str) -> dict:
+    _require_project(pid)
+    ss = _sessions_for(pid)
+    s = ss.get(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    s.status = "abandoned"
+    s.add_message("system", "会话已放弃。", kind="gate")
+    ss.save(s)
+    return {"ok": True, "session": s.as_dict()}
+
+
+# ======================================================================
+# M1：回转寿司 + 世界状态热板新端点
+# ======================================================================
+
+# ---- 锁卡片（lock-on-write 统一入口） ----
+
+class LockCardIn(BaseModel):
+    card_key: str                       # core | obituary_card | entity_card | truth_outline |
+                                        # tangchi_start | core_twist | foreshadows | cost_cap |
+                                        # walkthrough_log | schedule | scene:{idx}
+    text: str
+    scope: str = "field"                # field | chapter
+    field_no: int | None = None
+    chapter: int | None = None          # chapter 模式下的章号
+    source_msg_id: str | None = None    # 触发锁的对话消息 id（溯源）
+    note: str = ""
+
+
+@app.post("/api/projects/{pid}/sessions/{sid}/lock")
+def session_lock_card(pid: str, sid: str, body: LockCardIn) -> dict:
+    """回转寿司的「落锤」动作：把当前编辑态文本写进正式存储（FieldStore/DeskStore），
+    同时在会话里记录锁事件。M1 阶段不自动生成 StateDiff（M3 接 LLM 抽取）。
+    """
+    _require_project(pid)
+    ss = _sessions_for(pid)
+    s = ss.get(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if s.status != "active":
+        raise HTTPException(status_code=422, detail=f"会话状态为 {s.status}，不能锁定")
+
+    key = body.card_key
+    text = body.text or ""
+    scope = body.scope or (s.scope or "field")
+
+    # 定位上下文编号（field_no / chapter）：优先 body，其次 session
+    field_no = body.field_no if body.field_no is not None else s.field_no
+    chapter = body.chapter if body.chapter is not None else s.chapter
+
+    # ---- 路由到对应 store 写入（ValueError 统一转 422，并兜底补建缺失场）----
+    settle_preview = None
+    try:
+        if key == "core":
+            if field_no is None:
+                raise HTTPException(status_code=422, detail="锁 core 需要 field_no")
+            fs = _fields_for(pid)
+            if fs.get(field_no) is None:
+                fs.create(title=s.title or f"第{field_no}场", volume_no=1, no=field_no)
+            fw = fs.set_core(field_no, text, source_msg_id=body.source_msg_id)
+            locked_ref = {"scope": "field", "field_no": field_no, "card_key": key}
+        elif key.startswith("scene:"):
+            # 场景锁：key 形如 "scene:2"（章内场景 idx=2）
+            try:
+                idx = int(key.split(":", 1)[1])
+            except ValueError:
+                raise HTTPException(status_code=422, detail=f"scene key 格式错：{key}")
+            chapter_no = chapter
+            if chapter_no is None:
+                raise HTTPException(status_code=422, detail="锁场景需要 chapter 号")
+            desk = _desk_for(pid)
+            scene = desk.lock_scene(chapter_no, idx, text, source_msg_id=body.source_msg_id)
+            locked_ref = {"scope": "chapter", "chapter": chapter_no,
+                          "card_key": key, "scene_idx": idx, "scene": scene.as_dict()}
+        elif key in ALL_CARD_KEYS:
+            if field_no is None:
+                raise HTTPException(status_code=422, detail=f"锁 {key} 需要 field_no")
+            fs = _fields_for(pid)
+            if fs.get(field_no) is None:
+                fs.create(title=s.title or f"第{field_no}场", volume_no=1, no=field_no)
+            lock_obj = fs.lock_card(field_no, key, text,
+                                    source_msg_id=body.source_msg_id, note=body.note)
+            locked_ref = {"scope": "field", "field_no": field_no,
+                          "card_key": key, "lock": lock_obj.as_dict()}
+            # ---- M3：锁 wrapup → 自动抽取归账预览（不写入） ----
+            if key == "wrapup" and text.strip():
+                try:
+                    from ..pipeline.settle import extract_settle_from_wrapup
+                    settle_preview = extract_settle_from_wrapup(
+                        text, _chore_provider("settle"), _prompt_store,
+                        field_no=field_no,
+                    )
+                except Exception:
+                    settle_preview = None
+        else:
+            supported = "core、scene:N、" + "、".join(ALL_CARD_KEYS)
+            raise HTTPException(status_code=422,
+                                detail=f"未知 card_key：{key}；支持 {supported}")
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    # ---- 会话侧记录锁（record_lock 内部会清 editing 并存盘）----
+    sys_msg = s.add_message("system", f"已锁定「{key}」。",
+                            kind="card_edit",
+                            meta={"card_key": key, "action": "lock",
+                                  "source_msg_id": body.source_msg_id,
+                                  "locked_ref": locked_ref})
+    s2 = ss.record_lock(sid, key, sys_msg.id)
+    # 把锁定文本同步写到 outputs[gate_key]，推进阶段的 can_advance 才能识别
+    gate_key = "core_pitch" if key == "core" else key
+    s2.set_output(gate_key, text)
+    ss.save(s2)
+    s3 = ss.get(sid)
+    return {"ok": True, "session": s3.as_dict(), "locked_ref": locked_ref,
+            "settle_preview": settle_preview,
+            "diff_id": None}   # M1 不自动产生 diff；M3 settle_preview 直接给前端
+
+
+# ---- 世界状态热板：查询 ----
+
+@app.get("/api/projects/{pid}/state")
+def state_overview(pid: str) -> dict:
+    """返回世界状态热板总览：主角 + 实体计数 + 最近变动 + 关系数。"""
+    _require_project(pid)
+    es = _entities_for(pid)
+    return {
+        "protagonist": es.protagonist.as_dict(),
+        "counts": {t: len(es.list(type=t)) for t in ENTITY_TYPES},
+        "changes_total": len(es.changes),
+        "relations_total": len(es.relations),
+        "pending_diffs": len(es.pending_diffs),
+        "applied_diffs": len(es.applied_diffs),
+    }
+
+
+@app.get("/api/projects/{pid}/state/pending")
+def state_pending_diffs(pid: str) -> dict:
+    """返回待确认的状态变更清单（来自会话/草稿抽取后 AI 提议）。"""
+    _require_project(pid)
+    es = _entities_for(pid)
+    items = [d.as_dict() for d in es.pending_diffs if d.status == "pending"]
+    return {"pending": items, "count": len(items)}
+
+
+@app.get("/api/projects/{pid}/state/snapshot")
+def state_snapshot(pid: str, chapter: int | None = None) -> dict:
+    """截至某章的实体快照（用于章台开章任务书/prompt 注入）。chapter 缺省返回最新。"""
+    _require_project(pid)
+    es = _entities_for(pid)
+    ch = chapter if chapter is not None else 999999
+    snap = es.chapter_snapshot(ch)
+    snap["protagonist"] = es.protagonist.as_dict()
+    return snap
+
+
+# ---- 世界状态热板：确认 diff ----
+
+class ApplyDiffIn(BaseModel):
+    # selections 结构：{bucket: {index_in_bucket: true/false}}
+    # bucket ∈ new_entities/state_changes/new_foreshadows/foreshadow_payoffs/ripple_hints
+    selections: dict[str, dict[str, bool]]
+
+
+@app.post("/api/projects/{pid}/state/apply-diff/{diff_id}")
+def state_apply_diff(pid: str, diff_id: str, body: ApplyDiffIn) -> dict:
+    """确认一份 StateDiff：按 selections 把选中的变更写入 EntityStore。"""
+    _require_project(pid)
+    es = _entities_for(pid)
+    try:
+        # 把前端传的字符串 key 转回 int
+        norm: dict[str, dict[int, bool]] = {}
+        for bucket, idx_map in (body.selections or {}).items():
+            norm[bucket] = {int(k): bool(v) for k, v in idx_map.items()}
+        result = es.apply_diff(diff_id, norm)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    es._flush()
+    return {"ok": True, "diff_id": diff_id, "applied": result}
+
+
+@app.post("/api/projects/{pid}/state/dismiss-diff/{diff_id}")
+def state_dismiss_diff(pid: str, diff_id: str) -> dict:
+    """丢弃一份待确认 diff（不改任何实体）。"""
+    _require_project(pid)
+    es = _entities_for(pid)
+    es.dismiss_diff(diff_id)
+    es._flush()
+    return {"ok": True, "diff_id": diff_id}
+
+
+# ---- 回转寿司：生成候选（M2 接真 LLM，core/obituary_card/entity_card 三卡） ----
+
+class GenerateCandidatesIn(BaseModel):
+    card_key: str                       # core / obituary_card / entity_card / scene:{idx}/...
+    phase: str                          # kindle/scaffold/walkthrough/...
+    axis_label: str = ""                # 可选：覆盖默认差异轴标签
+    axis_dimension: str = ""            # 可选：覆盖默认差异轴维度
+    n: int = 3
+    context_hint: str = ""              # 作者额外要求（可选）
+
+
+@app.post("/api/projects/{pid}/sessions/{sid}/source-pdf")
+async def session_upload_source_pdf(
+    pid: str, sid: str,
+    file: UploadFile = File(...),
+    user_hint: str = Form(""),
+) -> dict:
+    """上传跑团/模组 PDF → 服务端抽文本 → LLM 做版权规避改编 → 存到 session.source_material，
+    之后 kindle 的 generate-candidates 会自动把改编稿注入上下文。"""
+    import time as _time
+    from datetime import datetime
+    from ..pipeline.sushi_generator import extract_pdf_text, adapt_pdf_source
+    _require_project(pid)
+    ss = _sessions_for(pid)
+    s = ss.get(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if s.status != "active":
+        raise HTTPException(status_code=422, detail=f"会话状态为 {s.status}")
+    fname = (file.filename or "").lower()
+    if not fname.endswith(".pdf"):
+        raise HTTPException(status_code=422, detail="仅支持 .pdf 文件")
+    pdf_bytes = await file.read()
+    if len(pdf_bytes) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=422, detail="PDF 过大（>20MB），请先压缩")
+    if not pdf_bytes:
+        raise HTTPException(status_code=422, detail="PDF 文件为空")
+    # 抽文本
+    t0 = _time.time()
+    try:
+        pdf_text, _ = extract_pdf_text(pdf_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"PDF 解析失败：{e}")
+    log.info("pdf-upload %s: extracted %d chars in %.1fs",
+             file.filename, len(pdf_text), _time.time() - t0)
+    if len(pdf_text.strip()) < 100:
+        raise HTTPException(
+            status_code=422,
+            detail="提取出的文本太短（可能是扫描版 PDF，需要 OCR；或文件已损坏）",
+        )
+    # 接真 LLM 改编（复用 sushi 通道，与回转寿司同配置）
+    t1 = _time.time()
+    try:
+        result = adapt_pdf_source(
+            _chore_provider("sushi"),
+            _prompt_store,
+            pdf_text,
+            user_hint=user_hint or "",
+        )
+    except ValueError as e:
+        log.warning("pdf-upload %s: adapt ValueError after %.1fs: %s",
+                    file.filename, _time.time() - t1, e)
+        raise HTTPException(status_code=502, detail=f"版权规避改编失败：{e}")
+    except Exception as e:
+        log.warning("pdf-upload %s: adapt exception after %.1fs: %s",
+                    file.filename, _time.time() - t1, e)
+        raise HTTPException(status_code=502, detail=f"改编调用异常：{e}")
+    log.info("pdf-upload %s: LLM adapt done in %.1fs (attempts=%d, premise=%d chars)",
+             file.filename, _time.time() - t1, result.attempts, len(result.adapted_premise))
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    src = {
+        "kind": "pdf_adapt",
+        "premise": result.adapted_premise,
+        "renamed_cast": list(result.renamed_cast),
+        "changed_elements": list(result.changed_elements),
+        "risk_flags": list(result.risk_flags),
+        "original_excerpt": result.original_excerpt,
+        "original_chars": result.original_chars,
+        "filename": file.filename or "",
+        "adapted_at": now_str,
+        "attempts": result.attempts,
+    }
+    # 写回 session + 加一条系统消息
+    s.source_material = src
+    cast_n = len(result.renamed_cast)
+    change_n = len(result.changed_elements)
+    risk_n = len(result.risk_flags)
+    s.add_message(
+        "system",
+        f"已上传跑团剧本文档《{file.filename}》并完成版权规避改编："
+        f"替换角色 {cast_n} 位，关键事件改动 {change_n} 处，风险提示 {risk_n} 条。"
+        f"接下来点击「上三盘」时 AI 会以改编稿为灵感生成副本核候选。",
+        kind="source_upload",
+        meta={"source_material": src},
+    )
+    ss.save(s)
+    s2 = ss.get(sid)
+    return {
+        "ok": True,
+        "session": s2.as_dict(),
+        "adapt": {
+            "premise": result.adapted_premise,
+            "renamed_cast": list(result.renamed_cast),
+            "changed_elements": list(result.changed_elements),
+            "risk_flags": list(result.risk_flags),
+            "original_excerpt": result.original_excerpt,
+            "original_chars": result.original_chars,
+            "filename": file.filename or "",
+            "attempts": result.attempts,
+        },
+    }
+
+
+@app.post("/api/projects/{pid}/sessions/{sid}/generate-candidates")
+def session_generate_candidates(pid: str, sid: str, body: GenerateCandidatesIn) -> dict:
+    """回转寿司生成 N 份候选。core/obituary_card/entity_card 接真 LLM，
+    其他卡（M2 暂不支持）返回 422 提示先用旧编辑框。"""
+    _require_project(pid)
+    from ..sessions import Candidate
+    from ..pipeline.sushi_generator import (
+        generate_card_candidates, supported_card_keys, CARD_AXES,
+        _build_context_block,
+    )
+    ss = _sessions_for(pid)
+    s = ss.get(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if s.status != "active":
+        raise HTTPException(status_code=422, detail=f"会话状态为 {s.status}")
+
+    if body.card_key not in supported_card_keys():
+        raise HTTPException(
+            status_code=422,
+            detail=f"M2 回转寿司暂不支持 card_key={body.card_key}（目前只支持"
+                   f" {', '.join(supported_card_keys())}）；其他卡请先用旧编辑框手动写。",
+        )
+
+    default_n = int(CARD_AXES[body.card_key].get("default_n", 3))
+    n = max(1, min(8, int(body.n or default_n)))
+    axis = CARD_AXES[body.card_key]
+    axis_dim = body.axis_dimension or axis.get("dimension", "")
+    axis_label = body.axis_label or axis["axis_label"]
+
+    # 取上下文（book+上游已锁卡+主角状态）
+    fs = _fields_for(pid)
+    es = _entities_for(pid)
+    bs = _book_for(pid)
+    field_no = s.field_no
+    if field_no is None:
+        raise HTTPException(status_code=422, detail="当前会话未关联 field_no，无法生成场级卡")
+    # 如果作者上传过跑团 PDF 改编稿，把改编后的副本核雏形作为素材注入
+    extra_ctx = ""
+    src = s.source_material or {}
+    if src.get("kind") == "pdf_adapt" and src.get("premise"):
+        extra_ctx = (
+            f"【跑团剧本版权规避改编稿（供参考，不要直接复用其中可能残留的原名）】\n"
+            f"{src.get('premise','')}\n"
+        )
+        if src.get("changed_elements"):
+            extra_ctx += "【相较原剧本的关键改动】\n" + "\n".join(f"- {x}" for x in src["changed_elements"]) + "\n"
+        if src.get("risk_flags"):
+            extra_ctx += "【需要继续规避的风险点】\n" + "\n".join(f"- {x}" for x in src["risk_flags"]) + "\n"
+    ctx = _build_context_block(
+        book_store=bs, fs=fs, es=es, field_no=field_no, card_key=body.card_key,
+        extra_context=extra_ctx,
+        volume_store=_volumes_for(pid),
+        volume_no=s.volume_no,
+        phase=s.current_phase,
+        is_interlude=False,   # 回转寿司候选生成是卡面生成，不按单章间章判断；间章提示由 daily_write 阶段拼
+    )
+
+    try:
+        result = generate_card_candidates(
+            _chore_provider("sushi"),
+            _prompt_store,
+            card_key=body.card_key,
+            context_block=ctx,
+            user_hint=body.context_hint or "",
+            n=n,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=502, detail=f"候选生成失败：{e}")
+
+    cands = []
+    for item in result.candidates:
+        twist = str(item.get("twist", "") or "").strip()
+        c = Candidate(
+            id="",
+            phase=body.phase,
+            card_key=body.card_key,
+            content=item["content"],
+            axis_label=axis_label,
+            axis_dimension=axis_dim,
+            twist=twist,
+            rationale=item.get("rationale", ""),
+            created_at="",
+        )
+        # twist 作为盘头标签拼在 rationale 前面（前端回转寿司一盘左上角显示）
+        if twist:
+            tag = f"[{twist}] "
+            if not c.rationale.startswith(tag):
+                c.rationale = tag + c.rationale
+        cands.append(c)
+
+    saved = ss.add_candidates(sid, cands)
+    # add_candidates 内部 get→改→save；外层再 get 一次拿最新快照
+    s2 = ss.get(sid)
+    return {
+        "ok": True,
+        "session": s2.as_dict(),
+        "candidates": [c.as_dict() for c in saved],
+        "stub": False,
+        "axis_label": axis_label,
+        "axis_dimension": axis_dim,
+    }
+
+
+# ---- 回转寿司：挑候选 / 编辑 ----
+
+class PickCandidateIn(BaseModel):
+    candidate_id: str | None = None     # None = 从空白开始
+    card_key: str
+    initial_text: str | None = None     # 不传则自动填候选文本
+
+
+@app.post("/api/projects/{pid}/sessions/{sid}/pick-candidate")
+def session_pick_candidate(pid: str, sid: str, body: PickCandidateIn) -> dict:
+    """挑中一份候选 → 进入编辑态。candidate_id=None 表示从空白开始。"""
+    _require_project(pid)
+    ss = _sessions_for(pid)
+    s = ss.get(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    # 找候选内容
+    initial = body.initial_text
+    if initial is None and body.candidate_id:
+        cand = next((c for c in s.candidates if c.id == body.candidate_id), None)
+        if cand is None:
+            raise HTTPException(status_code=404, detail=f"候选不存在：{body.candidate_id}")
+        initial = cand.content
+    try:
+        editing = ss.start_editing(sid, body.card_key,
+                                   candidate_id=body.candidate_id,
+                                   initial_text=initial or "")
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    # start_editing 内部已 save；重新读回避免外层 s 引用过期
+    s = ss.get(sid)
+    return {"ok": True, "session": s.as_dict(), "editing": editing.as_dict()}
+
+
+class EditingUpdateIn(BaseModel):
+    text: str
+
+
+@app.post("/api/projects/{pid}/sessions/{sid}/editing/update")
+def session_editing_update(pid: str, sid: str, body: EditingUpdateIn) -> dict:
+    """作者手动改动编辑态文本（不记消息，避免刷屏）。"""
+    _require_project(pid)
+    ss = _sessions_for(pid)
+    if ss.get(sid) is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    try:
+        ss.update_editing_text(sid, body.text or "")
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"ok": True, "session": ss.get(sid).as_dict()}
+
+
+@app.post("/api/projects/{pid}/sessions/{sid}/editing/end")
+def session_editing_end(pid: str, sid: str) -> dict:
+    """退出编辑态（不锁），用于切换卡片。"""
+    _require_project(pid)
+    ss = _sessions_for(pid)
+    if ss.get(sid) is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    try:
+        ss.end_editing(sid)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"ok": True, "session": ss.get(sid).as_dict()}
+
+
+# ---- 回转寿司：编辑态 AI 建议（suggestion：返回完整改后全文） ----
+
+class EditingSuggestIn(BaseModel):
+    instruction: str                   # 作者改稿要求（如"开头更冷一点"）
+    apply: bool = False                # True=直接把建议写回编辑态文本
+
+
+@app.post("/api/projects/{pid}/sessions/{sid}/editing/ai-suggest")
+def session_editing_ai_suggest(pid: str, sid: str, body: EditingSuggestIn) -> dict:
+    """编辑态 AI 改稿建议（suggestion 类型）：返回完整改后全文 + 理由。"""
+    _require_project(pid)
+    from ..pipeline.sushi_generator import suggest_edit, _build_context_block
+    ss = _sessions_for(pid)
+    s = ss.get(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if s.editing is None:
+        raise HTTPException(status_code=422, detail="当前不在编辑态，先选一个候选或新建")
+    instruction = (body.instruction or "").strip()
+    # 前端允许空指令：不填就走"润色优化"默认提示
+    if not instruction:
+        instruction = "请在保持原意与结构不变的前提下，做一版润色优化：让语言更贴合克苏鲁无限流的阴冷基调，节奏更紧凑，细节更瘆人。"
+    fs = _fields_for(pid)
+    es = _entities_for(pid)
+    bs = _book_for(pid)
+    ctx = ""
+    if s.field_no is not None:
+        ctx = _build_context_block(
+            book_store=bs, fs=fs, es=es, field_no=s.field_no,
+            card_key=s.editing.card_key,
+            volume_store=_volumes_for(pid),
+            volume_no=s.volume_no,
+            phase=s.current_phase,
+            is_interlude=False,
+        )
+    try:
+        result = suggest_edit(
+            _chore_provider("sushi_edit"),
+            _prompt_store,
+            card_key=s.editing.card_key,
+            current_text=s.editing.current_text,
+            instruction=instruction,
+            context_block=ctx,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=502, detail=f"AI 改稿失败：{e}")
+
+    # 写入一条 suggestion 消息（作者可以看到全文）
+    msg = s.add_message(
+        role="ai",
+        text=f"【改稿建议·{result.reason}】\n\n{result.content}",
+        kind="suggestion",
+        meta={
+            "card_key": s.editing.card_key,
+            "reason": result.reason,
+            "suggested_text": result.content,
+        },
+    )
+    if body.apply:
+        # apply=True 直接把建议写回编辑态文本
+        s.editing.current_text = result.content
+        s.editing.edit_round = (s.editing.edit_round or 0) + 1
+        s.editing.last_suggestion_msg_id = msg.id
+    ss.save(s)
+    s2 = ss.get(sid)
+    return {
+        "ok": True,
+        "session": s2.as_dict(),
+        "message_id": msg.id,
+        "suggested_text": result.content,
+        "reason": result.reason,
+        "applied": bool(body.apply),
+    }
+
+
+
+
+
+# ============================================================
+# 卷（volumes/）CRUD + 杀青归账预览/应用（M3）
+# ============================================================
+
+class VolumeCreateIn(BaseModel):
+    title: str = ""
+    tone_arc: str = ""
+    planned_interludes: int = 3
+    foreshadows_to_plant: list[str] = []
+    bonds_to_deepen: list[str] = []
+    gods_to_hint: list[str] = []
+    contamination_goal: int = 0
+    satisfaction_beats: list[str] = []
+
+
+class VolumeUpdateIn(BaseModel):
+    title: str | None = None
+    tone_arc: str | None = None
+    planned_interludes: int | None = None
+    foreshadows_to_plant: list[str] | None = None
+    bonds_to_deepen: list[str] | None = None
+    gods_to_hint: list[str] | None = None
+    contamination_goal: int | None = None
+    satisfaction_beats: list[str] | None = None
+    endgame_layer_hints: dict | None = None
+
+
+class SettlePreviewIn(BaseModel):
+    wrapup_text: str
+
+
+class SettleApplyIn(BaseModel):
+    diff: dict
+
+
+@app.get("/api/projects/{pid}/volumes")
+def volumes_list(pid: str) -> dict:
+    """列出所有卷（规划板摘要）。"""
+    _require_project(pid)
+    vs = _volumes_for(pid)
+    vols = vs.all_list()
+    return {"volumes": [v.as_dict() for v in vols], "total": len(vols)}
+
+
+@app.get("/api/projects/{pid}/volumes/latest")
+def volumes_latest(pid: str) -> dict:
+    """最新卷（用于进入下一场时前端拿卷号）。"""
+    _require_project(pid)
+    vs = _volumes_for(pid)
+    v = vs.latest()
+    if v is None:
+        return {"volume": None}
+    return {"volume": v.as_dict()}
+
+
+@app.post("/api/projects/{pid}/volumes")
+def volumes_create_next(pid: str, body: VolumeCreateIn) -> dict:
+    """显式创建下一卷（通常由 settle_up 自动创建；此接口供前端手动新建/规划下一卷）。
+    注意：create_next 是幂等的（同 field_no 不重复创建），但本接口是在指定新场时手动调用，
+    这里通过 body 里没有 field_no 时自动取下一场号（latest.field_no + 1）。
+    """
+    _require_project(pid)
+    vs = _volumes_for(pid)
+    fs = _fields_for(pid)
+    bs = _book_for(pid)
+    # 自动取最新场号 +1
+    latest_vol = vs.latest()
+    next_field = (latest_vol.field_no + 1) if latest_vol else 1
+    # 确保该场在 FieldStore 存在（不强制；若未存在，volume 仍创建，只是 field_no 预留）
+    v = vs.create_next(bs, next_field)
+    # 应用规划板初始字段
+    kwargs = body.model_dump(exclude_unset=True) if hasattr(body, "model_dump") else body.dict()
+    kwargs = {k: val for k, val in kwargs.items() if val is not None}
+    v = vs.update_planning(v.volume_no, **kwargs)
+    return {"volume": v.as_dict(), "ok": True}
+
+
+@app.patch("/api/projects/{pid}/volumes/{vol_no}")
+def volumes_update(pid: str, vol_no: int, body: VolumeUpdateIn) -> dict:
+    """更新卷规划板字段。"""
+    _require_project(pid)
+    vs = _volumes_for(pid)
+    kwargs = body.model_dump(exclude_none=True) if hasattr(body, "model_dump") else body.dict(exclude_none=True)
+    try:
+        v = vs.update_planning(vol_no, **kwargs)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"volume": v.as_dict(), "ok": True}
+
+
+@app.post("/api/projects/{pid}/sessions/{sid}/settle-preview")
+def session_settle_preview(pid: str, sid: str, body: SettlePreviewIn) -> dict:
+    """根据 wrapup_text 抽取归账 diff（不写入）。供前端在用户修改了 wrapup 文本后
+    手动重新预览 diff 时调用（锁卡时已自动返回一次 preview）。"""
+    _require_project(pid)
+    ss = _sessions_for(pid)
+    s = ss.get(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    field_no = s.field_no
+    from ..pipeline.settle import extract_settle_from_wrapup
+    try:
+        diff = extract_settle_from_wrapup(
+            body.wrapup_text or "",
+            _chore_provider("settle"), _prompt_store,
+            field_no=field_no,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"归账抽取失败：{e}")
+    return {"ok": True, "diff": diff, "field_no": field_no}
+
+
+@app.post("/api/projects/{pid}/sessions/{sid}/settle-apply")
+def session_settle_apply(pid: str, sid: str, body: SettleApplyIn) -> dict:
+    """前端确认归账 diff 后真正写入：
+    1. EntityStore.apply_settle_diff 把 crafts/echoes/... 合进 ProtagonistState；
+    2. VolumeStore.record_settle 写入最新卷/当前卷的 post_field_settle。
+    """
+    _require_project(pid)
+    ss = _sessions_for(pid)
+    s = ss.get(sid)
+    if s is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    field_no = s.field_no
+    if field_no is None:
+        raise HTTPException(status_code=422, detail="当前会话未关联 field_no")
+    diff = body.diff or {}
+    es = _entities_for(pid)
+    try:
+        summary = es.apply_settle_diff(diff, field_no)
+        es._flush()
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    # 写入当前卷（或最新卷）的 post_field_settle
+    vs = _volumes_for(pid)
+    target_vol_no = s.volume_no
+    vol = None
+    if target_vol_no is not None:
+        vol = vs.get(target_vol_no)
+    if vol is None:
+        # 退回按 field_no 查
+        vol = vs.get_by_field(field_no)
+    if vol is None:
+        # 再退回最新卷
+        vol = vs.latest()
+    settle_record = {**diff, "field_no": field_no, "applied_summary": summary}
+    if vol is not None:
+        vs.record_settle(vol.volume_no, settle_record)
+        target_vol_no = vol.volume_no
+    # 同步设置 session.outputs 里 settlement_confirmed=True，便于阶段推进
+    s.set_output("settlement_confirmed", True)
+    s.add_message("system",
+                  f"杀青归账已应用：污染度 {summary.get('contam_before','?')}→{summary.get('contam_after','?')}，"
+                  f"场数 {summary.get('field_count_before','?')}→{summary.get('field_count_after','?')}，"
+                  f"新增手艺 {len(summary.get('crafts_added',[]))} 项、加深 {len(summary.get('crafts_deepened',[]))} 项，"
+                  f"新增残影 {len(summary.get('echoes_added',[]))} 项。",
+                  kind="gate",
+                  meta={"action": "settle_apply", "diff": diff, "summary": summary,
+                        "volume_no": target_vol_no})
+    ss.save(s)
+    return {"ok": True, "summary": summary, "volume_no": target_vol_no,
+            "protagonist": es.protagonist.as_dict()}
+
+
+# ============================================================
+# 后台长任务路由注册（PDF×5 / COC×3 / Outline×5 / SSE 进度）
+# ============================================================
+from .jobs_routes import register_job_routes, register_pdf5_route
+
+# 给 coc_runner 一个工厂（每次返回新 PipelineRunner，线程安全）
+def _coc_runner_factory():
+    return PipelineRunner(_chore_provider('coc'), prompt_store=_prompt_store)
+
+register_job_routes(
+    app,
+    require_project=_require_project,
+    sessions_for=_sessions_for,
+    fields_for=_fields_for,
+    field_run_for=_field_run_for,
+    coc_run_for=_coc_run_for,
+    book_for=_book_for,
+    chore_provider=_chore_provider,
+    coc_runner_factory=_coc_runner_factory,
+    prompt_store=_prompt_store,
+    json_dumps=json_dumps,
+)
+register_pdf5_route(app)
+
+# ============================================================
+# 工作台阶段判定路由（phase_routes）
+# ============================================================
+from .phase_routes import register_phase_routes
+from ..book.profile import BookStore as _BookStoreCls
+register_phase_routes(
+    app,
+    require_project=_require_project,
+    project_dir=_project_dir,
+    book_for=_book_for,
+    volumes_for=_volumes_for,
+    desk_for=_desk_for,
+    book_cards=_BookStoreCls.CARDS,
+)
+
