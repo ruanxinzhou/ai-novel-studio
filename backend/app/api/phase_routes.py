@@ -151,8 +151,8 @@ def _determine_phase(pid: str) -> dict:
                 "chapter_no": earliest,
                 "is_last_chapter": (earliest == max_ch),
             }
-        # interlude_plan 存在即间章完成；否则 phase='interlude'
-        if not last_vol.interlude_plan:
+        # interlude_plan 未存在或未定稿 → phase='interlude'（避免 fallthrough 到 adapt）
+        if not last_vol.interlude_plan or not last_vol.interlude_plan.get("finalized_at"):
             return {
                 "phase": "interlude",
                 "volume_no": last_vol.volume_no,

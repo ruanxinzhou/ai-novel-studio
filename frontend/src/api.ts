@@ -1958,3 +1958,68 @@ export const settleApi = {
     ),
 }
 
+// ============================================================
+// 蓝星间章（Interlude）API
+// ============================================================
+export interface InterludeOption {
+  id?: string
+  title: string
+  content: string
+  [k: string]: any
+}
+
+export interface InterludeZhangshu {
+  suggested_chapters: number
+  words_per_chapter: number
+  reason: string
+}
+
+export interface InterludePlan {
+  weihedian?: InterludeOption
+  houchiyizheng?: InterludeOption
+  xiajuangouzi?: InterludeOption
+  zhangshu?: InterludeZhangshu
+  steps_done?: number
+  updated_at?: string
+  finalized_at?: string
+}
+
+export interface InterludeGetResp {
+  volume: any
+  plan: InterludePlan
+  can_start_writing: boolean
+}
+
+export type InterludeStep = 'weihedian' | 'houchiyizheng' | 'xiajuangouzi' | 'zhangshu'
+
+export const interludeApi = {
+  getVolume: adaptApi.getVolume,
+
+  get: (pid: string, volNo: number) =>
+    req<InterludeGetResp>(`/api/projects/${pid}/workbench/volumes/${volNo}/interlude`),
+
+  aiSuggest: (
+    pid: string,
+    volNo: number,
+    step: InterludeStep,
+    context?: Record<string, unknown>,
+    selected?: Record<string, any> | null,
+  ) =>
+    req<{ options?: InterludeOption[]; zhangshu?: InterludeZhangshu; is_mock: boolean }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/interlude/ai-suggest`,
+      { method: 'POST', body: JSON.stringify({ step, context: context || {}, selected: selected || null }) },
+    ),
+
+  savePlan: (pid: string, volNo: number, step: InterludeStep, picked: InterludeOption | InterludeZhangshu) =>
+    req<{ ok: boolean; plan: InterludePlan }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/interlude/save-plan`,
+      { method: 'POST', body: JSON.stringify({ step, picked }) },
+    ),
+
+  finalize: (pid: string, volNo: number) =>
+    req<{ ok: boolean; volume: any; created_chapters: number[]; first_chapter_no: number }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/interlude/finalize`,
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+}
+

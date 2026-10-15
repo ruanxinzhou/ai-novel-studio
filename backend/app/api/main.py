@@ -4318,6 +4318,18 @@ register_brief_routes(
 )
 
 # ============================================================
+# 蓝星间章（interlude）路由
+# ============================================================
+from .interlude_routes import register_interlude_routes
+register_interlude_routes(
+    app,
+    require_project=_require_project,
+    volumes_for=_volumes_for,
+    desk_for=_desk_for,
+    chore_provider=_chore_provider,
+)
+
+# ============================================================
 # 工作台 PDF 改编（adapt）路由
 # ============================================================
 from .adapt_routes import register_adapt_routes

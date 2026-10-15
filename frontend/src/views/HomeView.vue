@@ -14,6 +14,7 @@ import DungeonScaffoldView from './DungeonScaffoldView.vue'
 import RhythmView from './RhythmView.vue'
 import DeskView from './DeskView.vue'
 import SettleView from './SettleView.vue'
+import InterludeView from './InterludeView.vue'
 import ChapterBriefModal from '../components/ChapterBriefModal.vue'
 import { deskApi } from '../api'
 import {
@@ -266,6 +267,13 @@ defineExpose({ refresh: loadPhase })
           <!-- settle 阶段：杀青归账 6 步 -->
           <SettleView
             v-else-if="phase === 'settle'"
+            :vol-no="currentVolumeNo"
+            @done="loadPhase"
+          />
+
+          <!-- interlude 阶段：蓝星间章 4 步 -->
+          <InterludeView
+            v-else-if="phase === 'interlude'"
             :vol-no="currentVolumeNo"
             @done="loadPhase"
           />
