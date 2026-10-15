@@ -1797,3 +1797,57 @@ export const rhythmApi = {
     ),
 }
 
+// ============================================================
+// 章前 5 分钟方向卡（brief）
+// ============================================================
+export interface BriefOption {
+  id: string
+  title: string
+  summary: string
+  hooks?: string
+  day?: number
+  beat_type?: string
+  foreshadow_advance?: string[]
+  entities_on_stage?: string[]
+  is_custom?: boolean
+}
+
+export const briefApi = {
+  options: (
+    pid: string,
+    volNo: number,
+    cno: number,
+    body: { directive?: string | null; base_index?: number | null; custom_writing?: string | null },
+  ) =>
+    req<{ options: BriefOption[]; day: number; chapter_words_estimate: number; is_mock?: boolean }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/chapters/${cno}/brief/options`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  select: (
+    pid: string,
+    volNo: number,
+    cno: number,
+    body: { option_index: number; extra_edits?: string | null; custom_text?: string | null },
+  ) =>
+    req<{ ok: boolean; brief: any; chapter_no: number }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/chapters/${cno}/brief/select`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  advance: (pid: string, volNo: number, cno: number) =>
+    req<{ next_chapter: number | null; phase: string }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/chapters/${cno}/brief/advance`,
+      { method: 'POST', body: JSON.stringify({ finalized: true }) },
+    ),
+  patch: (pid: string, volNo: number, cno: number, body: Record<string, unknown>) =>
+    req<{ ok: boolean; brief: any }>(
+      `/api/projects/${pid}/volumes/${volNo}/chapters/${cno}/brief`,
+      { method: 'PATCH', body: JSON.stringify(body) },
+    ),
+  // 向后兼容旧接口
+  nextChapterBrief: (pid: string, volNo: number, prev_chapter_no?: number) =>
+    req<any>(
+      `/api/projects/${pid}/volumes/${volNo}/next-chapter-brief`,
+      { method: 'POST', body: JSON.stringify({ prev_chapter_no }) },
+    ),
+}
+

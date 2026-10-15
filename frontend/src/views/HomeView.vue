@@ -12,6 +12,9 @@ import CocSimView from './CocSimView.vue'
 import EmbodyView from './EmbodyView.vue'
 import DungeonScaffoldView from './DungeonScaffoldView.vue'
 import RhythmView from './RhythmView.vue'
+import DeskView from './DeskView.vue'
+import ChapterBriefModal from '../components/ChapterBriefModal.vue'
+import { deskApi } from '../api'
 import {
   currentProjectId,
   currentPhase,
@@ -44,6 +47,66 @@ const contamination = ref<number>(0)
 
 const phase = computed(() => currentPhase.value)
 const phaseLabel = computed(() => (PHASE_LABELS[phase.value] ?? phase.value) || '—')
+
+// ---- Desk 容器（briefing/desk 共用）----
+const briefModalVisible = ref(false)
+const deskKey = ref(0) // 用于章节切换后强制刷新 DeskView
+const existingBrief = ref<any | null>(null)
+
+async function refreshDeskBrief() {
+  // 读取当前章的 brief，用于重新打开 modal 时显示已选
+  const pid = currentProjectId.value
+  const cn = currentChapterNo.value
+  if (!pid || !cn) {
+    existingBrief.value = null
+    return
+  }
+  try {
+    const d = await deskApi.chapter(pid, cn)
+    existingBrief.value = (d.chapter as any)?.brief || null
+  } catch {
+    existingBrief.value = null
+  }
+}
+
+function onReopenBrief() {
+  refreshDeskBrief().finally(() => {
+    briefModalVisible.value = true
+  })
+}
+
+function onBriefSelected() {
+  briefModalVisible.value = false
+  loadPhase()
+}
+
+function onNextChapter(no: number) {
+  currentChapterNo.value = no
+  deskKey.value += 1
+  // 新章自动弹 brief modal
+  existingBrief.value = null
+  briefModalVisible.value = true
+}
+
+function onToSettle() {
+  loadPhase()
+}
+
+// phase 切到 briefing 时自动弹 brief modal
+watch(
+  () => currentPhase.value,
+  (p) => {
+    if (p === 'briefing') {
+      existingBrief.value = null
+      briefModalVisible.value = true
+    } else if (p === 'desk') {
+      briefModalVisible.value = false
+      refreshDeskBrief()
+      deskKey.value += 1
+    }
+  },
+  { immediate: false },
+)
 
 async function loadPhase() {
   const pid = currentProjectId.value
@@ -173,6 +236,32 @@ defineExpose({ refresh: loadPhase })
             @done="loadPhase"
           />
 
+          <!-- briefing / desk 阶段：章前 5 分钟卡 Modal + 章台 -->
+          <div v-else-if="phase === 'briefing' || phase === 'desk'" class="desk-container">
+            <div v-if="phase === 'briefing' && !briefModalVisible" class="briefing-placeholder">
+              <div class="briefing-placeholder-icon">📝</div>
+              <h2>章前 5 分钟</h2>
+              <p>开写前花 5 分钟选一张方向卡，本章会更稳</p>
+              <el-button type="primary" @click="briefModalVisible = true">开始选方向</el-button>
+            </div>
+            <DeskView
+              v-else
+              :key="deskKey"
+              :chapter-no="currentChapterNo || undefined"
+              @reopen-brief="onReopenBrief"
+              @next-chapter="onNextChapter"
+              @to-settle="onToSettle"
+            />
+            <ChapterBriefModal
+              v-model:visible="briefModalVisible"
+              :pid="currentProjectId"
+              :vol-no="currentVolumeNo"
+              :chapter-no="currentChapterNo || 1"
+              :existing-brief="existingBrief"
+              @selected="onBriefSelected"
+            />
+          </div>
+
           <!-- 其他阶段：占位提示 -->
           <div v-else class="placeholder-view">
             <div class="placeholder-icon">🚧</div>
@@ -241,5 +330,30 @@ defineExpose({ refresh: loadPhase })
 }
 .placeholder-view p {
   color: #909399;
+}
+.desk-container {
+  min-height: 100%;
+}
+.briefing-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 60vh;
+  text-align: center;
+  color: #606266;
+}
+.briefing-placeholder-icon {
+  font-size: 56px;
+  margin-bottom: 12px;
+}
+.briefing-placeholder h2 {
+  margin: 0 0 8px;
+  font-size: 20px;
+  color: #303133;
+}
+.briefing-placeholder p {
+  color: #909399;
+  margin: 0 0 20px;
 }
 </style>

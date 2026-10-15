@@ -4313,6 +4313,7 @@ register_brief_routes(
     require_project=_require_project,
     volumes_for=_volumes_for,
     desk_for=_desk_for,
+    chore_provider=_chore_provider,
 )
 
 # ============================================================
