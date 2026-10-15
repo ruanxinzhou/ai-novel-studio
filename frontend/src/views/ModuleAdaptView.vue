@@ -32,6 +32,13 @@ const errorMsg = ref('')
 const starting = ref(false)
 let sse: { close: () => void } | null = null
 
+// ---- 自定义/编辑 dialog ----
+const dialogVisible = ref(false)
+const dialogMode = ref<'custom' | 'edit'>('custom')
+const dialogText = ref('')      // adapted_premise 内容
+const dialogFlavor = ref('')    // flavor/标签（可选）
+const dialogEditIndex = ref<number>(-1)
+
 const isEmptyVol = computed(() => props.volNo === 0)
 
 function adaptationsFromJob(j: Job): any[] {
@@ -151,14 +158,18 @@ function onFilePick(uploadFile: any) {
   file.value = f
 }
 
-async function startPdf5() {
+/** 内部：启动 pdf5（允许传入额外 directive 追加到 userHint） */
+async function _runPdf5(extraDirective = '') {
   if (!file.value) { ElMessage.warning('请先选择 PDF 文件'); return }
   const pid = currentProjectId.value
   if (!pid || !realVolNo.value) return
   starting.value = true
   errorMsg.value = ''
+  const hint = extraDirective
+    ? (userHint.value ? userHint.value + '\n' : '') + extraDirective
+    : userHint.value
   try {
-    const r = await adaptApi.startPdf5(pid, realVolNo.value, file.value, userHint.value, nVal.value)
+    const r = await adaptApi.startPdf5(pid, realVolNo.value, file.value, hint, nVal.value)
     job.value = r.job
     adaptations.value = []
     pickedAdaptId.value = null
@@ -171,12 +182,29 @@ async function startPdf5() {
   }
 }
 
+async function startPdf5() {
+  await _runPdf5('')
+}
+
 async function onPickAdapt(id: string | null, idx?: number) {
   if (id == null || idx == null) return
   pickedAdaptId.value = id
-  if (!job.value) return
   const pid = currentProjectId.value
   if (!pid) return
+  const picked = adaptations.value[idx]
+  if (!picked) return
+  // 自定义/编辑卡 → 走 save-custom
+  if (picked.is_custom) {
+    try {
+      await adaptApi.saveCustomAdapt(pid, realVolNo.value, picked)
+      ElMessage.success('已保存自定义改编版本')
+      emit('done')
+    } catch (e: any) {
+      ElMessage.error('保存失败：' + (e?.message ?? e))
+    }
+    return
+  }
+  if (!job.value) return
   try {
     await adaptApi.pickAdapt(pid, realVolNo.value, job.value.job_id, idx)
     ElMessage.success('已选定改编版本')
@@ -184,6 +212,60 @@ async function onPickAdapt(id: string | null, idx?: number) {
   } catch (e: any) {
     ElMessage.error('选版失败：' + (e?.message ?? e))
   }
+}
+
+// ---- SushiCards 迭代事件 ----
+function onRerun(idx: number | null, directive: string) {
+  if (!file.value) {
+    ElMessage.warning('需要有原始 PDF 才能重抽。请先在上传区选择 PDF。')
+    return
+  }
+  const extra = directive
+    ? (idx != null ? `参考第${idx + 1}版风格，调整方向：${directive}` : `重抽提示：${directive}`)
+    : (idx != null ? `参考第${idx + 1}版风格重新生成一组差异化改编。` : '')
+  _runPdf5(extra)
+}
+
+function onCustomWrite() {
+  dialogMode.value = 'custom'
+  dialogText.value = ''
+  dialogFlavor.value = ''
+  dialogEditIndex.value = -1
+  dialogVisible.value = true
+}
+
+function onEditCard(idx: number) {
+  const it = adaptations.value[idx]
+  if (!it) return
+  dialogMode.value = 'edit'
+  dialogText.value = it.adapted_premise || it.content || ''
+  dialogFlavor.value = it.flavor || ''
+  dialogEditIndex.value = idx
+  dialogVisible.value = true
+}
+
+async function onDialogSave() {
+  const text = dialogText.value.trim()
+  if (!text) { ElMessage.warning('改编内容不能为空'); return }
+  const flavor = dialogFlavor.value.trim() || '自定义'
+  const newCard: any = {
+    is_custom: true,
+    adapted_premise: text,
+    flavor: dialogMode.value === 'edit' ? (dialogFlavor.value.trim() || '已编辑') : flavor,
+    one_liner: text.slice(0, 80).replace(/\n/g, ' '),
+    title: `✏️ ${dialogMode.value === 'edit' ? '已编辑' : '自定义'}改编`,
+    changed_elements: [],
+    player_cards: [],
+  }
+  if (dialogMode.value === 'edit' && dialogEditIndex.value >= 0) {
+    // 就地替换原卡（保留 id 与其他字段）
+    const base = adaptations.value[dialogEditIndex.value] || {}
+    adaptations.value[dialogEditIndex.value] = { ...base, ...newCard }
+  } else {
+    adaptations.value = [...adaptations.value, newCard]
+  }
+  dialogVisible.value = false
+  ElMessage.success(dialogMode.value === 'edit' ? '已更新该版，可点击「选这盘」保存' : '已添加自定义版本，可点击「选这盘」保存')
 }
 
 function onNextStage() {
@@ -309,9 +391,11 @@ onUnmounted(() => {
         item-subtitle-field="one_liner"
         item-content-field="adapted_premise"
         item-badge-field="flavor"
-        :allow-regenerate="false"
         :is-active="true"
         @pick="onPickAdapt"
+        @rerun="onRerun"
+        @custom-write="onCustomWrite"
+        @edit-card="onEditCard"
       >
         <template #item="{ item }">
           <div v-if="item.changed_elements?.length" class="meta-line">
@@ -334,6 +418,33 @@ onUnmounted(() => {
         <el-button type="primary" size="large" @click="onNextStage">下一阶段：模拟跑团</el-button>
       </div>
     </div>
+
+    <!-- 自定义/编辑 dialog -->
+    <el-dialog
+      v-model="dialogVisible"
+      :title="dialogMode === 'custom' ? '✏️ 自写改编版本' : '✏️ 编辑此版改编'"
+      width="680px"
+      :close-on-click-modal="false"
+    >
+      <el-input
+        v-model="dialogFlavor"
+        placeholder="可选：风格标签（如「民俗阴冷向」），留空则默认"
+        class="mb-10"
+        style="margin-bottom: 10px"
+      />
+      <el-input
+        v-model="dialogText"
+        type="textarea"
+        :rows="14"
+        placeholder="在此粘贴/撰写改编后的副本核前提（adapted_premise），会作为本卷的改编版本直接保存。"
+      />
+      <template #footer>
+        <el-button @click="dialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="onDialogSave">
+          {{ dialogMode === 'custom' ? '添加此版' : '保存修改' }}
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -442,6 +553,7 @@ onUnmounted(() => {
   line-height: 1.8;
   color: #303133;
 }
+.mb-10 { margin-bottom: 10px; }
 
 /* ensemble item 插槽里的 meta chip */
 .meta-line {

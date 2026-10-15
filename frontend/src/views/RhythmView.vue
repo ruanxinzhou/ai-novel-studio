@@ -19,6 +19,56 @@ const densityMap = ref<DensityMap | null>(null)
 const loading = ref(false)
 const finalizing = ref(false)
 const isMock = ref(false)
+const rhythmDirective = ref('')
+
+// ---- Blueprint edit dialog ----
+const editVisible = ref(false)
+const editNotes = ref('')
+const editSuggestedChaptersMin = ref<number>(18)
+const editSuggestedChaptersMax = ref<number>(24)
+const editSuggestedLength = ref<number>(200000)
+const editPacingSetup = ref(0.2)
+const editPacingBuild = ref(0.4)
+const editPacingClimax = ref(0.25)
+const editPacingCooldown = ref(0.15)
+
+function openEdit() {
+  if (!blueprint.value) return
+  const bp = blueprint.value
+  editNotes.value = bp.notes || ''
+  const range = bp.suggested_chapter_range || [18, 24]
+  editSuggestedChaptersMin.value = range[0] ?? 18
+  editSuggestedChaptersMax.value = range[1] ?? 24
+  editSuggestedLength.value = bp.suggested_length || 200000
+  const pr = (bp.pacing_ratio as Record<string, number>) || {}
+  editPacingSetup.value = Number(pr.setup) || 0.2
+  editPacingBuild.value = Number(pr.build) || 0.4
+  editPacingClimax.value = Number(pr.climax) || 0.25
+  editPacingCooldown.value = Number(pr.cooldown) || 0.15
+  editVisible.value = true
+}
+
+function onEditSave() {
+  if (!blueprint.value) return
+  // Normalize pacing ratio to sum ~1
+  const total = editPacingSetup.value + editPacingBuild.value + editPacingClimax.value + editPacingCooldown.value
+  const norm = (v: number) => total > 0 ? Math.round((v / total) * 1000) / 1000 : 0.25
+  blueprint.value = {
+    ...blueprint.value,
+    notes: editNotes.value,
+    suggested_chapter_range: [editSuggestedChaptersMin.value, editSuggestedChaptersMax.value],
+    suggested_length: editSuggestedLength.value,
+    pacing_ratio: {
+      setup: norm(editPacingSetup.value),
+      build: norm(editPacingBuild.value),
+      climax: norm(editPacingClimax.value),
+      cooldown: norm(editPacingCooldown.value),
+    },
+  }
+  // 密度图/key_beats 无法本地重构，保持不变；展示已生效
+  editVisible.value = false
+  ElMessage.success('节奏蓝图已本地更新（采纳后将随阶段标记落盘）')
+}
 
 const days = [1, 2, 3, 4, 5, 6, 7]
 
@@ -31,9 +81,8 @@ async function load() {
     blueprint.value = r.blueprint || null
     densityMap.value = r.density_map || null
   } catch (e: any) {
-    // 静默，允许空态
     if (e?.status !== 404) {
-      // ignore
+      // ignore other errors silently
     }
   }
 }
@@ -51,7 +100,9 @@ async function onAnalyze() {
   loading.value = true
   isMock.value = false
   try {
-    const r = await rhythmApi.analyze(pid, props.volNo)
+    const r = await rhythmApi.analyze(pid, props.volNo, {
+      rhythm_directive: rhythmDirective.value.trim(),
+    })
     blueprint.value = r.blueprint
     densityMap.value = r.density_map
     isMock.value = !!r.is_mock
@@ -183,6 +234,18 @@ const chapterColumns = [
         <p class="sub">基于死亡/高潮/线索分布推演整卷节奏，给出章节分配建议</p>
       </div>
       <div class="rhythm-actions">
+        <el-input
+          v-model="rhythmDirective"
+          class="rhythm-directive"
+          placeholder="节奏指令：如「Day3 必须有一场小高潮」「希望 Day5 拉满」"
+          clearable
+        />
+        <el-button
+          v-if="blueprint"
+          size="default"
+          title="编辑蓝图节奏注记 / 章节建议 / 四段占比"
+          @click="openEdit"
+        >✏️ 编辑蓝图</el-button>
         <el-button
           type="primary"
           :loading="loading"
@@ -196,7 +259,7 @@ const chapterColumns = [
 
     <!-- 空态 -->
     <div v-if="!blueprint" class="empty-state">
-      <el-empty description="点击右上角「AI 推演节奏」生成蓝图">
+      <el-empty description="点击右上角「AI 推演节奏」生成蓝图，可在按钮左侧填写节奏指令">
         <template #image>
           <div class="empty-ico">⚰</div>
         </template>
@@ -333,7 +396,7 @@ const chapterColumns = [
         <div class="panel-head">
           <h3>
             建议章节分配（{{ blueprint.suggested_chapter_range?.[0] }}~{{ blueprint.suggested_chapter_range?.[1] }}章
-            / 约 {{ blueprint.suggested_length?.toLocaleString() }} 字）
+            / 约 {{ (blueprint.suggested_length || 0).toLocaleString() }} 字）
           </h3>
         </div>
         <el-table
@@ -372,6 +435,59 @@ const chapterColumns = [
         </el-button>
       </div>
     </template>
+
+    <!-- Edit Blueprint Dialog -->
+    <el-dialog
+      v-model="editVisible"
+      title="✏️ 编辑节奏蓝图（本地）"
+      width="600px"
+      :close-on-click-modal="false"
+    >
+      <p class="edit-hint">仅本地修改展示用的节奏注记 / 章节建议 / 四段占比；节点分布（曲线/密度/告警/章节表）不重构，需重新推演以更新。</p>
+      <div class="edit-row">
+        <label>节奏注记</label>
+        <el-input v-model="editNotes" type="textarea" :rows="4" placeholder="对节奏方案的补充说明/注意事项" />
+      </div>
+      <div class="edit-row edit-grid">
+        <div>
+          <label>建议章数（起）</label>
+          <el-input-number v-model="editSuggestedChaptersMin" :min="6" :max="60" />
+        </div>
+        <div>
+          <label>建议章数（止）</label>
+          <el-input-number v-model="editSuggestedChaptersMax" :min="6" :max="60" />
+        </div>
+        <div>
+          <label>建议字数</label>
+          <el-input-number v-model="editSuggestedLength" :min="20000" :max="800000" :step="10000" />
+        </div>
+      </div>
+      <div class="edit-row">
+        <label>四段占比（会自动归一化）</label>
+        <div class="edit-grid">
+          <div>
+            <span class="pk-chip pk-setup">setup</span>
+            <el-input-number v-model="editPacingSetup" :min="0" :max="1" :step="0.05" />
+          </div>
+          <div>
+            <span class="pk-chip pk-build">build</span>
+            <el-input-number v-model="editPacingBuild" :min="0" :max="1" :step="0.05" />
+          </div>
+          <div>
+            <span class="pk-chip pk-climax">climax</span>
+            <el-input-number v-model="editPacingClimax" :min="0" :max="1" :step="0.05" />
+          </div>
+          <div>
+            <span class="pk-chip pk-cooldown">cooldown</span>
+            <el-input-number v-model="editPacingCooldown" :min="0" :max="1" :step="0.05" />
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="editVisible = false">取消</el-button>
+        <el-button type="primary" @click="onEditSave">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -389,6 +505,8 @@ const chapterColumns = [
   align-items: flex-start;
   justify-content: space-between;
   margin-bottom: 20px;
+  gap: 16px;
+  flex-wrap: wrap;
 }
 .rhythm-header h2 {
   margin: 0 0 6px;
@@ -401,6 +519,22 @@ const chapterColumns = [
   margin: 0;
   color: #8e8575;
   font-size: 13px;
+}
+.rhythm-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.rhythm-directive {
+  width: 380px;
+}
+.rhythm-directive :deep(.el-input__wrapper) {
+  background: rgba(20, 17, 14, 0.7);
+  box-shadow: 0 0 0 1px #2a241d inset;
+}
+.rhythm-directive :deep(.el-input__inner) {
+  color: #e6e0d4;
 }
 .rhythm-actions .el-button--primary {
   background: linear-gradient(135deg, #8a2a2a, #c44848) !important;
@@ -538,7 +672,6 @@ const chapterColumns = [
   letter-spacing: 1px;
 }
 
-/* ---- 两列 ---- */
 .two-col {
   display: flex;
   gap: 18px;
@@ -546,7 +679,6 @@ const chapterColumns = [
   flex-wrap: wrap;
 }
 
-/* ---- 密度条 ---- */
 .density-row {
   display: flex;
   gap: 12px;
@@ -600,7 +732,6 @@ const chapterColumns = [
 .lg-climax { background: #e6a23c; }
 .lg-clue { background: #409EFF; }
 
-/* ---- 四段 pacing ---- */
 .pacing-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -635,7 +766,6 @@ const chapterColumns = [
 .pk-climax { background: #c44848; }
 .pk-cooldown { background: #6b7280; }
 
-/* ---- warnings ---- */
 .warn-list {
   display: flex;
   flex-direction: column;
@@ -643,7 +773,6 @@ const chapterColumns = [
 }
 .warn-item { border-radius: 6px; }
 
-/* ---- 章节表 ---- */
 .chapter-table {
   background: rgba(20, 17, 14, 0.4) !important;
   border-radius: 6px;
@@ -702,9 +831,51 @@ const chapterColumns = [
   box-shadow: 0 0 18px rgba(196, 72, 72, 0.3);
 }
 
-/* ---- 响应式 ---- */
+.edit-hint {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  background: #f5f7fa;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.6;
+}
+.edit-row {
+  margin-bottom: 14px;
+}
+.edit-row label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: #606266;
+  font-weight: 500;
+}
+.edit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+.edit-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pk-chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  color: #fff;
+  margin-bottom: 4px;
+}
+.pk-chip.pk-setup { background: #5a8fd6; }
+.pk-chip.pk-build { background: #c4894e; }
+.pk-chip.pk-climax { background: #c44848; }
+.pk-chip.pk-cooldown { background: #6b7280; }
+
 @media (max-width: 768px) {
   .rhythm-header { flex-direction: column; gap: 12px; }
+  .rhythm-directive { width: 100%; }
   .two-col { flex-direction: column; }
   .pacing-grid { min-width: 0; }
 }

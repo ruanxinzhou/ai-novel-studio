@@ -63,7 +63,7 @@ class _Deps:
 
 
 class _AnalyzeIn(BaseModel):
-    pass
+    rhythm_directive: str = ""
 
 
 class _FinalizeIn(BaseModel):
@@ -240,6 +240,10 @@ def register_rhythm_routes(
             parts.append(json.dumps(vol.clue_nodes or [], ensure_ascii=False))
             parts.append("\n===== 本地密度统计（death/climax/clue per day）=====")
             parts.append(json.dumps(density_map, ensure_ascii=False))
+
+            rd = (body.rhythm_directive or "").strip()
+            if rd:
+                parts.append(f"\n===== 作者对节奏的额外要求 =====\n{rd}")
 
             context = "\n".join(parts)
 

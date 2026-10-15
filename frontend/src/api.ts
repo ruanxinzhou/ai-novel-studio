@@ -1413,6 +1413,13 @@ export const adaptApi = {
       { method: 'POST', body: JSON.stringify({ job_id: jobId, pick_index: pickIndex, extra_edits: extraEdits }) },
     ),
 
+  /** 直接保存自定义改编（不走 job 选版） */
+  saveCustomAdapt: (pid: string, volNo: number, adaptation: Record<string, unknown>) =>
+    req<{ ok: boolean; volume: any }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/adapt/save-custom`,
+      { method: 'POST', body: JSON.stringify({ adaptation }) },
+    ),
+
   /** 通用阶段完成标记 */
   markStageComplete: (pid: string, volNo: number, stage: string) =>
     req<{ ok: boolean; volume: any }>(
@@ -1523,6 +1530,13 @@ export const simulateApi = {
     req<{ ok: boolean; volume: any }>(
       `/api/projects/${pid}/workbench/volumes/${volNo}/simulate/collage`,
       { method: 'POST', body: JSON.stringify(body) },
+    ),
+
+  /** 直接保存自定义跑团 variant（不走 job 选版） */
+  saveCustomVariant: (pid: string, volNo: number, variant: Record<string, unknown>) =>
+    req<{ ok: boolean; volume: any }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/simulate/save-custom`,
+      { method: 'POST', body: JSON.stringify({ variant }) },
     ),
 }
 
@@ -1652,11 +1666,12 @@ export const embodyApi = {
     pid: string,
     volNo: number,
     body: {
-      job_id: string
-      pick_index: number
+      job_id?: string
+      pick_index?: number
       candidate?: EmbodyCandidate | null
       entry_point?: EmbodyEntryPoint | null
       stance?: EmbodyStance | null
+      custom_data?: Record<string, unknown> | null
     },
   ) =>
     req<{ ok: boolean; volume: any; picked: EmbodyOutline }>(
@@ -1701,10 +1716,10 @@ export const scaffoldApi = {
   getVolume: adaptApi.getVolume,
   patchVolume: adaptApi.patchVolume,
 
-  prefill: (pid: string, volNo: number, opts?: { force?: boolean }) =>
+  prefill: (pid: string, volNo: number, opts?: { force?: boolean; directive?: string }) =>
     req<{ ok: boolean; job_id: string; job: Job }>(
       `/api/projects/${pid}/workbench/volumes/${volNo}/scaffold/prefill`,
-      { method: 'POST', body: JSON.stringify({ force: !!opts?.force }) },
+      { method: 'POST', body: JSON.stringify({ force: !!opts?.force, directive: opts?.directive || '' }) },
     ),
 
   listJobs: (pid: string, volNo: number) =>
@@ -1737,10 +1752,10 @@ export const scaffoldApi = {
     return { close: () => { es.close() } }
   },
 
-  lockCard: (pid: string, volNo: number, card_key: string, pick_index: number) =>
+  lockCard: (pid: string, volNo: number, card_key: string, opts: { pick_index?: number; custom_value?: unknown[] | string | null }) =>
     req<{ ok: boolean; card_key: string; picked_idx: number; locked_at: string; all_locked?: boolean; volume?: any }>(
       `/api/projects/${pid}/workbench/volumes/${volNo}/scaffold/lock-card`,
-      { method: 'POST', body: JSON.stringify({ card_key, pick_index }) },
+      { method: 'POST', body: JSON.stringify({ card_key, pick_index: opts.pick_index ?? -1, custom_value: opts.custom_value ?? null }) },
     ),
 
   finalize: (pid: string, volNo: number) =>
@@ -1786,10 +1801,10 @@ export interface DensityMap {
 
 export const rhythmApi = {
   getVolume: adaptApi.getVolume,
-  analyze: (pid: string, volNo: number) =>
+  analyze: (pid: string, volNo: number, opts?: { rhythm_directive?: string }) =>
     req<{ ok: boolean; blueprint: RhythmBlueprint; density_map: DensityMap; is_mock?: boolean }>(
       `/api/projects/${pid}/workbench/volumes/${volNo}/rhythm/analyze`,
-      { method: 'POST', body: JSON.stringify({}) },
+      { method: 'POST', body: JSON.stringify({ rhythm_directive: opts?.rhythm_directive || '' }) },
     ),
   get: (pid: string, volNo: number) =>
     req<{ volume: any; blueprint: RhythmBlueprint | null; density_map: DensityMap }>(
