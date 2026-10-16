@@ -456,7 +456,7 @@ def _finalize(pid: str, vol_no: int) -> dict:
         no = start_no + i
         title = "回家：第一件不对劲的事" if i == 0 else f"蓝星间章·第{i + 1}节"
         work = desk.ensure(no, title=title)
-        work.field_no = getattr(v, "field_no", None)
+        work.field_no = v.volume_no  # 直接绑卷号，避免 field_no 默认值不准
         work.is_interlude = True
         if i == 0:
             work.brief = {

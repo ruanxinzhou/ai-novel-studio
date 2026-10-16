@@ -253,7 +253,7 @@ def _patch_brief(pid: str, vol_no: int, cno: int, body: dict = Body(...)) -> dic
         for k, val in body.items():
             work.brief[k] = val
     if work.field_no is None:
-        work.field_no = v.field_no
+        work.field_no = vol_no
     desk._flush()
     return {"ok": True, "brief": work.brief}
 
@@ -274,7 +274,7 @@ def _brief_options(
     desk = deps.desk_for(pid)
     work = desk.ensure(cno)
     if work.field_no is None:
-        work.field_no = vol.field_no
+        work.field_no = vol_no
         desk._flush()
 
     plan = _chapter_plan_for(vol, cno)
@@ -410,7 +410,7 @@ def _brief_select(
     desk = deps.desk_for(pid)
     work = desk.ensure(cno)
     if work.field_no is None:
-        work.field_no = vol.field_no
+        work.field_no = vol_no
 
     selected: dict
     is_custom = False
@@ -530,8 +530,9 @@ def _brief_advance(
                 pass
             return {"next_chapter": None, "phase": "settle"}
         else:
-            # 下一章：ensure 创建
-            desk.ensure(cno + 1)
+            # 下一章：ensure 创建，绑定 field_no
+            new_work = desk.ensure(cno + 1)
+            new_work.field_no = vol_no
             desk._flush()
             return {"next_chapter": cno + 1, "phase": "briefing"}
     return {"next_chapter": None, "phase": "desk"}

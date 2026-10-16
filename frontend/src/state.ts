@@ -19,6 +19,7 @@ export const currentVolumeNo = ref<number>(0)
 export const currentChapterNo = ref<number>(0)
 export const currentVolumeKind = ref<string>('dungeon')
 export const currentIsLastChapter = ref<boolean>(false)
+export const isReviewingVolume = ref<boolean>(false) // 是否在"回看旧卷"模式
 
 // 抽屉开关
 export const drawerOpen = ref(false)

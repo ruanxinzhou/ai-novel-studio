@@ -16,6 +16,7 @@ import DeskView from './DeskView.vue'
 import SettleView from './SettleView.vue'
 import InterludeView from './InterludeView.vue'
 import ChapterBriefModal from '../components/ChapterBriefModal.vue'
+import VolumeReviewPanel from '../components/VolumeReviewPanel.vue'
 import { deskApi, volumesApi, adaptApi } from '../api'
 import {
   currentProjectId,
@@ -24,6 +25,7 @@ import {
   currentChapterNo,
   currentVolumeKind,
   currentIsLastChapter,
+  isReviewingVolume,
 } from '../state'
 
 const PHASE_LABELS: Record<string, string> = {
@@ -111,20 +113,25 @@ watch(
   { immediate: false },
 )
 
-async function loadPhase() {
+async function loadPhase(targetVolume?: number) {
   const pid = currentProjectId.value
   if (!pid) return
   loading.value = true
   try {
-    const r = await fetch(`/api/projects/${pid}/phase`)
+    const url = new URL(`/api/projects/${pid}/phase`, window.location.origin)
+    if (targetVolume != null && targetVolume > 0) {
+      url.searchParams.set('volume', String(targetVolume))
+    }
+    const r = await fetch(url.toString())
     if (!r.ok) throw new Error(`phase ${r.status}`)
     const d = await r.json()
-    // 返回字段预期：{phase, volume_no, chapter_no, volume_kind, is_last_chapter, book_title?}
+    // 返回字段预期：{phase, volume_no, chapter_no, volume_kind, is_last_chapter, is_reviewing, book_title?}
     currentPhase.value = d.phase ?? ''
     currentVolumeNo.value = d.volume_no ?? 0
     currentChapterNo.value = d.chapter_no ?? 0
     currentVolumeKind.value = d.volume_kind ?? 'dungeon'
     currentIsLastChapter.value = !!d.is_last_chapter
+    isReviewingVolume.value = !!d.is_reviewing
     if (d.book_title) bookTitle.value = d.book_title
     // 阶段变化后刷新书脊 & 污染值
     spineVolumesRefreshKey.value += 1
@@ -135,6 +142,11 @@ async function loadPhase() {
   } finally {
     loading.value = false
   }
+}
+
+// 回到"最新进度"（不带 volume 参数）
+function backToLatest() {
+  loadPhase()
 }
 
 // ---- SpineNav 书脊加载 ----
@@ -238,12 +250,11 @@ function onGoSetup() {
 }
 
 function onSelectVolume(no: number) {
-  console.debug('[SpineNav] selectVolume', no)
-  ElMessage.info('卷目浏览暂不支持切回旧卷，将在后续版本开放')
+  loadPhase(no)
 }
-function onSelectChapter(vn: number, cn: number) {
-  console.debug('[SpineNav] selectChapter', vn, cn)
-  ElMessage.info('卷目浏览暂不支持切回旧卷，将在后续版本开放')
+function onSelectChapter(vn: number, _cn: number) {
+  // 切到该卷，后端会自动定位到该章或阶段
+  loadPhase(vn)
 }
 
 function onChatRefresh() {
@@ -370,6 +381,22 @@ defineExpose({ refresh: loadPhase })
             :vol-no="currentVolumeNo"
             @done="loadPhase"
           />
+
+          <!-- 回看旧卷：只读模式 -->
+          <div v-else-if="isReviewingVolume" class="review-view">
+            <el-alert
+              type="info"
+              :closable="false"
+              show-icon
+              title="旧卷回看"
+              description="你正在查看历史卷。该卷内容只读，无法修改。点下方按钮回到最新进度。"
+              style="margin-bottom:16px"
+            />
+            <VolumeReviewPanel :vol-no="currentVolumeNo" :phase="phase" />
+            <div style="text-align:center; margin-top:24px">
+              <el-button type="primary" @click="backToLatest">⬅ 回到最新进度</el-button>
+            </div>
+          </div>
 
           <!-- 其他阶段：占位提示 -->
           <div v-else class="placeholder-view">

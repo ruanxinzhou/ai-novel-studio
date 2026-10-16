@@ -101,8 +101,17 @@ class ProjectStore:
         pid = f"{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6]}"
         meta = ProjectMeta(id=pid, title=title, intro=intro.strip(), kind=kind,
                            created_at=_now(), updated_at=_now())
-        self._dir(pid).mkdir(parents=True, exist_ok=True)
+        pdir = self._dir(pid)
+        pdir.mkdir(parents=True, exist_ok=True)
         self._write_meta(meta)
+        # 初始化 book/ 8 张卡（调用 BookStore._read 触发 _default 落盘合理默认值）：
+        # - 对象卡（premise/tangchi/endgame/seven_day_pulse/craft）写入 DEFAULT_* 模板
+        # - 列表卡（cost_debts/remaining_pages/finale_notes）写入 []
+        # 这样 phase 判定会走到 adapt_empty，用户也能在书设定页直接看到 8/8 默认值。
+        from app.book.profile import BookStore
+        bs = BookStore(pdir / "book")
+        for _card in bs.CARDS:
+            bs._read(_card)  # 若文件缺失则写默认值
         return meta
 
     def find_by_title(self, title: str, kind: str | None = None) -> ProjectMeta | None:

@@ -132,21 +132,16 @@ def test_happy_path_mock(client):
     pid = r.json()["id"]
     assert pid
 
-    # 初始：没有书卡 → phase=setup
+    # 初始：新建项目自动写入 8 张默认书卡 → phase=adapt_empty（等创建第一卷）
     ph = _phase(client, pid)
-    assert ph["phase"] == "setup", ph
+    assert ph["phase"] == "adapt_empty", ph
 
-    # Step 2: 填满 8 张书卡 + 主角名含「林薇」触发 mock
-    _fill_book_cards(client, pid)
+    # Step 2: 主角名含「林薇」触发 mock
     r = client.patch(f"/api/projects/{pid}/protagonist", json={
         "current_body_name": "林薇（测试）",
         "contamination_level": 12,
     })
     assert r.status_code == 200, r.text
-
-    # Step 3: 书卡填满且没卷 → phase=adapt_empty
-    ph = _phase(client, pid)
-    assert ph["phase"] == "adapt_empty", ph
 
     # Step 4: 创建 dungeon 卷（vol_no=1）
     r = client.post(f"/api/projects/{pid}/workbench/volumes", json={"title": "青山镇副本"})
@@ -309,7 +304,7 @@ def test_happy_path_mock(client):
             assert data["phase"] == "briefing", data
             assert data["next_chapter"] == cno + 1
 
-    # Step 16: 全部章 finalize → settle
+    # Step 16: 全部章 finalize → settle（由 advance 在最后一章 finalize+finalized=True 时自动进入）
     ph = _phase(client, pid)
     assert ph["phase"] == "settle", ph
 
