@@ -173,6 +173,23 @@ def _volumes_for(pid: str):
     return _project_volume_stores[pid]
 
 
+def _volume_for_chapter(pid: str, chapter: int):
+    """按章号定位其所属卷（优先 field_no 匹配），找不到回退到最新卷。"""
+    vs = _volumes_for(pid)
+    desk = _desk_for(pid)
+    work = desk.get(chapter)
+    target_vn = None
+    if work is not None and getattr(work, "field_no", None):
+        target_vn = int(work.field_no)
+    if target_vn is None:
+        target_vn = len(vs.all_list()) or 1
+    try:
+        return vs.get(target_vn)
+    except Exception:
+        vols = vs.all_list()
+        return vols[-1] if vols else None
+
+
 class SessionCreateIn(BaseModel):
     scope: str = "field"                # field | chapter
     field_no: int | None = None
@@ -1911,7 +1928,8 @@ def desk_run(pid: str, chapter: int, body: DeskRunIn) -> dict:
             extra_materials=_desk_extra_materials(body),
             entity_store=_entities_for(pid) if body.checklist else None,
             modules=body.modules, full_modules=body.full_modules,
-            book_store=_book_for(pid), field_store=_fields_for(pid))
+            book_store=_book_for(pid), field_store=_fields_for(pid),
+            volume_store=_volume_for_chapter(pid, chapter))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
@@ -1949,7 +1967,8 @@ def desk_run_stream(pid: str, chapter: int, body: DeskRunIn) -> StreamingRespons
                     entity_store=_entities_for(pid) if body.checklist else None,
                     on_event=on_event,
                     modules=body.modules, full_modules=body.full_modules,
-                    book_store=_book_for(pid), field_store=_fields_for(pid))
+                    book_store=_book_for(pid), field_store=_fields_for(pid),
+                    volume_store=_volume_for_chapter(pid, chapter))
                 q.put(("result", result))
             except ValueError as e:
                 q.put(("fail", {"detail": str(e)}))
@@ -4326,6 +4345,7 @@ register_interlude_routes(
     require_project=_require_project,
     volumes_for=_volumes_for,
     desk_for=_desk_for,
+    entities_for=_entities_for,
     chore_provider=_chore_provider,
 )
 

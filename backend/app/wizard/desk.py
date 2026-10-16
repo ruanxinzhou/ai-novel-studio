@@ -264,14 +264,15 @@ def run_chapter_stage(
     full_modules: bool = False,
     book_store=None,
     field_store=None,
+    volume_store=None,
 ) -> dict:
     """单章单层生成：plot/draft/polish；同输入幂等回收据，force 绕过。
     extra_materials：作者勾选的跨项目参考层（REFERENCE 族，互为范文）。
     entity_store：给定时为 plot/draft 注入开章任务书（五段结构）。
     modules/full_modules：写作模块注入——未指定时按层默认集注入摘要版
     （digest，省上下文）；显式点名或 full_modules=True 时注入完整规则。
-    book_store/field_store：书化项目时传入（BookStore/FieldStore），注入书铁律、
-    讣告卡、当日节拍到任务书；传 None 时走通用五段任务书（旧项目兼容）。"""
+    book_store/field_store/volume_store：书化项目时传入（BookStore/FieldStore/VolumeStore），
+    注入书铁律、讣告卡、当日节拍、副本魂穿/信息差/核心诡计等本场设定。"""
     if stage not in STAGES:
         raise ValueError(f"未知阶段：{stage}")
     spec = SPECS[stage]
@@ -306,13 +307,151 @@ def run_chapter_stage(
                 content=content,
                 title=f"写作模块[{am}]" + ("（摘要）" if use_digest else ""),
             ))
+    # Volume 本场设定注入：魂穿宿主/信息差/核心诡计/本场死亡-线索-高潮节点
+    if volume_store is not None and getattr(work, "field_no", None) is not None:
+        try:
+            vol = volume_store.get(int(work.field_no))
+            arena_lines: list[str] = []
+            # 副本改编
+            if vol.adapted_module:
+                arena_lines.append(f"【副本核文本】\n{vol.adapted_module}")
+            # 魂穿宿主
+            hc = vol.host_character or {}
+            if isinstance(hc, dict) and hc:
+                hc_name = hc.get("name") or hc.get("body_name") or "宿主"
+                hc_role = hc.get("role") or hc.get("identity") or ""
+                hc_know = hc.get("known_info") or hc.get("memory") or hc.get("backstory") or ""
+                arena_lines.append(f"【魂穿宿主·{hc_name}】\n身份：{hc_role}\n已知信息：{hc_know}")
+            # 入本点
+            ep = vol.entry_point or {}
+            if isinstance(ep, dict) and ep:
+                arena_lines.append(f"【入本点】{ep.get('title') or ''}\n{ep.get('summary') or ep.get('description') or ''}")
+            # 信息差
+            if vol.info_gap:
+                arena_lines.append(f"【信息差（唐迟 vs 读者/宿主）】\n{vol.info_gap}")
+            # 立场
+            st = vol.stance or {}
+            if isinstance(st, dict) and st:
+                arena_lines.append(f"【本场立场/抉择骨架】\n{st.get('summary') or st.get('choice') or ''}")
+            # 核心诡计
+            tso = vol.tangchi_story_outline or {}
+            if isinstance(tso, dict) and tso:
+                arena_lines.append(f"【唐迟诡计·主线规划】\n{tso.get('summary') or ''}")
+            # 节奏蓝图 - 本章对应 day 的节点
+            bp = vol.rhythm_blueprint or {}
+            if isinstance(bp, dict):
+                ch_no_local = None
+                plan = bp.get("chapter_plan") or []
+                try:
+                    # 找当前全局章号对应的 day
+                    ch_global = chapter
+                    field_no = int(work.field_no)
+                    offset = 0
+                    for pv in volume_store.all_list():
+                        if pv.volume_no == field_no:
+                            break
+                        pbp = pv.rhythm_blueprint or {}
+                        prng = pbp.get("suggested_chapter_range") or [0, 15]
+                        offset += int(prng[1]) if len(prng) >= 2 else 15
+                    ch_no_local = ch_global - offset
+                except Exception:
+                    ch_no_local = None
+                if ch_no_local is not None:
+                    day_spec = None
+                    for p in plan:
+                        if isinstance(p, dict) and int(p.get("chapter") or -1) == ch_no_local:
+                            day_spec = p; break
+                    if day_spec:
+                        arena_lines.append(f"【第{day_spec.get('day')}天·节奏卡】强度={day_spec.get('intensity') or ''}；事件：{day_spec.get('event') or ''}；死亡/高潮/线索：{day_spec.get('beat') or ''}")
+                # 6 卡详设
+                def _join_node_list(lst, label):
+                    if not lst: return
+                    bits = []
+                    for n in lst:
+                        if not isinstance(n, dict): continue
+                        # 只取关联到本天/本阶段的节点
+                        n_day = n.get("day") or n.get("chapter")
+                        if ch_no_local is not None and n_day is not None:
+                            try:
+                                if int(n_day) != ch_no_local:
+                                    continue
+                            except Exception:
+                                pass
+                        t = n.get("title") or n.get("name") or ""
+                        d = n.get("description") or n.get("summary") or n.get("detail") or ""
+                        if t or d:
+                            bits.append(f"- {t}：{d}" if t else f"- {d}")
+                    if bits:
+                        arena_lines.append(f"【本场{label}】\n" + "\n".join(bits))
+                _join_node_list(vol.death_nodes or [], "死亡节点")
+                _join_node_list(vol.climax_nodes or [], "高潮节点")
+                _join_node_list(vol.clue_nodes or [], "线索节点")
+                _join_node_list(vol.pasted_nodes or [], "贴肤节点")
+            # scaffold 6 卡
+            sc = vol.scaffold_cards or {}
+            if isinstance(sc, dict) and sc:
+                card_summaries = []
+                for cname, cval in sc.items():
+                    if isinstance(cval, dict):
+                        t = cval.get("title") or ""
+                        s = cval.get("summary") or cval.get("content") or ""
+                        if t or s:
+                            card_summaries.append(f"- {cname}：{t} {s}".strip())
+                    elif isinstance(cval, str) and cval.strip():
+                        card_summaries.append(f"- {cname}：{cval}")
+                if card_summaries:
+                    arena_lines.append("【详设 6 卡（本场）】\n" + "\n".join(card_summaries))
+            # 跑团模拟结果
+            sr = vol.simulated_run or {}
+            if isinstance(sr, dict):
+                runs = sr.get("runs") or sr.get("simulations") or []
+                if runs:
+                    picked = runs[0] if isinstance(runs[0], dict) else {}
+                    arena_lines.append(f"【跑团模拟（参考）】\n{picked.get('summary') or picked.get('outcome') or ''}")
+            if arena_lines:
+                content = "\n\n".join(l for l in arena_lines if l and l.strip())
+                materials.append(Material(
+                    source_id=f"volume:v{vol.volume_no}:arena",
+                    family=MaterialFamily.FINALIZED,
+                    content=content,
+                    title=f"本书本场·第{vol.volume_no}卷{('（' + (vol.title or '') + '）') if vol.title else ''}",
+                ))
+        except Exception:
+            # 本场注入失败不应阻塞主流程
+            pass
     if stage == "plot":
-        body = o_map.get(chapter, "")
+        # 优先用章前方向卡（work.brief['selected']），这是新工作台（T1-T10）的权威输入；
+        # 回退到旧 outline_map 兼容老 Workstation/纯大纲模式。
+        brief_data = work.brief if isinstance(work.brief, dict) else {}
+        selected = brief_data.get("selected") if isinstance(brief_data, dict) else None
+        body = ""
+        if isinstance(selected, dict):
+            parts = []
+            t = selected.get("title")
+            s = selected.get("summary")
+            hooks = selected.get("hooks") or []
+            fsa = selected.get("foreshadow_advance") or selected.get("foreshadow") or []
+            if t:
+                parts.append(f"本章方向：{t}")
+            if s:
+                parts.append(str(s))
+            if hooks and isinstance(hooks, list):
+                parts.append("开场钩子：")
+                for h in hooks:
+                    parts.append(f"- {h}")
+            if fsa and isinstance(fsa, list):
+                parts.append("伏笔推进：")
+                for f in fsa:
+                    parts.append(f"- {f}")
+            body = "\n".join(parts).strip()
         if not body:
-            raise ValueError(f"大纲中未找到第 {chapter} 章，请先完成故事架构站")
+            body = o_map.get(chapter, "")
+        if not body:
+            raise ValueError(f"大纲/方向卡中未找到第 {chapter} 章，请先完成章前方向卡选择")
         x = body
+        source_label = "章前方向卡（本章锁定）" if isinstance(selected, dict) and selected else f"第{chapter}章大纲"
         materials.append(Material(source_id=f"outline:ch{chapter}", family=MaterialFamily.FINALIZED,
-                                  content=body, title=f"第{chapter}章大纲"))
+                                  content=body, title=source_label))
         intro = project_store.current(pid, "intro")
         if intro is not None:
             materials.append(Material(source_id="intro", family=MaterialFamily.FINALIZED,
@@ -322,9 +461,15 @@ def run_chapter_stage(
         if not x:
             raise ValueError("本章还没有剧情，请先生成剧情")
         body = o_map.get(chapter, "")
+        # draft 阶段也可以附上方向卡供参考
+        brief_data = work.brief if isinstance(work.brief, dict) else {}
+        sel = brief_data.get("selected") if isinstance(brief_data, dict) else None
+        if not body and isinstance(sel, dict):
+            t = sel.get("title"); s = sel.get("summary")
+            body = f"{t}\n{s}" if t or s else ""
         if body:
             materials.append(Material(source_id=f"outline:ch{chapter}", family=MaterialFamily.FINALIZED,
-                                      content=body, title=f"第{chapter}章大纲"))
+                                      content=body, title="本章方向/大纲"))
     else:  # polish
         x = work_text(work, "draft")
         if not x:
