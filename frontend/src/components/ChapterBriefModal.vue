@@ -28,10 +28,18 @@ const emit = defineEmits<{
 const loading = ref(false)
 const options = ref<BriefOption[]>([])
 const day = ref(1)
+/** story_day_override：null=按蓝图；0=跨日；1~7=指定天 */
+const storyDayOverride = ref<number | null>(null)
+const crossDay = ref(false)
 const wordsEstimate = ref(6500)
 const pickedIndex = ref<number | null>(null)
 const pickedId = ref<string | null>(null)
 const extraEdits = ref('')
+
+const dayDisplay = computed(() => {
+  if (crossDay.value || storyDayOverride.value === 0) return '跨日'
+  return `第 ${day.value} 天`
+})
 
 // 自定义编写弹层
 const showCustomWrite = ref(false)
@@ -71,13 +79,17 @@ function close() {
 }
 
 // ---- 加载选项 ----
-async function loadOptions(opts: { directive?: string; base_index?: number | null; custom_writing?: string | null } = {}) {
+async function loadOptions(opts: { directive?: string; base_index?: number | null; custom_writing?: string | null; story_day_override?: number | null } = {}) {
   if (!props.pid || !props.chapterNo) return
   loading.value = true
   try {
-    const r = await briefApi.options(props.pid, props.volNo, props.chapterNo, opts)
+    const payload: any = { ...opts }
+    if (storyDayOverride.value != null) payload.story_day_override = storyDayOverride.value
+    const r = await briefApi.options(props.pid, props.volNo, props.chapterNo, payload)
     options.value = r.options || []
     day.value = r.day || 1
+    crossDay.value = !!r.cross_day
+    if (r.story_day_override != null) storyDayOverride.value = r.story_day_override
     wordsEstimate.value = r.chapter_words_estimate || 6500
     // 选中默认重置（如果是重抽则保留原选中索引的基础语义但清空选中）
     if (!opts.base_index && !opts.custom_writing) {
@@ -90,6 +102,20 @@ async function loadOptions(opts: { directive?: string; base_index?: number | nul
   } finally {
     loading.value = false
   }
+}
+
+function onStoryDayChange(v: number | 'auto') {
+  if (v === 'auto') {
+    storyDayOverride.value = null
+    crossDay.value = false
+  } else if (v === 0) {
+    storyDayOverride.value = 0
+    crossDay.value = true
+  } else {
+    storyDayOverride.value = v as number
+    crossDay.value = false
+  }
+  loadOptions({})
 }
 
 // 打开时自动加载；如果已有 selected 则构造一个 selected 卡
@@ -120,8 +146,18 @@ watch(
       pickedIndex.value = 0
       pickedId.value = options.value[0].id
       day.value = sel.day || props.existingBrief.day || 1
+      const prevOverride = props.existingBrief.story_day_override
+      if (typeof prevOverride === 'number' && 0 <= prevOverride && prevOverride <= 7) {
+        storyDayOverride.value = prevOverride
+        crossDay.value = prevOverride === 0
+      } else {
+        storyDayOverride.value = null
+        crossDay.value = false
+      }
       extraEdits.value = props.existingBrief.extra_edits || ''
     } else {
+      storyDayOverride.value = null
+      crossDay.value = false
       loadOptions()
     }
   },
@@ -198,6 +234,7 @@ async function confirmSelect() {
       option_index: pickedIndex.value,
       extra_edits: extraEdits.value.trim() || undefined,
     }
+    if (storyDayOverride.value != null) body.story_day_override = storyDayOverride.value
     if (opt.is_custom) {
       body.custom_text = opt.summary
     }
@@ -227,7 +264,18 @@ async function confirmSelect() {
     <div class="brief-info-bar">
       <div class="brief-info-meta">
         <el-tag type="primary" effect="dark" size="small">第 {{ chapterNo }} 章</el-tag>
-        <el-tag type="warning" effect="plain" size="small">第 {{ day }} 天</el-tag>
+        <el-select
+          :model-value="storyDayOverride == null ? 'auto' : storyDayOverride"
+          size="small"
+          class="brief-day-select"
+          placeholder="按节奏蓝图"
+          @change="onStoryDayChange"
+        >
+          <el-option label="按节奏蓝图" value="auto" />
+          <el-option v-for="d in 7" :key="d" :label="`Day ${d}（第${d}天）`" :value="d" />
+          <el-option label="跨日（多日聚合）" :value="0" />
+        </el-select>
+        <el-tag :type="crossDay ? 'danger' : 'warning'" effect="plain" size="small">{{ dayDisplay }}</el-tag>
         <el-tag type="success" effect="plain" size="small">{{ beatLabel }}</el-tag>
         <el-tag type="info" effect="plain" size="small">目标 ~{{ wordsEstimate.toLocaleString() }} 字</el-tag>
       </div>
@@ -369,6 +417,19 @@ async function confirmSelect() {
   gap: 6px;
   flex-wrap: wrap;
   margin-bottom: 6px;
+  align-items: center;
+}
+.brief-day-select {
+  width: 180px;
+}
+.brief-day-select :deep(.el-select__wrapper) {
+  background: #1a1f2b !important;
+  box-shadow: 0 0 0 1px #2a3040 inset !important;
+}
+.brief-day-select :deep(.el-select__placeholder),
+.brief-day-select :deep(.el-select__selected-item) {
+  color: #d4d7de !important;
+  font-size: 12px;
 }
 .brief-foreshadows {
   margin-top: 6px;

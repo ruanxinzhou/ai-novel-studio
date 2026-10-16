@@ -363,13 +363,32 @@ def run_chapter_stage(
                             day_spec = p; break
                     if day_spec:
                         arena_lines.append(f"【第{day_spec.get('day')}天·节奏卡】强度={day_spec.get('intensity') or ''}；事件：{day_spec.get('event') or ''}；死亡/高潮/线索：{day_spec.get('beat') or ''}")
-                # 6 卡详设
+                # 6 卡详设（死亡/高潮按 fate_layer 分组，突出原剧本死劫/改命/反噬三层因果）
+                def _fmt_node(n):
+                    t = n.get("title") or n.get("name") or n.get("who") or ""
+                    d = n.get("description") or n.get("summary") or n.get("detail") or n.get("how") or n.get("beat") or ""
+                    tease = n.get("tease") or ""
+                    cost = n.get("cost") or ""
+                    bits = []
+                    if t:
+                        bits.append(t)
+                    if d:
+                        bits.append(d)
+                    if tease:
+                        bits.append("（伏笔：" + tease + "）")
+                    if cost:
+                        bits.append("（代价：" + cost + "）")
+                    layer = (n.get("fate_layer") or "").strip().lower()
+                    prefix = {"doomed": "[原剧本死劫·DOOMED]", "diverted": "[唐迟改命·DIVERTED]",
+                              "escalated": "[改命反噬·ESCALATED]"}.get(layer, "")
+                    line = " ".join(bits).strip()
+                    return ("- " + prefix + " " + line) if prefix else ("- " + line)
+
                 def _join_node_list(lst, label):
                     if not lst: return
                     bits = []
                     for n in lst:
                         if not isinstance(n, dict): continue
-                        # 只取关联到本天/本阶段的节点
                         n_day = n.get("day") or n.get("chapter")
                         if ch_no_local is not None and n_day is not None:
                             try:
@@ -377,14 +396,76 @@ def run_chapter_stage(
                                     continue
                             except Exception:
                                 pass
-                        t = n.get("title") or n.get("name") or ""
-                        d = n.get("description") or n.get("summary") or n.get("detail") or ""
-                        if t or d:
-                            bits.append(f"- {t}：{d}" if t else f"- {d}")
+                        td = n.get("title") or n.get("name") or n.get("where") or ""
+                        wh = n.get("what") or n.get("description") or n.get("summary") or n.get("detail") or ""
+                        if td or wh:
+                            bits.append(("- " + td + "：" + wh) if (td and wh) else ("- " + (td or wh)))
                     if bits:
-                        arena_lines.append(f"【本场{label}】\n" + "\n".join(bits))
-                _join_node_list(vol.death_nodes or [], "死亡节点")
-                _join_node_list(vol.climax_nodes or [], "高潮节点")
+                        arena_lines.append("【本场" + label + "】\n" + "\n".join(bits))
+
+                def _join_by_layer(lst, label_main):
+                    if not lst:
+                        return
+                    todays = []
+                    future_near = []
+                    for n in lst:
+                        if not isinstance(n, dict):
+                            continue
+                        n_day = n.get("day") or n.get("chapter")
+                        bucket = None
+                        if ch_no_local is not None and n_day is not None:
+                            try:
+                                nd = int(n_day)
+                                if nd == ch_no_local:
+                                    bucket = todays
+                                elif 0 < nd - ch_no_local <= 2:
+                                    bucket = future_near
+                            except Exception:
+                                bucket = todays
+                        else:
+                            bucket = todays
+                        if bucket is not None:
+                            bucket.append(n)
+                    if not todays and not future_near:
+                        return
+                    rendered = []
+                    if label_main in ("死亡节点", "高潮节点"):
+                        groups = [
+                            ("原剧本死劫（唐迟已从跑团/讣告中预见，本章信息差/先知感的核心来源——他带着预警进场，但大概率救不下来）",
+                             [n for n in todays if (n.get("fate_layer") or "").lower() == "doomed"]),
+                            ("唐迟试图改命（本章他尝试介入救下/转移，要付代价或产生连锁反应）",
+                             [n for n in todays if (n.get("fate_layer") or "").lower() == "diverted"]),
+                            ("改命反噬（介入后反而更糟，触发更严重污染/更多死亡/更难收场）",
+                             [n for n in todays if (n.get("fate_layer") or "").lower() == "escalated"]),
+                            ("（未标 fate_layer 的节点，按默认处理）",
+                             [n for n in todays if (n.get("fate_layer") or "").lower() not in ("doomed", "diverted", "escalated")]),
+                        ]
+                        any_g = False
+                        for gtitle, gitems in groups:
+                            if not gitems:
+                                continue
+                            any_g = True
+                            rendered.append("  ▸ " + gtitle)
+                            for n in gitems:
+                                rendered.append("  " + _fmt_node(n))
+                        if not any_g:
+                            for n in todays:
+                                rendered.append(_fmt_node(n))
+                    else:
+                        for n in todays:
+                            rendered.append(_fmt_node(n))
+                    sec_title = ("【本场" + label_main + "·第" + str(ch_no_local) + "天】") if ch_no_local is not None else ("【本场" + label_main + "】")
+                    block = sec_title + "\n" + "\n".join(rendered)
+                    if future_near:
+                        near_lines = []
+                        for n in future_near[:3]:
+                            nd = n.get("day") or "?"
+                            near_lines.append("  - 第" + str(nd) + "天：" + str(n.get("title") or n.get("who") or ""))
+                        block = block + "\n  ▸ 未来1-2天预告（不要在本章提前写死，但可以埋钩子/伏笔）\n" + "\n".join(near_lines)
+                    arena_lines.append(block)
+
+                _join_by_layer(vol.death_nodes or [], "死亡节点")
+                _join_by_layer(vol.climax_nodes or [], "高潮节点")
                 _join_node_list(vol.clue_nodes or [], "线索节点")
                 _join_node_list(vol.pasted_nodes or [], "贴肤节点")
             # scaffold 6 卡

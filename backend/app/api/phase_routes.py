@@ -313,7 +313,8 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
     all_chapter_nos = target_ch_nos  # 只看当前卷的章
     # 3. 杀青判定：当前卷所有章 finalized，settle 为 None。
     #    卷末判定：要么 advance 显式置 stage_completed.briefing+desk=True，
-    #    要么本卷已写章数已达到 rhythm_blueprint 建议上限/章计划最大章号
+    #    要么本卷已写章数已达到 rhythm_blueprint 建议上限/章计划最大章号，
+    #    或者 force_volume_end=True 强制；force_volume_end=False 时即使到达 plan_max 也不进 settle。
     if all_chapter_nos and last_vol.settle is None:
         all_finalized = all(bool(desk.get(no) and desk.get(no).finalized_at) for no in all_chapter_nos)
         sc = last_vol.stage_completed or {}
@@ -335,7 +336,31 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
             or (range_max > 0 and cur_max_ch >= range_max)
             or (last_vol.volume_kind == 'interlude' and interlude_expected > 0 and len(all_chapter_nos) >= interlude_expected)
         )
-        if all_finalized and reached_plan_end:
+        # 强制杀青 / 压制杀青（优先于自动判断）
+        end_forced = bool(sc.get('end_forced'))
+        end_suppressed = bool(sc.get('end_suppressed'))
+        if end_forced and all_finalized:
+            return {
+                "phase": "settle",
+                "volume_no": last_vol.volume_no,
+                "volume_kind": last_vol.volume_kind,
+                "chapter_no": None,
+                "is_last_chapter": False,
+                "is_reviewing": False,
+            }
+        if end_suppressed:
+            # 被压制：继续写下一章，永不在此处进 settle
+            if all_finalized:
+                return {
+                    "phase": "briefing",
+                    "volume_no": last_vol.volume_no,
+                    "volume_kind": last_vol.volume_kind,
+                    "chapter_no": cur_max_ch,
+                    "is_last_chapter": True,
+                    "is_reviewing": False,
+                    "end_suppressed": True,
+                }
+        elif all_finalized and reached_plan_end:
             return {
                 "phase": "settle",
                 "volume_no": last_vol.volume_no,

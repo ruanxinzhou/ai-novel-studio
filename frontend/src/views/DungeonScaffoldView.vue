@@ -37,6 +37,7 @@ const prefillJob = ref<Job | null>(null)
 const progressMsg = ref('')
 const progressPct = ref(0)
 const prefillDirective = ref('')
+const rerollingKey = ref<string | null>(null)
 
 // 三版候选：6 key → 3 items；list 的 item 是 {id, version_label, preview: []}；text 的 item 是 {id, version_label, content: string}
 const cards = ref<Record<string, any[]>>({})
@@ -272,7 +273,7 @@ function restoreFromVolume() {
   else step.value = 'idle'
 }
 
-// ---- 预填 ----
+// ---- 预填（旧 6 卡×3 版 SSE 异步流）----
 async function startPrefill(force = false) {
   if (force && prefillDone.value) {
     try {
@@ -316,6 +317,63 @@ async function startPrefill(force = false) {
     const d = e?.detail || e?.message || String(e)
     ElMessage.error(`预填启动失败：${typeof d === 'string' ? d : JSON.stringify(d)}`)
     step.value = 'idle'
+  }
+}
+
+// ---- 一键从魂穿派生（同步，默认锁 A 版）----
+async function startDerive(force = false) {
+  if (force && prefillDone.value) {
+    try {
+      await ElMessageBox.confirm(
+        '重新派生会清空当前已选/已锁的 6 张卡（包括自定义项），并把 6 卡默认锁为 A 版。确认重来？',
+        '从魂穿重新派生',
+        { type: 'warning' },
+      )
+    } catch { return }
+  }
+  step.value = 'prefilling'
+  progressMsg.value = '正在从魂穿产物派生 6 卡详设…'
+  progressPct.value = 20
+  picked.value = {}
+  locked.value = {}
+  cards.value = {}
+  extraCards.value = {}
+  try {
+    const r = await scaffoldApi.deriveFromEmbody(currentProjectId.value, props.volNo, {
+      force: true,
+      directive: prefillDirective.value.trim(),
+    })
+    progressMsg.value = '派生完成，A 版已默认锁定'
+    progressPct.value = 100
+    volume.value = r.volume || volume.value
+    restoreFromVolume()
+    ElMessage.success(r.is_mock ? '派生完成（mock 示例数据，6 卡默认锁 A 版）' : '派生完成，6 卡默认锁 A 版，点🔄可单卡换款')
+  } catch (e: any) {
+    const d = e?.detail || e?.message || String(e)
+    ElMessage.error(`派生失败：${typeof d === 'string' ? d : JSON.stringify(d)}`)
+    step.value = 'idle'
+  }
+}
+
+// ---- 单卡🔄重抽（只给 2 个新变体，追加到该卡 variants 末尾）----
+async function onRerunCard(def: CardDef, _idx: number | null, directive: string) {
+  if (locked.value[def.key]) {
+    ElMessage.warning('该卡已锁定，不能重抽；换张卡或先自定义覆盖')
+    return
+  }
+  rerollingKey.value = def.key
+  try {
+    const r = await scaffoldApi.rerollCard(currentProjectId.value, props.volNo, def.key, {
+      directive: directive || prefillDirective.value.trim(),
+    })
+    volume.value = r.volume || volume.value
+    restoreFromVolume()
+    ElMessage.success(`「${def.label}」已追加 ${r.new_variants?.length || 0} 个新变体（共 ${r.variant_count} 版）`)
+  } catch (e: any) {
+    const d = e?.detail?.msg || e?.detail || e?.message || String(e)
+    ElMessage.error(`重抽失败：${typeof d === 'string' ? d : JSON.stringify(d)}`)
+  } finally {
+    rerollingKey.value = null
   }
 }
 
@@ -430,12 +488,6 @@ async function finalize() {
   }
 }
 
-function onRerunCard(_def: CardDef, _idx: number | null, directive: string) {
-  // 重新预填（6 卡一起），directive 走 prefillDirective
-  prefillDirective.value = directive || prefillDirective.value
-  startPrefill(prefillDone.value)
-}
-
 // ---- 展示 helpers ----
 function weightStars(w: number): string {
   const n = Math.max(1, Math.min(5, Number(w) || 1))
@@ -520,22 +572,27 @@ function pickedIdFor(key: string): string | null {
     <template v-else>
       <!-- 未预填态 -->
       <div v-if="step === 'idle' && !prefillDone" class="scaffold-idle">
-        <el-result icon="info" title="副本详设尚未生成" sub-title="AI 将基于你已经选定的副本骨架、跑团走向、宿主角色与唐迟七日历，一次性为 6 张卡各出 3 版差异化候选。可在下方写 reroll/整体指令。">
+        <el-result icon="info" title="副本详设尚未生成" sub-title="两种起手式：①推荐——从魂穿产物一键派生，6 卡直接锁默认 A 版，不满意再单卡🔄换款（每次 2 个新变体）；②传统——6 卡一次性出 3 版差异化候选，逐张挑选锁定。">
           <template #extra>
             <div class="idle-directive">
               <el-input
                 v-model="prefillDirective"
                 type="textarea"
                 :rows="3"
-                placeholder="可选：对 AI 预填的整体要求，比如「死亡节点必须包含门卫老陈」「核心诡计必须涉及蓝星遗物」"
+                placeholder="可选：对 AI 生成的整体要求，比如「死亡节点必须包含门卫老陈」「核心诡计必须涉及蓝星遗物」"
               />
             </div>
-            <el-button type="primary" size="large" @click="startPrefill(false)" style="margin-top:12px;">
-              🎰 AI 一次性预填 6 卡（每卡 3 版差异化）
-            </el-button>
+            <div style="margin-top: 14px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;">
+              <el-button type="primary" size="large" @click="startDerive(false)">
+                🎯 一键派生（默认锁 A 版，单卡🔄补 2 变体）
+              </el-button>
+              <el-button size="default" @click="startPrefill(false)">
+                🎰 传统 6 卡×3 版预填（逐卡挑选）
+              </el-button>
+            </div>
           </template>
         </el-result>
-        <p class="scaffold-hint">⚠️ 预填会调用模型，mock 短路条件：adapted_module 以「测试副本核文本」开头或宿主姓名含「林薇」时直接返回示例。</p>
+        <p class="scaffold-hint">⚠️ 派生/预填会调用模型；mock 短路条件：adapted_module 以「测试副本核文本」开头或宿主姓名含「林薇」时直接返回示例。</p>
       </div>
 
       <!-- 预填中 -->
@@ -601,7 +658,9 @@ function pickedIdFor(key: string): string | null {
               item-title-field="version_label"
               item-content-field=""
               :show-index="true"
-              empty-label="暂无候选，请先 AI 预填"
+              empty-label="暂无候选，请先 AI 派生/预填"
+              rerun-label="🔄 追加 2 变体"
+              :is-active="rerollingKey !== def.key"
               @pick="(id, idx) => pickVersion(def.key, id, idx)"
               @rerun="(idx, dir) => onRerunCard(def, idx, dir)"
               @custom-write="() => openCustom(def)"

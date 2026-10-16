@@ -50,6 +50,25 @@ const stageNotes = reactive<Record<StageKey, string[]>>({ plot: [], draft: [], p
 const busy = ref('')
 const review = ref<ChapterReview | null>(null)
 const lastFinalize = ref<FinalizeResult | null>(null)
+/** 卷末章开关：null=自动；true=强制杀青；false=压制杀青继续写 */
+const endChapterOverride = ref<boolean | null>(null)
+/** 上一次 advance 返回（展示 at_end/force_state） */
+const lastAdvance = ref<{ at_end?: boolean; auto_at_end?: boolean; force_state?: string; next_chapter?: number; phase?: string } | null>(null)
+
+const autoAtEnd = computed(() => {
+  // 前端近似：当前章号已是本卷最后一章
+  return !!(totalCount.value && currentNo.value && currentNo.value >= totalCount.value)
+})
+const endChapterChecked = computed({
+  get: () => {
+    if (endChapterOverride.value !== null) return endChapterOverride.value
+    return autoAtEnd.value
+  },
+  set: (v: boolean) => {
+    endChapterOverride.value = v
+  },
+})
+const endChapterIndeterminate = computed(() => endChapterOverride.value === null && autoAtEnd.value === false)
 
 // 兑现四选一（P2③）：本章兑现规模，作者点选攒出自家节奏量纲
 const PAYOFF_OPTIONS = [
@@ -195,6 +214,8 @@ async function selectChapter(no: number) {
     payoffChoice.value = ch.payoff ?? ''
     strandChoice.value = ch.strands ?? []
     lastFinalize.value = null
+    lastAdvance.value = null
+    endChapterOverride.value = null
   } catch (e) {
     ElMessage.error(`章节加载失败：${(e as Error).message}`)
   }
@@ -437,13 +458,24 @@ async function runFix() {
 async function doFinalize() {
   if (busy.value) return
   const payoff = payoffChoice.value || 'none'
+  const forceEnd = endChapterOverride.value
+  const isEarlyEnd = (forceEnd === true && !autoAtEnd.value)
+  const isSuppressEnd = (forceEnd === false && autoAtEnd.value)
+  let confirmMsg =
+    `定稿第 ${currentNo.value} 章？将自动执行保鲜飞轮：抽取实体、伏笔兑现问询、核验必现标记、整本合成采纳为新版本。` +
+    `本章兑现将记为「${PAYOFF_OPTIONS.find((p) => p.value === payoff)!.label}」（可在上方四选一里改）。`
+  if (isEarlyEnd) {
+    confirmMsg += `\n\n⚠ 注意：当前章号未到计划章末，你勾选了「本章为本卷终章」——定稿后将直接进入杀青面板，卷内后续章节将不再续写。确定提前杀青？`
+  } else if (isSuppressEnd) {
+    confirmMsg += `\n\n⚠ 注意：这是本卷按计划的最后一章，但你未勾选「本章为本卷终章」——定稿后不会进入杀青面板，会继续追加下一章。确定不杀青、继续写？`
+  }
   try {
-    await ElMessageBox.confirm(
-      `定稿第 ${currentNo.value} 章？将自动执行保鲜飞轮：抽取实体、伏笔兑现问询、核验必现标记、整本合成采纳为新版本。` +
-        `本章兑现将记为「${PAYOFF_OPTIONS.find((p) => p.value === payoff)!.label}」（可在上方四选一里改）。`,
-      '定稿确认',
-      { confirmButtonText: '定稿', cancelButtonText: '再改改', type: 'info' },
-    )
+    await ElMessageBox.confirm(confirmMsg, '定稿确认', {
+      confirmButtonText: isEarlyEnd ? '确定提前杀青' : (isSuppressEnd ? '确定继续写' : '定稿'),
+      cancelButtonText: '再改改',
+      type: isEarlyEnd ? 'warning' : 'info',
+      distinguishCancelAndClose: true,
+    })
   } catch {
     return
   }
@@ -452,15 +484,19 @@ async function doFinalize() {
     lastFinalize.value = await deskApi.finalize(currentProjectId.value, currentNo.value, true, payoff)
     payoffChoice.value = payoff
     ElMessage.success(`第 ${currentNo.value} 章已定稿，飞轮运转完成`)
-    // 调 briefApi.advance 判断下一章 / 杀青
+    // 调 briefApi.advance 判断下一章 / 杀青；按用户勾选传 force_volume_end
     try {
-      const adv = await briefApi.advance(currentProjectId.value, currentVolumeNo.value, currentNo.value)
+      const advBody: any = { finalized: true }
+      if (forceEnd === true) advBody.force_volume_end = true
+      else if (forceEnd === false) advBody.force_volume_end = false
+      const adv = await briefApi.advance(currentProjectId.value, currentVolumeNo.value, currentNo.value, advBody)
+      lastAdvance.value = adv
       await loadOverview()
-      if (adv.next_chapter != null) {
+      if (adv.phase === 'settle' || adv.at_end) {
+        emit('to-settle')
+      } else if (adv.next_chapter != null) {
         currentChapterNo.value = adv.next_chapter
         emit('next-chapter', adv.next_chapter)
-      } else if (adv.phase === 'settle') {
-        emit('to-settle')
       } else {
         const next = overview.value?.chapters.find((c) => !c.finalized_at)
         if (next) await selectChapter(next.no)
@@ -848,6 +884,39 @@ watch(activeTab, (tab) => {
             <span style="font-size: 12px; color: #999">
               顺手点选，攒 20 章即有自家节奏量纲——开章核对单的「节奏位置」与审稿的「节奏饥饿」都吃这份账
             </span>
+          </div>
+          <div style="margin-bottom: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px">
+            <el-checkbox
+              :model-value="endChapterChecked"
+              :indeterminate="endChapterIndeterminate"
+              size="small"
+              :disabled="!!detail.chapter.finalized_at"
+              @change="(v: any) => { endChapterChecked = !!v }"
+            >
+              本章已是本卷终章（定稿后直接进入杀青面板）
+            </el-checkbox>
+            <el-tag v-if="autoAtEnd" size="small" type="success" effect="plain">按节奏蓝图，本章即卷末</el-tag>
+            <el-tag v-else-if="totalCount" size="small" type="info" effect="plain">卷内计划共 {{ totalCount }} 章，当前第 {{ currentNo }} 章</el-tag>
+            <el-tag v-if="endChapterOverride === true && !autoAtEnd" size="small" type="warning" effect="plain">将提前杀青</el-tag>
+            <el-tag v-if="endChapterOverride === false && autoAtEnd" size="small" type="warning" effect="plain">将压制杀青，继续写下一章</el-tag>
+            <span style="font-size: 12px; color: #999">
+              默认按节奏蓝图自动判定；提前勾选 = 强制杀青；计划章末不勾选 = 继续写
+            </span>
+          </div>
+          <div v-if="lastAdvance" style="margin-bottom: 10px; font-size: 12px; color: #909399">
+            上次推进结果：
+            <el-tag size="small" :type="lastAdvance.at_end ? 'success' : 'info'" effect="plain">
+              {{ lastAdvance.at_end ? '已到卷末' : '未到卷末' }}
+            </el-tag>
+            <el-tag v-if="lastAdvance.force_state" size="small" type="info" effect="plain" style="margin-left: 4px">
+              判定：{{ { auto: '按蓝图自动', forced: '强制杀青', suppressed: '压制杀青' }[lastAdvance.force_state] || lastAdvance.force_state }}
+            </el-tag>
+            <el-tag v-if="lastAdvance.next_chapter != null" size="small" type="info" effect="plain" style="margin-left: 4px">
+              下一章：第 {{ lastAdvance.next_chapter }} 章
+            </el-tag>
+            <el-tag v-else-if="lastAdvance.phase" size="small" type="info" effect="plain" style="margin-left: 4px">
+              下一阶段：{{ lastAdvance.phase }}
+            </el-tag>
           </div>
           <template v-if="lastFinalize">
             <div style="font-size: 13px; line-height: 2">

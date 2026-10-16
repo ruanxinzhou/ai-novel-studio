@@ -1722,6 +1722,20 @@ export const scaffoldApi = {
       { method: 'POST', body: JSON.stringify({ force: !!opts?.force, directive: opts?.directive || '' }) },
     ),
 
+  /** 从魂穿产物一键生成 6 卡×3 版并默认锁 A 版；返回 {ok, payload, scaffold_cards, volume, all_locked_prefilled} */
+  deriveFromEmbody: (pid: string, volNo: number, opts?: { force?: boolean; directive?: string }) =>
+    req<{ ok: boolean; is_mock?: boolean; locked_default?: string; payload?: ScaffoldPrefillResult; scaffold_cards?: Record<string, any>; volume?: any; all_locked_prefilled?: boolean }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/scaffold/derive-from-embody`,
+      { method: 'POST', body: JSON.stringify({ force: !!opts?.force, directive: opts?.directive || '' }) },
+    ),
+
+  /** 单卡🔄重抽：追加 2 个差异化变体到该卡 variants（该卡必须未锁定） */
+  rerollCard: (pid: string, volNo: number, cardKey: string, opts?: { directive?: string }) =>
+    req<{ ok: boolean; card_key: string; new_variants: any[]; variant_count: number; is_mock?: boolean; volume?: any }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/scaffold/reroll-card/${encodeURIComponent(cardKey)}`,
+      { method: 'POST', body: JSON.stringify({ directive: opts?.directive || '' }) },
+    ),
+
   listJobs: (pid: string, volNo: number) =>
     req<{ jobs: Job[] }>(`/api/projects/${pid}/workbench/volumes/${volNo}/scaffold/jobs`),
 
@@ -1837,9 +1851,9 @@ export const briefApi = {
     pid: string,
     volNo: number,
     cno: number,
-    body: { directive?: string | null; base_index?: number | null; custom_writing?: string | null },
+    body: { directive?: string | null; base_index?: number | null; custom_writing?: string | null; story_day_override?: number | null },
   ) =>
-    req<{ options: BriefOption[]; day: number; chapter_words_estimate: number; is_mock?: boolean }>(
+    req<{ options: BriefOption[]; day: number; chapter_words_estimate: number; is_mock?: boolean; cross_day?: boolean; story_day_override?: number | null }>(
       `/api/projects/${pid}/workbench/volumes/${volNo}/chapters/${cno}/brief/options`,
       { method: 'POST', body: JSON.stringify(body) },
     ),
@@ -1847,16 +1861,21 @@ export const briefApi = {
     pid: string,
     volNo: number,
     cno: number,
-    body: { option_index: number; extra_edits?: string | null; custom_text?: string | null },
+    body: { option_index: number; extra_edits?: string | null; custom_text?: string | null; story_day_override?: number | null },
   ) =>
     req<{ ok: boolean; brief: any; chapter_no: number }>(
       `/api/projects/${pid}/workbench/volumes/${volNo}/chapters/${cno}/brief/select`,
       { method: 'POST', body: JSON.stringify(body) },
     ),
-  advance: (pid: string, volNo: number, cno: number) =>
-    req<{ next_chapter: number | null; phase: string }>(
+  advance: (
+    pid: string,
+    volNo: number,
+    cno: number,
+    body?: { finalized?: boolean; force_volume_end?: boolean | null },
+  ) =>
+    req<{ next_chapter: number | null; phase: string; at_end?: boolean; auto_at_end?: boolean; force_state?: string }>(
       `/api/projects/${pid}/workbench/volumes/${volNo}/chapters/${cno}/brief/advance`,
-      { method: 'POST', body: JSON.stringify({ finalized: true }) },
+      { method: 'POST', body: JSON.stringify({ finalized: true, ...(body || {}) }) },
     ),
   patch: (pid: string, volNo: number, cno: number, body: Record<string, unknown>) =>
     req<{ ok: boolean; brief: any }>(

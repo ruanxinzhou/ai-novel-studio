@@ -50,6 +50,13 @@ _BRIEF_SYSTEM = """你是一名克苏鲁风格无限流小说的章前方向卡�
 - foreshadow_advance 是本章要推进的伏笔名列表（可以空数组）。
 - entities_on_stage 是本章出场的实体（角色/地点/物品），3~6 个。
 - 三版要有明显差异：一版偏顺承推进、一版偏视角/信息差、一版偏冲击反转；不要三版雷同。
+
+fate_layer 因果锁（硬约束）：
+上下文里的死亡/高潮节点按 fate_layer 分了三类，方向卡设计必须体现三层因果张力：
+- doomed（原剧本死劫）：这些是唐迟在跑团/讣告里已经预见的死法/终局，他带着预警进场但大概率救不下来。本章写到这些节点时必须体现"先知感"——他提前知道会发生什么，提前行动，但仍眼睁睁看着它发生（或只救下边缘物/线索）。信息差戏剧是核心。
+- diverted（唐迟改命）：唐迟主动介入救下/转移的节点，必须写出他具体的介入动作（盐线/抢人/毁物/话术），但代价或连锁反应必须当场落地（救下了人但丢了物证/救下了线索但人没了/救下了眼前但污染扩散）。不能无代价改命。
+- escalated（改命反噬）：这是最有戏剧张力的一类——他以为救下来了，其实触发了更严重的后果（人没死但被污染成内鬼/救下A导致B提前死/堵了一个漏洞但副本升级了规则）。方向卡必须点出"他以为成功了但立刻发现更糟"的反转瞬间。
+如果某天没有某类节点则不必硬凑；如果三类都有，summary 中至少要触到 doomed 的先知感和一个 diverted 或 escalated 的因果反应。
 """
 
 
@@ -112,16 +119,19 @@ class _BriefOptionsIn(BaseModel):
     directive: str | None = None
     base_index: int | None = None
     custom_writing: str | None = None
+    story_day_override: int | None = None  # 1~7 指定副本内日序；0=跨日；None=按 chapter_plan 自动
 
 
 class _BriefSelectIn(BaseModel):
     option_index: int = -1
     extra_edits: str | None = None
     custom_text: str | None = None
+    story_day_override: int | None = None  # 选定方向时一并锁定日序
 
 
 class _BriefAdvanceIn(BaseModel):
     finalized: bool = False
+    force_volume_end: bool | None = None  # 三态：None=自动按章数判断；True=强制杀青；False=压制杀青继续写下一章
 
 
 class _LegacyNextBriefIn(BaseModel):
@@ -278,9 +288,20 @@ def _brief_options(
         desk._flush()
 
     plan = _chapter_plan_for(vol, cno)
-    day = int((plan or {}).get("day") or (work.day or 1))
+
+    # story_day 解析优先级：显式 story_day_override（options 请求）> 已锁定 brief.story_day_override > chapter_plan > work.day
+    brief_existing = work.brief if isinstance(work.brief, dict) else {}
+    override_day = body.story_day_override
+    if override_day is None:
+        override_day = brief_existing.get("story_day_override")
+    if isinstance(override_day, int) and 0 <= override_day <= 7:
+        day = override_day
+    else:
+        day = int((plan or {}).get("day") or (work.day or 1))
     words_estimate = int((plan or {}).get("words") or 6500)
     beat_type = (plan or {}).get("beat_type") or "engine"
+    # 如果是跨日（0），标签特殊处理
+    cross_day = (day == 0)
 
     # 1) 自编模式：直接返回 1 条 custom 卡，不调 LLM
     if body.custom_writing and body.custom_writing.strip():
@@ -302,18 +323,24 @@ def _brief_options(
             work.brief = {}
         work.brief["custom_draft"] = cw
         work.brief["_last_options"] = [custom_opt]
+        if isinstance(override_day, int):
+            work.brief["story_day_override"] = override_day
         desk._flush()
         return {
             "options": [custom_opt],
             "day": day,
             "chapter_words_estimate": words_estimate,
             "is_mock": False,
+            "cross_day": cross_day,
+            "story_day_override": override_day if isinstance(override_day, int) else None,
         }
 
     # 2) Mock 短路
     is_mock = _is_mock(vol)
     if is_mock:
         data = _mock_options(cno, plan)
+        data["cross_day"] = cross_day
+        data["story_day_override"] = override_day if isinstance(override_day, int) else None
     else:
         # 3) 真 LLM 调用
         from ..generation import complete_structured
@@ -321,13 +348,50 @@ def _brief_options(
         parts.append("===== 节奏蓝图·本章规划 =====")
         parts.append(json.dumps(plan or {}, ensure_ascii=False))
 
-        if day:
-            deaths = _nodes_for_day(vol, "death_nodes", day)
-            climaxes = _nodes_for_day(vol, "climax_nodes", day)
-            clues = _nodes_for_day(vol, "clue_nodes", day)
-            parts.append(f"\n===== 第{day}天节点 =====")
-            parts.append(f"死亡节点：{json.dumps(deaths, ensure_ascii=False)}")
-            parts.append(f"高潮节点：{json.dumps(climaxes, ensure_ascii=False)}")
+        if day or cross_day:
+            if cross_day:
+                # 跨日：取所有 1~7 天节点，并在上下文里说明本章跨日
+                deaths = []
+                for d in range(1, 8):
+                    deaths.extend(_nodes_for_day(vol, "death_nodes", d))
+                climaxes = []
+                for d in range(1, 8):
+                    climaxes.extend(_nodes_for_day(vol, "climax_nodes", d))
+                clues = []
+                for d in range(1, 8):
+                    clues.extend(_nodes_for_day(vol, "clue_nodes", d))
+                parts.append("\n===== 本章为【跨日】章，覆盖副本多个天数，需在一章内完成跨时段过渡 =====")
+                parts.append("===== 全天节点（按 fate_layer 分组：doomed=原剧本死劫/diverted=唐迟改命/escalated=改命反噬）=====")
+            else:
+                deaths = _nodes_for_day(vol, "death_nodes", day)
+                climaxes = _nodes_for_day(vol, "climax_nodes", day)
+                clues = _nodes_for_day(vol, "clue_nodes", day)
+                parts.append(f"\n===== 第{day}天节点（按 fate_layer 分组：doomed=原剧本死劫/diverted=唐迟改命/escalated=改命反噬）=====")
+
+            def _layer_split(lst):
+                g = {"doomed": [], "diverted": [], "escalated": [], "unlabeled": []}
+                for n in lst:
+                    if not isinstance(n, dict):
+                        continue
+                    key = (n.get("fate_layer") or "unlabeled").lower()
+                    if key not in g:
+                        key = "unlabeled"
+                    g[key].append(n)
+                return g
+
+            dg = _layer_split(deaths)
+            cg = _layer_split(climaxes)
+            parts.append("【原剧本死劫 doomed】本章唐迟带着预警进场的死亡/高潮（信息差核心来源，他大概率救不下来——必须写出先知感）：")
+            parts.append(f"  死亡：{json.dumps(dg['doomed'], ensure_ascii=False)}")
+            parts.append(f"  高潮：{json.dumps(cg['doomed'], ensure_ascii=False)}")
+            parts.append("【唐迟改命 diverted】本章他尝试介入救下/转移的节点（要付代价或产生连锁反应——必须写出介入动作+部分成功+代价）：")
+            parts.append(f"  死亡：{json.dumps(dg['diverted'], ensure_ascii=False)}")
+            parts.append(f"  高潮：{json.dumps(cg['diverted'], ensure_ascii=False)}")
+            parts.append("【改命反噬 escalated】介入后反而更糟的节点（触发更严重污染/更多死亡/反转升级——必须写出'救了反而坏了'的意外感）：")
+            parts.append(f"  死亡：{json.dumps(dg['escalated'], ensure_ascii=False)}")
+            parts.append(f"  高潮：{json.dumps(cg['escalated'], ensure_ascii=False)}")
+            if dg["unlabeled"] or cg["unlabeled"]:
+                parts.append(f"【未分层节点】死亡：{json.dumps(dg['unlabeled'], ensure_ascii=False)}；高潮：{json.dumps(cg['unlabeled'], ensure_ascii=False)}")
             parts.append(f"线索节点：{json.dumps(clues, ensure_ascii=False)}")
 
         prev = _prev_tail(desk, cno)
@@ -373,8 +437,8 @@ def _brief_options(
         for i, key in enumerate(("a", "b", "c")):
             if i < len(opts) and isinstance(opts[i], dict):
                 opts[i]["id"] = key
-                # 补 day / beat_type 默认
-                if not opts[i].get("day"):
+                # 补 day / beat_type 默认（跨日时 day=0）
+                if not opts[i].get("day") and opts[i].get("day") != 0:
                     opts[i]["day"] = day
                 if not opts[i].get("beat_type"):
                     opts[i]["beat_type"] = beat_type
@@ -383,12 +447,17 @@ def _brief_options(
             "day": day,
             "chapter_words_estimate": words_estimate,
             "is_mock": False,
+            "cross_day": cross_day,
+            "story_day_override": override_day if isinstance(override_day, int) else None,
         }
 
     # 保存 _last_options 供 select 通过 option_index 查找
     if not isinstance(work.brief, dict):
         work.brief = {}
     work.brief["_last_options"] = data.get("options") or []
+    # 把 story_day_override 也暂存（未选版时跨刷新保留）
+    if isinstance(override_day, int):
+        work.brief["story_day_override"] = override_day
     desk._flush()
 
     return data
@@ -468,6 +537,17 @@ def _brief_select(
     if body.extra_edits and body.extra_edits.strip():
         selected["extra_edits"] = body.extra_edits.strip()
 
+    # 解析最终锁定的日序：select 体显式 story_day_override > selected option 自带 day > 已存 override
+    locked_day: int | None = None
+    if isinstance(body.story_day_override, int) and 0 <= body.story_day_override <= 7:
+        locked_day = body.story_day_override
+    elif isinstance(selected.get("day"), int) and 0 <= int(selected["day"]) <= 7:
+        locked_day = int(selected["day"])
+    elif isinstance(work.brief, dict) and isinstance(work.brief.get("story_day_override"), int):
+        locked_day = int(work.brief["story_day_override"])
+    if locked_day is not None:
+        selected["day"] = locked_day
+
     brief_obj = {
         "selected": selected,
         "selected_at": _now(),
@@ -476,6 +556,8 @@ def _brief_select(
         "day": selected.get("day"),
         "is_custom": bool(is_custom or selected.get("is_custom")),
     }
+    if isinstance(locked_day, int):
+        brief_obj["story_day_override"] = locked_day
     work.brief = brief_obj
     work.day = selected.get("day") if isinstance(selected.get("day"), int) else work.day
     # 默认 title
@@ -508,34 +590,72 @@ def _brief_advance(
     all_nos = desk.all_nos()
     cur_max = max(all_nos) if all_nos else 0
 
-    at_end = False
+    # 自动判断是否卷末
+    auto_at_end = False
     if max_chapters > 0 and cur_max >= max_chapters:
-        at_end = True
-    # 额外判断：如果 chapter_plan 最后一章 <= cno，也算卷末
+        auto_at_end = True
     plan_list = bp.get("chapter_plan") if isinstance(bp, dict) else []
     if isinstance(plan_list, list) and plan_list:
         plan_max = max((int(p.get("chapter") or 0) for p in plan_list if isinstance(p, dict)), default=0)
         if plan_max > 0 and cno >= plan_max:
-            at_end = True
+            auto_at_end = True
+
+    # force_volume_end 三态：None=自动, True=强制杀青, False=压制杀青继续写
+    if body.force_volume_end is True:
+        at_end = True
+        force_state = "forced"
+    elif body.force_volume_end is False:
+        at_end = False
+        force_state = "suppressed"
+    else:
+        at_end = auto_at_end
+        force_state = "auto"
+
+    # 先把卷末三态写入 stage_completed（phase_routes 要读）
+    sc = dict(getattr(vol, "stage_completed", None) or {})
+    if body.force_volume_end is True:
+        sc["end_forced"] = True
+        sc["end_suppressed"] = False
+        if body.finalized:
+            sc["briefing"] = True
+            sc["desk"] = True
+    elif body.force_volume_end is False:
+        sc["end_suppressed"] = True
+        sc["end_forced"] = False
+    else:
+        # 自动模式：不强制不压制，清除旧的手动标记
+        sc.pop("end_forced", None)
+        # end_suppressed 保留以便跨刷新记忆，但如果当前已到 auto_at_end 且用户未压制，则不清除
 
     if body.finalized:
         if at_end:
             # 卷末：进入杀青
-            sc = dict(getattr(vol, "stage_completed", None) or {})
             sc["briefing"] = True
             sc["desk"] = True
             try:
                 vs.update_planning(vol_no, stage_completed=sc)
             except Exception:
                 pass
-            return {"next_chapter": None, "phase": "settle"}
+            return {"next_chapter": None, "phase": "settle",
+                    "at_end": True, "auto_at_end": auto_at_end, "force_state": force_state}
         else:
-            # 下一章：ensure 创建，绑定 field_no
+            # 下一章：ensure 创建，绑定 field_no；如果是被压制的"卷末后"章，初始化空 brief
+            try:
+                vs.update_planning(vol_no, stage_completed=sc)
+            except Exception:
+                pass
             new_work = desk.ensure(cno + 1)
             new_work.field_no = vol_no
             desk._flush()
-            return {"next_chapter": cno + 1, "phase": "briefing"}
-    return {"next_chapter": None, "phase": "desk"}
+            return {"next_chapter": cno + 1, "phase": "briefing",
+                    "at_end": False, "auto_at_end": auto_at_end, "force_state": force_state}
+    # 未定稿只返回判定
+    try:
+        vs.update_planning(vol_no, stage_completed=sc)
+    except Exception:
+        pass
+    return {"next_chapter": None, "phase": "desk",
+            "at_end": at_end, "auto_at_end": auto_at_end, "force_state": force_state}
 
 
 def _legacy_next_chapter_brief(

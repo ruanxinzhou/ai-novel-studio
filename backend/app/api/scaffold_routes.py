@@ -23,8 +23,8 @@ _SCAFFOLD_SYSTEM = """你是一名克苏鲁风格生存副本的资深模组设�
 严格以 JSON 返回，不要输出 JSON 之外的任何文字，不要写 Markdown 代码块包裹。返回格式：
 
 {
-  "death_nodes":  [[ {day,who,how,tease,cost}, ...3~5个死亡事件... ], [...第2版...], [...第3版...]],
-  "climax_nodes": [[ {day,title,beat,weight}, ...2~3个高潮节点... ], [...第2版...], [...第3版...]],
+  "death_nodes":  [[ {day,who,how,tease,cost,fate_layer}, ...3~5个死亡事件... ], [...第2版...], [...第3版...]],
+  "climax_nodes": [[ {day,title,beat,weight,fate_layer}, ...2~3个高潮节点... ], [...第2版...], [...第3版...]],
   "clue_nodes":   [[ {day,where,what,leads_to,is_red_herring}, ...5条线索... ], [...第2版...], [...第3版...]],
   "core_twist":   [ "第1版核心反转文本，约80-120字", "第2版…", "第3版…" ],
   "tangchi_start":[ "第1版唐迟开篇文本，约80-120字", "第2版…", "第3版…" ],
@@ -32,8 +32,16 @@ _SCAFFOLD_SYSTEM = """你是一名克苏鲁风格生存副本的资深模组设�
 }
 
 字段语义：
-- death_nodes：死亡事件清单。day=1~7（数字），who=死者身份，how=死法（要带克苏鲁味的惊悚/诡异细节，40-80字），tease=死亡伏笔（正文里事先埋的细微异常，20-40字），cost=该死亡给唐迟/团队带来的代价（理智值/道具/关系/信息损失，20-40字）。
-- climax_nodes：高潮/转折节点。day=1~7（数字），title=节点标题（5-12字），beat=高潮动作&反转（60-100字），weight=1~3 的整数（1=小反转、2=中高潮、3=终极高潮，每版恰好 1 个 weight=3）。
+- death_nodes：死亡事件清单。day=1~7（数字），who=死者身份，how=死法（要带克苏鲁味的惊悚/诡异细节，40-80字），tease=死亡伏笔（正文里事先埋的细微异常，20-40字），cost=该死亡给唐迟/团队带来的代价（理智值/道具/关系/信息损失，20-40字），**fate_layer**（必填，字符串，三选一）：
+    * "doomed"=原剧本死劫——唐迟在跑团/讣告里**已经知道**这个人本该死，他带着预警进场但大概率救不下来（这是信息差/先知感的核心来源）
+    * "diverted"=唐迟改命成功——唐迟介入救下/转移了死者，但要付代价或产生连锁反应
+    * "escalated"=改命反致更惨——唐迟救了反而触发更严重的污染/更多死亡/更难收场
+  每版 3-5 个死亡事件中，doomed/diverted/escalated 三类必须**全部出现**（至少各 1 个），其余可自由分配。
+- climax_nodes：高潮/转折节点。day=1~7（数字），title=节点标题（5-12字），beat=高潮动作&反转（60-100字），weight=1~3 的整数（1=小反转、2=中高潮、3=终极高潮，每版恰好 1 个 weight=3），**fate_layer**（必填，字符串，三选一）：
+    * "doomed"=按原跑团走向唐迟本该被碾死的节点
+    * "diverted"=唐迟主动破局的节点
+    * "escalated"=破局失败/真相揭露触发反转升级
+  每版 climax 必须三类 fate_layer 都覆盖到（对应小反转/中高潮/终极高潮的分布感）。
 - clue_nodes：线索/红鲱鱼。day=1~7（数字），where=发现地点，what=线索内容（40-60字），leads_to=指向哪个后续节点/角色/地点（20-30字），is_red_herring=布尔值（true=这是一条误导/假线索；每版至少 1 条红鲱鱼）。
 - core_twist：副本底层核心反转，解释整个副本"真正在发生什么"。必须是读者恍然大悟级别的反常识真相，克苏鲁基调。
 - tangchi_start：唐迟进入副本的开场第一个场景——他以什么身份醒来/出现、第一感知是什么、眼前第一个异常是什么。要有沉浸感与画面感。
@@ -66,6 +74,15 @@ class _FinalizeIn(BaseModel):
     pass
 
 
+class _DeriveFromEmbodyIn(BaseModel):
+    directive: str = ""
+    force: bool = False
+
+
+class _RerollCardIn(BaseModel):
+    directive: str = ""
+
+
 def _session_id(pid: str, vol_no: int) -> str:
     return f"scaff:{pid}:{vol_no}"
 
@@ -84,49 +101,49 @@ def _is_mock(vol) -> bool:
 
 
 def _mock_payload() -> dict:
-    """6卡×3版 克苏鲁基调硬编码数据。"""
+    """6卡×3版 克苏鲁基调硬编码数据。每个 death/climax 节点都带 fate_layer。"""
     return {
         "death_nodes": [
             # 版 A：慢热解谜·尸体逐个说话
             [
-                {"day": 2, "who": "宿管阿姨王桂芬", "how": "凌晨三点被发现悬挂在宿舍楼外的晾衣绳上，脖颈缠绕着一团湿滑的黑发，头发末端探出细小的吸盘在月光下一张一合，像某种深海软体动物的触手。", "tease": "前一晚她曾念叨'水龙头里流出咸水'。", "cost": "失去唯一能查民国旧档的内线。"},
-                {"day": 3, "who": "历史系研究生周凯", "how": "在校史陈列室里被自己翻开的合订本报纸吞噬，油墨从纸面渗出像黑色焦油糊满七窍，整张脸被吸成了一张扁平的报纸人，嘴还张成'O'型。", "tease": "他之前在微信群里发过'报纸上的人在看我'。", "cost": "即将拼出的'1927海难'线索断在关键一页。"},
-                {"day": 5, "who": "林薇（小报记者）", "how": "第七教学楼天台边缘，她的影子在正午阳光下先于她一步跌落，随后身体像被影子拖拽般后仰坠下，落地时脸上保持着一个不属于她的、极满足的微笑。", "tease": "唐迟在前一夜看见她在镜子前练习那个微笑。", "cost": "唐迟 San -2；记者相机落入校工之手。"},
+                {"day": 2, "who": "宿管阿姨王桂芬", "how": "凌晨三点被发现悬挂在宿舍楼外的晾衣绳上，脖颈缠绕着一团湿滑的黑发，头发末端探出细小的吸盘在月光下一张一合，像某种深海软体动物的触手。唐迟赶到时她已经断气——他在跑团里预见过这个死法，提前十分钟冲下楼却还是晚了一步，吸盘已经钻进颈动脉。", "tease": "前一晚她曾念叨'水龙头里流出咸水'。", "cost": "失去唯一能查民国旧档的内线；唐迟第一次明确意识到'知道剧本也救不下来'。", "fate_layer": "doomed"},
+                {"day": 3, "who": "历史系研究生周凯", "how": "在校史陈列室里，唐迟冲进去时旧报纸已经开始吞噬周凯——油墨像黑色焦油从七窍往里灌。周凯用最后一口气把拼到一半的'1927海难'那页报道塞进唐迟手里，随即整个人被吸成一张扁平的报纸人，嘴还张成'O'型。", "tease": "他之前在微信群里发过'报纸上的人在看我'。", "cost": "拼出的'1927海难'线索页被救下，但周凯人没了；唐迟左手被油墨灼伤留下黑色印记。", "fate_layer": "diverted"},
+                {"day": 5, "who": "林薇（小报记者）", "how": "第七教学楼天台，唐迟冲过去拉她时影子抢先一步缠上她的脚踝——林薇没坠楼，但被影子触碰过的右眼开始渗出海水，当晚起她开始替影子'说话'，说出的都是唐迟自己没说出口的秘密。", "tease": "唐迟在前一夜看见她在镜子前练习那个微笑。", "cost": "林薇未死但被污染成影子传声筒，唐迟身边多了一个随时会泄露底牌的'内鬼'，San -2；相机落入校工之手。", "fate_layer": "escalated"},
             ],
             # 版 B：生存紧逼·每天都死人
             [
-                {"day": 1, "who": "宿管阿姨王桂芬", "how": "唐迟刚进宿舍的当晚，她在查房时被楼道里渗出的海水灌进肺里淹死——楼道里没一滴水，但她口鼻中源源不断涌出带着海腥气的咸水，整个人像在空气里溺亡。", "tease": "她开门时嘀咕了一句'今天走廊怎么这么潮'。", "cost": "开局即建立'空气溺亡'惊悚规则。"},
-                {"day": 2, "who": "保安老刘", "how": "在巡逻至游泳馆废墟时被一团湿漉漉的校服拖拽进干涸的泳池底部，第二天打捞上来时他全身布满藤壶，皮肤已被泡成灰白色，像在海里沉了三年。", "tease": "他胸口别着的校徽背面刻着一个陌生女生的名字。", "cost": "失去夜间唯一可能的武力支援。"},
-                {"day": 3, "who": "历史系研究生周凯", "how": "在校史室被旧报纸糊脸窒息而死，死时手里攥着一张1927年的毕业照，照片最角落的位置多出了一张和唐迟一模一样的脸。", "tease": "他死前给唐迟发了半条微信'你不是第一次——'。", "cost": "唐迟被卷入更深层轮回疑云，San -1。"},
-                {"day": 4, "who": "中文系学姐苏雅", "how": "在图书馆翻到一本无字书后开始用自己的血在墙上写字，写到第七十七个字时全身血液从毛孔蒸干，变成一具趴在墙上的干尸，脸上是宗教狂热般的笑。", "tease": "前一天她反复哼着一段不成调的海妖童谣。", "cost": "损失一名理智尚存的队友；童谣线索被迫中断。"},
-                {"day": 5, "who": "林薇（小报记者）", "how": "在天台被自己的影子拉下高楼，坠地瞬间影子脱离她的身体钻进下水道消失，留下的尸体没有影子——阳光直射下的地面干干净净。", "tease": "她相机里最后一张照片拍的是唐迟的脚下，那里本该没有影子。", "cost": "唐迟意识到自己的影子可能也有问题，San -2。"},
+                {"day": 1, "who": "宿管阿姨王桂芬", "how": "唐迟刚进宿舍的当晚，她在查房时被楼道里渗出的海水灌进肺里淹死——楼道里没一滴水，但她口鼻中源源不断涌出带着海腥气的咸水，整个人像在空气里溺亡。唐迟拍门时海水已经漫过她的下巴，他眼睁睁看着她瞳孔放大。", "tease": "她开门时嘀咕了一句'今天走廊怎么这么潮'。", "cost": "开局即建立'空气溺亡'惊悚规则；唐迟带着跑团预警仍没救下第一人，San -1。", "fate_layer": "doomed"},
+                {"day": 2, "who": "保安老刘", "how": "在巡逻至游泳馆废墟时被湿漉漉的校服拖拽，唐迟提前在泳池边撒了盐线想拉他回来，但盐水只烧断了校服的一半——老刘被拖进干涸池底，第二天打捞上来全身布满藤壶，右手却死死攥着一枚刻着陌生女生名字的校徽。", "tease": "他胸口别着的校徽背面刻着一个陌生女生的名字。", "cost": "老刘人没救回，但校徽物证攥在手里——盐线规则由此建立；失去夜间唯一武力支援。", "fate_layer": "diverted"},
+                {"day": 3, "who": "历史系研究生周凯", "how": "在校史室唐迟堵门不让他碰报纸堆，但那张1927年毕业照已经让他七窍流血——油墨从眼眶耳朵往外渗。他靠着门完整说出'你不是第一次来'七个字后咽气，手里毕业照最角落多出了一张和唐迟一模一样的脸。", "tease": "他死前给唐迟发了半条微信'你不是第一次——'。", "cost": "周凯没被报纸吞掉但还是死了，轮回线索由他亲口说出而非微信残句；唐迟被卷入更深层疑云，San -1。", "fate_layer": "diverted"},
+                {"day": 4, "who": "中文系学姐苏雅", "how": "在图书馆翻到无字书开始用血写墙，唐迟赶到时她写到第七十三字——他一把抽走无字书，血字戛然而止停在留白处，苏雅没被蒸干。但当晚那缺了四个字的血字被合唱队用来'补完'召唤，宿舍楼多死了两个无名学生。", "tease": "前一天她反复哼着一段不成调的海妖童谣。", "cost": "苏雅没死但血字留白成了召唤缺口，合唱提前启动，两个无辜学生陪葬；童谣线索被迫中断。", "fate_layer": "escalated"},
+                {"day": 5, "who": "林薇（小报记者）", "how": "在天台唐迟抓住她手腕硬拽回来，但影子顺着她手臂爬上来、钻进唐迟脚下的阴影里——林薇被救下没坠楼，可唐迟低头看自己的影子，它正在缓慢地、独立地转身。", "tease": "她相机里最后一张照片拍的是唐迟的脚下，那里本该没有影子。", "cost": "林薇活着回来，但唐迟的影子被寄生，从此他无法完全相信自己脚下的黑暗；San -2。", "fate_layer": "escalated"},
             ],
             # 版 C：诡计误导·身份错配
             [
-                {"day": 3, "who": "宿管王桂芬（伪）", "how": "死在锅炉房里的'王桂芬'其实是1927年失踪女生陈阿妹借壳复活的皮囊；真正的王阿姨早在副本开启前就被替换。尸体被发现时正在缓慢融化成一滩咸水。", "tease": "唐迟此前注意到她右手的烫伤疤换了位置。", "cost": "信任崩塌——玩家无法判断 NPC 是否已被替换。"},
-                {"day": 4, "who": "历史系研究生周凯", "how": "在意识到'整个校园都在演一出1927年的戏'后，他被自己的倒影拖进了校史馆的落地镜里，镜子里只剩一张贴在镜面的、正在尖叫的扁平人脸。", "tease": "他最后一句话是'我们都不是第一次来'。", "cost": "轮回/迭代线索由他口中抛出，代价是他再也不会开口。"},
-                {"day": 5, "who": "林薇（小报记者）", "how": "在天台试图拍下'真正的幕后'时被一只从镜头里伸出来的、布满鳞片的手勒住脖子拖进相机；相机摔在地上，屏幕里她正在一片漆黑的海底下沉，手还在拍打玻璃。", "tease": "她相机前一晚拍到的唐迟，眼睛里有另一双眼睛。", "cost": "唐迟被标记为'容器候选人'，San -3；相机成为通向深渊的道具。"},
-                {"day": 6, "who": "中文系学姐苏雅", "how": "发现校歌倒放是召唤咒后试图毁弃钟楼顶的铜钟，被从钟内壁涌出的绿色海藻状物质缠满全身拖进钟内，铜钟自鸣七下后归于沉寂，钟身渗出暗色液体。", "tease": "她给唐迟留了一张纸条'别信合唱队的指挥'。", "cost": "最终决战前损失最能辨识仪式的人。"},
+                {"day": 3, "who": "宿管王桂芬（伪）", "how": "唐迟已经识破'王桂芬'是陈阿妹借壳的皮囊但没有当场揭穿——他想顺着线索放长线。结果那具皮囊在锅炉房里主动融化灭口，融成咸水前留下两条指向辅导员和周凯的假线索，故意把唐迟往错路上引。", "tease": "唐迟此前注意到她右手的烫伤疤换了位置。", "cost": "信任崩塌——不仅NPC可能被替换，连识破后不揭穿都会被反将一军，两条假线索将浪费唐迟接下来一整天。", "fate_layer": "doomed"},
+                {"day": 4, "who": "历史系研究生周凯", "how": "在意识到'整个校园都在演一出1927年的戏'后被倒影拖向校史馆落地镜，唐迟扑上去死死拉住他的手拽回了上半身——但下半身永远留在了镜中。周凯用仅剩的上半身说完'我们都不是第一次来'后化为纸灰，镜中他下半身朝唐迟鞠了一躬。", "tease": "他最后一句话是'我们都不是第一次来'。", "cost": "周凯半个人被救回来还是死了，但'我们都不是第一次来'这句关键证词亲口落下；镜子成了新的污染点。", "fate_layer": "diverted"},
+                {"day": 5, "who": "林薇（小报记者）", "how": "在天台试图拍下'真正的幕后'时镜头里伸出一只布满鳞片的手勒向她脖子，唐迟扑过去按住相机快门猛拽——那只鳞片手被硬生生拽断，林薇没被拖进相机，但断手落地后变成一张沾着陈阿妹血迹的1927年学生证，照片上是唐迟自己的脸。林薇当场崩溃。", "tease": "她相机前一晚拍到的唐迟，眼睛里有另一双眼睛。", "cost": "林薇被救下但精神崩溃无法再提供线索；沾血学生证让唐迟被标记为'容器候选人'，San -3。", "fate_layer": "escalated"},
+                {"day": 6, "who": "中文系学姐苏雅", "how": "发现校歌倒放是召唤咒后冲上钟楼想毁铜钟，唐迟紧随其后抓住她左手腕拼命往下拽，但铜钟里涌出的海藻力道太大没拽动——苏雅被拖进铜钟前从钟缝里塞出一张纸条'别信合唱队的指挥'，随即铜钟自鸣七下归于沉寂。唐迟左手被海藻灼伤留下藤壶疤。", "tease": "她给唐迟留了一张纸条'别信合唱队的指挥'。", "cost": "苏雅被铜钟吞入未能救回，但关键纸条'别信指挥'到手；唐迟左手藤壶疤将持续作痛作为污染标记。", "fate_layer": "diverted"},
             ],
         ],
         "climax_nodes": [
             # 版 A
             [
-                {"day": 3, "title": "报纸睁眼", "beat": "周凯之死让唐迟发现旧报纸上的学生照片会眨眼，他意识到这些纸不是记录历史而是在窥视当下；第一次用火烧报纸，火里传出女声惨叫，纸灰拼成一个名字'陈阿妹'。", "weight": 1},
-                {"day": 5, "title": "影子先行", "beat": "林薇当着唐迟的面坠楼，唐迟在天台水渍里看到自己的影子也在缓慢转身。他第一次明确知道'影子是独立个体'，并用盐圈暂时困住自己的影子争取到半天时间。", "weight": 2},
-                {"day": 7, "title": "海床点名", "beat": "午夜游泳馆废墟被海水灌满，唐迟在水下看见1927年溺亡的47名学生坐在池底朝他举手'点名'，而讲台后站着的指挥者——是七天里一直温柔照顾他的辅导员，她露出了鳃。", "weight": 3},
+                {"day": 3, "title": "报纸睁眼", "beat": "周凯死后唐迟检查校史馆旧报纸，发现1927年学生照上的人在对他眨眼——这些纸不是记录历史而是在窥视当下。他按跑团攻略点火烧报纸，火里第一次传出女声惨叫，纸灰拼成名字'陈阿妹'。唐迟以为自己抢先破局，却没发现纸灰里少了一个字。", "weight": 1, "fate_layer": "diverted"},
+                {"day": 5, "title": "影子先行", "beat": "林薇在天台被影子污染右眼后，唐迟在水渍里看见自己影子也在缓慢转身。他按盐圈困住自己影子争取半天，以为掌握主动——可回头看见林薇的影子已经脱离她的脚，在楼道尽头和辅导员的影子牵上了手。改命没救下林薇，反而让污染提前对接。", "weight": 2, "fate_layer": "escalated"},
+                {"day": 7, "title": "海床点名", "beat": "午夜游泳馆废墟被海水灌满——和唐迟跑团阶段预览过的终局一模一样。他在水下看见1927年溺亡的47名学生坐在池底举手'点名'，讲台后站着七天里一直温柔照顾他的辅导员，她露出了鳃。他以为提前知道剧本就能改，但第七个名字还是从他自己嘴里念了出来。", "weight": 3, "fate_layer": "doomed"},
             ],
             # 版 B
             [
-                {"day": 2, "title": "空气溺亡", "beat": "刘保安死时楼道里完全干燥却涌出咸水，唐迟用布蘸水尝了一口——是真的海水。他意识到副本把'海'折进了这座内陆大学，规则第一条诞生：'听到潮声时不要回头'。", "weight": 1},
-                {"day": 4, "title": "血字童谣", "beat": "苏雅干尸旁的墙上，她用自己血写的第七十七个字是唐迟的真名。唐迟意识到童谣在点名，而他是被选中的下一个。合唱队方向传来第一声齐唱。", "weight": 2},
-                {"day": 7, "title": "合唱终章", "beat": "暴雨夜全校广播突然响起校歌倒放，所有幸存 NPC 眼神空洞向大礼堂汇集；唐迟冲进礼堂发现指挥台上的'指挥'不是人，而是一团由47张湿脸拼成的聚合体，它抬起手——最后一个音节即将被唱出。", "weight": 3},
+                {"day": 2, "title": "空气溺亡", "beat": "刘保安死时楼道完全干燥却涌出咸水，唐迟用布蘸水尝了一口——是真海水，'海被折进校园'的规则由此建立。老刘虽然没救回来，但盐线能灼伤校服/溺亡灵体的规则在这一次失败中被试了出来，为后续改命留了刀。", "weight": 1, "fate_layer": "diverted"},
+                {"day": 4, "title": "血字童谣", "beat": "唐迟抽走苏雅的无字书中断了血字蒸干，以为救下苏雅破了童谣点名——可第七十七个字没写完、留了四字空白。当晚合唱队方向用两个无名学生的命补完了那四个字，第一声齐唱从大礼堂方向飘出，比原剧本提前了整整两天。", "weight": 2, "fate_layer": "escalated"},
+                {"day": 7, "title": "合唱终章", "beat": "暴雨夜全校广播响起校歌倒放，幸存NPC眼神空洞向大礼堂汇集——和唐迟跑团预言的全场合唱终局完全一致。他冲进礼堂看见指挥台上是47张湿脸拼成的聚合体，它抬起手准备收最后一个音节。他以为能靠前两天的改命错开这一幕，但合唱还是准时开始。", "weight": 3, "fate_layer": "doomed"},
             ],
             # 版 C
             [
-                {"day": 3, "title": "皮囊融化", "beat": "'王桂芬'尸体融成咸水，唐迟强行撕下另一宿管手腕上的皮——人皮像蜡一样剥落露出底下发绿的鳞片。他意识到副本里大部分 NPC 早被替换，人类可能不足三成。", "weight": 1},
-                {"day": 5, "title": "镜中周凯", "beat": "唐迟对着校史馆镜子呼唤周凯，镜面浮出一张被压平的脸用唇语说'你就是陈阿妹等的人'；唐迟在镜中看到自己穿着1927年的学生装。", "weight": 2},
-                {"day": 7, "title": "第七次迭代", "beat": "唐迟在钟楼顶层发现刻在铜钟内壁的'自己的名字'出现了六次——他已经来过这个副本六次并死了六次。这一次林薇坠楼时的微笑是她保留前次记忆的证明，而唐迟自己也开始记起不属于这七天的事。", "weight": 3},
+                {"day": 3, "title": "皮囊融化", "beat": "'王桂芬'皮囊融成咸水后，唐迟强行撕下另一个宿管手腕上的皮确认替换规则——人皮像蜡剥落露出底下发绿鳞片，他终于坐实'NPC大部分已被替换'。但撕皮的瞬间锅炉房里其他几个'宿管'同时转过头看他，绿鳞片在袖口下隐隐反光。", "weight": 1, "fate_layer": "diverted"},
+                {"day": 5, "title": "镜中周凯", "beat": "唐迟对着校史馆镜子喊周凯，镜面浮出那张被压平的脸说'你就是陈阿妹等的人'，他看见自己穿着1927年学生装——他以为拉出周凯上半身是改命成功，可镜面里他自己的倒影比他本人多笑了一下，镜子本身也已经被污染。", "weight": 2, "fate_layer": "diverted"},
+                {"day": 7, "title": "第七次迭代", "beat": "唐迟在钟楼顶层发现铜钟内壁'自己的名字'刻了六次被划掉——和跑团预览一致：他来过这个副本六次、死了六次。林薇坠楼时的微笑是她保留前次记忆的证明，而唐迟自己也开始记起不属于这七天的事。这是原剧本的必到节点，他必须做出和前六次不同的选择。", "weight": 3, "fate_layer": "doomed"},
             ],
         ],
         "clue_nodes": [
@@ -171,6 +188,88 @@ def _mock_payload() -> dict:
             "本副本唐迟付出的代价上限触达'情感与记忆'：第七次破局要求他主动放弃救林薇和苏雅、接受'不救陈阿妹'这个选择——这意味着他不仅要看着两个他在六次轮回里反复失去又反复相遇的女人再次死在面前，还要亲手撕毁那个支撑他轮回了六次的'我一定要救她'的执念；出本后他能记起她们的脸，却再也记不起她们的名字。",
         ],
     }
+
+
+def _build_context(vol, directive: str = "") -> str:
+    """复用：从 vol 上提取魂穿阶段所有产物拼成 LLM 上下文。"""
+    parts: list[str] = []
+    am = vol.adapted_module or {}
+    if isinstance(am, dict):
+        parts.append("===== 副本骨架（改编稿）=====")
+        parts.append(am.get("adapted_premise") or json.dumps(am, ensure_ascii=False)[:2000])
+    elif am:
+        parts.append(f"===== 副本骨架 =====\n{am}")
+    sr = vol.simulated_run or {}
+    if isinstance(sr, dict):
+        parts.append("\n===== 选定跑团走向 =====")
+        parts.append(json.dumps(sr, ensure_ascii=False)[:1500])
+    hc = vol.host_character or {}
+    if hc:
+        parts.append("\n===== 宿主角色 =====")
+        parts.append(json.dumps(hc, ensure_ascii=False))
+    parts.append("\n===== 切入视角 =====")
+    parts.append(f"切入点：{vol.entry_point or ''}")
+    parts.append(f"信息差：{vol.info_gap or ''}")
+    parts.append(f"宿主姿态：{vol.stance or ''}")
+    tso = vol.tangchi_story_outline
+    if isinstance(tso, dict):
+        parts.append("\n===== 唐迟七日历 =====")
+        parts.append(tso.get("outline_text") or json.dumps(tso, ensure_ascii=False)[:2000])
+    elif isinstance(tso, str) and tso:
+        parts.append(f"\n===== 唐迟七日历 =====\n{tso}")
+    d = (directive or "").strip()
+    if d:
+        parts.append(f"\n===== 作者额外指令 =====\n{d}")
+    return "\n".join(parts)
+
+
+# 单卡重抽/derive：只出 2 版差异化变体（不再一次 18 卡），响应体是 {<card_key>: [v1, v2]}
+_SCAFFOLD_SINGLE_CARD_SYSTEMS: dict[str, str] = {
+    "death_nodes": """你是克苏鲁风格生存副本的资深模组设计师。请基于给定的副本上下文，只生成【死亡节点 death_nodes】的 2 个差异显著的候选版本（不要生成其他卡）。
+每版必须是 3~5 个死亡事件数组，每个元素 {day,who,how,tease,cost,fate_layer}，字段语义与 6 卡预填保持一致：doomed=原剧本死劫（唐迟已预见但救不下来）/diverted=唐迟改命成功但付代价/escalated=改命反致更惨，每版三类 fate_layer 必须各至少 1 个。
+严格以 JSON 返回，不输出任何其他文字，不写 Markdown 包裹。返回格式：{"death_nodes": [ [第1版数组], [第2版数组] ]}""",
+    "climax_nodes": """你是克苏鲁风格生存副本的资深模组设计师。请基于给定的副本上下文，只生成【高潮/转折 climax_nodes】的 2 个差异显著的候选版本。
+每版 2~3 个节点数组，每个元素 {day,title,beat,weight,fate_layer}，weight=1~3 整数且每版恰好 1 个 weight=3，三类 fate_layer 必须各至少 1 个。
+严格以 JSON 返回：{"climax_nodes": [ [第1版数组], [第2版数组] ]}""",
+    "clue_nodes": """你是克苏鲁风格生存副本的资深模组设计师。请基于给定的副本上下文，只生成【线索与红鲱鱼 clue_nodes】的 2 个差异显著的候选版本。
+每版至少 5 条线索数组，每个元素 {day,where,what,leads_to,is_red_herring}，每版至少 1 条红鲱鱼。
+严格以 JSON 返回：{"clue_nodes": [ [第1版数组], [第2版数组] ]}""",
+    "core_twist": """你是克苏鲁风格生存副本的资深模组设计师。请基于给定的副本上下文，只生成【核心诡计 core_twist】的 2 个差异显著候选（每条 80-120 字）。
+严格以 JSON 返回：{"core_twist": ["第1版文本", "第2版文本"]}""",
+    "tangchi_start": """你是克苏鲁风格生存副本的资深模组设计师。请基于给定的副本上下文，只生成【唐迟第一秒 tangchi_start】的 2 个差异显著候选（每条 80-120 字，要有画面感与第一个异常）。
+严格以 JSON 返回：{"tangchi_start": ["第1版文本", "第2版文本"]}""",
+    "cost_cap": """你是克苏鲁风格生存副本的资深模组设计师。请基于给定的副本上下文，只生成【代价上限 cost_cap】的 2 个差异显著候选（每条 80-120 字，要写出唐迟被触碰/突破的底线）。
+严格以 JSON 返回：{"cost_cap": ["第1版文本", "第2版文本"]}""",
+}
+
+
+_LIST_KEYS = {"death_nodes", "climax_nodes", "clue_nodes"}
+_TEXT_KEYS = {"core_twist", "tangchi_start", "cost_cap"}
+_ALL_KEYS = ["death_nodes", "climax_nodes", "clue_nodes", "core_twist", "tangchi_start", "cost_cap"]
+
+
+def _call_llm_cards(deps, system_prompt: str, context: str, user_hint: str, fallback: dict) -> dict:
+    """调用 LLM 做结构化输出，失败回退 fallback。"""
+    from ..generation import complete_structured
+    try:
+        def _call():
+            return deps.chore_provider("scaffold").chat([
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": context + "\n\n" + user_hint},
+            ]).text
+        comp = complete_structured(_call, max_regenerations=2)
+        data = comp.data if isinstance(comp.data, dict) else {}
+        # 简单做非空校验
+        if not any(data.get(k) for k in _ALL_KEYS):
+            return fallback
+        return data
+    except Exception as _e:
+        log.warning("scaffold LLM 失败，回退 fallback：%s", _e)
+        return fallback
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
 
 
 def register_scaffold_routes(
@@ -233,36 +332,7 @@ def register_scaffold_routes(
             else:
                 from ..generation import complete_structured
                 update(message="正在组装上下文…", progress=10)
-                parts = []
-                am = vol.adapted_module or {}
-                if isinstance(am, dict):
-                    parts.append("===== 副本骨架（改编稿）=====")
-                    parts.append(am.get("adapted_premise") or json.dumps(am, ensure_ascii=False)[:2000])
-                elif am:
-                    parts.append(f"===== 副本骨架 =====\n{am}")
-                sr = vol.simulated_run or {}
-                if isinstance(sr, dict):
-                    parts.append("\n===== 选定跑团走向 =====")
-                    parts.append(json.dumps(sr, ensure_ascii=False)[:1500])
-                hc = vol.host_character or {}
-                if hc:
-                    parts.append("\n===== 宿主角色 =====")
-                    parts.append(json.dumps(hc, ensure_ascii=False))
-                parts.append("\n===== 切入视角 =====")
-                parts.append(f"切入点：{vol.entry_point or ''}")
-                parts.append(f"信息差：{vol.info_gap or ''}")
-                parts.append(f"宿主姿态：{vol.stance or ''}")
-                tso = vol.tangchi_story_outline
-                if isinstance(tso, dict):
-                    parts.append("\n===== 唐迟七日历 =====")
-                    parts.append(tso.get("outline_text") or json.dumps(tso, ensure_ascii=False)[:2000])
-                elif isinstance(tso, str) and tso:
-                    parts.append(f"\n===== 唐迟七日历 =====\n{tso}")
-                directive = (body.directive or "").strip()
-                if directive:
-                    parts.append(f"\n===== 作者额外指令 =====\n{directive}")
-                context = "\n".join(parts)
-
+                context = _build_context(vol, body.directive or "")
                 update(message="LLM 生成 6×3 版详设卡…", progress=30)
 
                 def _call():
@@ -428,6 +498,185 @@ def register_scaffold_routes(
             "volume": vol.as_dict(),
         }
 
+    # ----- POST /scaffold/derive-from-embody -----
+    def _scaffold_derive_from_embody(
+        pid: str,
+        vol_no: int,
+        body: _DeriveFromEmbodyIn = Body(...),
+    ):
+        """基于魂穿产物（七日历+宿主+切入点+信息差+姿态）一键产出 6 卡×3 版，并默认锁定每卡的第1版为"A 版"。
+        - 如果 scaffold 已完成（stage_completed.scaffold=True），默认拒绝；传 force=True 覆盖。
+        - 如果已经有 scaffold_cards（中途状态），也拒绝（避免覆盖已选）；同样由 force 控制。
+        """
+        deps.require_project(pid)
+        vols = deps.volumes_for(pid)
+        vol = vols.get(vol_no)
+        if vol is None:
+            raise HTTPException(404, "卷不存在")
+        if not vol.tangchi_story_outline:
+            raise HTTPException(422, "请先完成魂穿（唐迟七日历为空）")
+
+        sc = vol.stage_completed or {}
+        cards_exist = bool(vol.scaffold_cards and any(
+            (vol.scaffold_cards.get(k) or {}).get("variants") for k in _ALL_KEYS
+        ))
+        if (sc.get("scaffold") or cards_exist) and not body.force:
+            raise HTTPException(409, {
+                "code": "ALREADY_PREFILLED",
+                "msg": "副本详设已存在，若要重新生成请传 force=true（会清空已选/已锁）",
+            })
+
+        # 清空旧数据
+        fresh_cards: dict = {}
+        for k in _TEXT_KEYS:
+            fresh_cards[k] = {"variants": [], "picked_idx": None, "locked_at": None, "text": None}
+        for k in _LIST_KEYS:
+            fresh_cards[k] = {"picked_idx": None, "locked_at": None, "variants": []}
+        vols.update_planning(
+            vol_no,
+            death_nodes=[], climax_nodes=[], clue_nodes=[],
+            pasted_nodes=[], scaffold_cards=fresh_cards,
+        )
+        vol = vols.get(vol_no)
+
+        is_mock = _is_mock(vol)
+        context = _build_context(vol, body.directive or "")
+
+        if is_mock:
+            data = _mock_payload()
+        else:
+            data = _call_llm_cards(
+                deps,
+                _SCAFFOLD_SYSTEM,
+                context,
+                "请严格按 system 给定 JSON schema 返回 6 卡×3 版详设，不要输出任何其他文字。",
+                _mock_payload(),
+            )
+
+        payload = {k: (data.get(k) or []) for k in _ALL_KEYS}
+
+        now = _now()
+        new_cards: dict = {}
+        # 文本卡：variants=[v1,v2,v3]，picked_idx=0 默认锁 A 版，text=v1
+        for k in _TEXT_KEYS:
+            vs = payload.get(k) or []
+            if len(vs) < 1:
+                vs = ["（占位文本）"]
+            new_cards[k] = {
+                "variants": vs,
+                "picked_idx": 0,
+                "locked_at": now,
+                "text": vs[0],
+            }
+        # 列表卡：vol.death_nodes 等三维数组存所有版；cards[k].variants 存所有版；picked_idx=0 锁 A 版
+        for k in _LIST_KEYS:
+            arr = payload.get(k) or []
+            if not arr:
+                arr = [[]]
+            new_cards[k] = {
+                "variants": arr,
+                "picked_idx": 0,
+                "locked_at": now,
+            }
+
+        # 顶层层字段写入 vol（方便 desk/brief 直接读 vol.death_nodes 等——这里存全量三维，
+        #  desk._join_by_layer 会按当前章号过滤 todays）
+        vols.update_planning(
+            vol_no,
+            death_nodes=payload.get("death_nodes") or [],
+            climax_nodes=payload.get("climax_nodes") or [],
+            clue_nodes=payload.get("clue_nodes") or [],
+            scaffold_cards=new_cards,
+        )
+        vol = vols.get(vol_no)
+        return {
+            "ok": True,
+            "is_mock": is_mock,
+            "locked_default": "A",
+            "payload": payload,
+            "scaffold_cards": new_cards,
+            "volume": vol.as_dict(),
+            # 全卡已默认锁 A 版，所以可以直接 finalize；但这里不自动 finalize 留给前端/作者确认
+            "all_locked_prefilled": True,
+        }
+
+    # ----- POST /scaffold/reroll-card/{card_key} -----
+    def _scaffold_reroll_card(
+        pid: str,
+        vol_no: int,
+        card_key: str,
+        body: _RerollCardIn = Body(...),
+    ):
+        """对单张卡做🔄重抽：返回 2 个差异化变体，追加/替换 variants。
+        - 如果该卡已锁定：报错（不允许对已锁卡 reroll；先由前端解锁或作者确认）。
+        - variants 返回后追加到该卡的 variants 列表末尾，不自动选。
+        """
+        deps.require_project(pid)
+        vols = deps.volumes_for(pid)
+        vol = vols.get(vol_no)
+        if vol is None:
+            raise HTTPException(404, "卷不存在")
+        if card_key not in _LIST_KEYS | _TEXT_KEYS:
+            raise HTTPException(422, f"未知卡片：{card_key}")
+
+        cards = dict(vol.scaffold_cards or {})
+        entry = dict(cards.get(card_key) or {})
+        if entry.get("locked_at"):
+            raise HTTPException(409, {"code": "CARD_LOCKED", "msg": f"「{card_key}」已锁定，不能重抽"})
+
+        is_mock = _is_mock(vol)
+        context = _build_context(vol, body.directive or "")
+        sys_prompt = _SCAFFOLD_SINGLE_CARD_SYSTEMS[card_key]
+
+        # fallback：mock 数据里取该卡的后 2 个版（B/C）作为 reroll 结果
+        mock = _mock_payload()
+        fallback = {card_key: (mock.get(card_key) or [])[-2:]} if mock.get(card_key) else {card_key: []}
+
+        if is_mock:
+            data = fallback
+        else:
+            data = _call_llm_cards(
+                deps, sys_prompt, context,
+                f"请严格按 system 给定 JSON schema 返回【{card_key}】的 2 个差异化候选变体，不要输出其他文字。",
+                fallback,
+            )
+        new_variants = data.get(card_key) or []
+        if len(new_variants) < 1:
+            raise HTTPException(500, "LLM 返回空结果，重试或换指令")
+        # 规范成 2 版（截断/补齐）
+        new_variants = list(new_variants)[:2]
+
+        # 写入 cards 与顶层数组
+        existing_variants = list(entry.get("variants") or [])
+        if card_key in _LIST_KEYS:
+            # 顶层层是三维数组，直接追加两版
+            top_arr = list(getattr(vol, card_key, None) or [])
+            for v in new_variants:
+                if isinstance(v, list):
+                    top_arr.append(v)
+                    existing_variants.append(v)
+            entry["variants"] = existing_variants
+            cards[card_key] = entry
+            kwargs = {card_key: top_arr, "scaffold_cards": cards}
+        else:
+            for v in new_variants:
+                if isinstance(v, str) and v.strip():
+                    existing_variants.append(v)
+            entry["variants"] = existing_variants
+            cards[card_key] = entry
+            kwargs = {"scaffold_cards": cards}
+
+        vols.update_planning(vol_no, **kwargs)
+        vol = vols.get(vol_no)
+        return {
+            "ok": True,
+            "card_key": card_key,
+            "new_variants": new_variants,
+            "variant_count": len(existing_variants),
+            "is_mock": is_mock,
+            "volume": vol.as_dict(),
+        }
+
     # ----- POST /scaffold/finalize -----
     def _scaffold_finalize(
         pid: str,
@@ -453,6 +702,8 @@ def register_scaffold_routes(
 
     # ---- 注册路由（函数定义之后，避免 UnboundLocalError）----
     router.add_api_route(f"{prefix}/prefill", _scaffold_prefill, methods=["POST"])
+    router.add_api_route(f"{prefix}/derive-from-embody", _scaffold_derive_from_embody, methods=["POST"])
+    router.add_api_route(f"{prefix}/reroll-card/{{card_key}}", _scaffold_reroll_card, methods=["POST"])
     router.add_api_route(f"{prefix}/jobs", _scaffold_jobs, methods=["GET"])
     router.add_api_route(f"{prefix}/stream", _scaffold_stream, methods=["GET"])
     router.add_api_route(f"{prefix}/lock-card", _scaffold_lock_card, methods=["POST"])
