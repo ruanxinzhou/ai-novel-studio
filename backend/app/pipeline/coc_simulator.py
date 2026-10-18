@@ -1,14 +1,21 @@
 """COC 多轮跑团仿真器（Phase 3 + 多 PL / NOVELIZED / 并行批量）。
 
+【关于 DayN 语义——重要】
+    本仿真器内部用 Day1-Day7 表示「故事推进的 7 个阶段序号」，
+    不是原剧本的日历天。原副本时间线自由（数小时/数天/数月/数代均可），
+    KP 在文本里按模组自身时间表述（"当晚"、"第三天凌晨"、"二十年后"等）；
+    DayN 仅用于仿真器内部阶段控制和 finalize 分段输出，不要求模组强行凑 7 天。
+    短模组可在 finalize 时只填前几段，后续 Day 留空。
+
 核心循环：
     start(state) -> KP 开场
     loop:
         step_investigator(state) -> 当前行动 PL（基于 KP 最新描述）
         step_keeper(state)       -> KP 回应（基于 PL 行动）
         自动解析骰子/SAN/Day 推进；KP 回应后轮转到下一位 PL
-        若达到终止条件（Day7 收束 / 全员 HP<=0 / 全员 SAN=0 / max_turns）：
+        若达到终止条件（终局阶段收束 / 全员 HP<=0 / 全员 SAN=0 / max_turns）：
         切到 awaiting_author 或直接 finalize
-    finalize(state) -> 调用 coc_outcome 层把完整日志压成 Day1-7 真相摘要
+    finalize(state) -> 调用 coc_outcome 层把完整日志压成分段真相摘要（最多 7 段）
 
 新增能力（本文件新增/改造点）：
 - 多 PL 支持：state.player_cards 支持 2-4 张卡，每个玩家独立 san/hp/mp；
@@ -33,6 +40,7 @@ import json
 import random
 import re
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
@@ -59,6 +67,18 @@ NOVELIZED_KP_PROMPT_SUFFIX = (
     "每次 KP 回合 300-600 字。"
 )
 
+# 原剧本阶段铁律：跑团推演的是模组原剧本，所有调查员都是原创人物（外乡人/本地人），
+# 主角唐迟尚未魂穿入场，严禁出现"唐迟"这个名字，也严禁引入魂穿/附身/穿越/七天倒计时/T-0 等
+# 只在后续魂穿（embody）阶段才启用的机制。
+MODULE_STAGE_NEGATIVE_CONSTRAINT = (
+    "\n\n# 原剧本阶段铁律（最高优先级）\n"
+    "- 本场推演的是模组「原剧本」本身；所有调查员都是模组原创人物（外乡来客或本地人），"
+    "主角「唐迟」尚未魂穿入场——文本中**绝对禁止出现「唐迟」这个名字**，也不要用任何「那个穿越者」「外来者」之类暗指魂穿者的说法。\n"
+    "- 禁止引入魂穿/附身/穿越/重生/七天倒计时/T-0 死期/讣告残页/代价账/金手指等机制，这些属于后续写作阶段。\n"
+    "- 副本按自身时间线推进（小时/天/月/年自由跨度），**不要**提「第七天」「七天」「倒计时」，不要强行凑 7 个日号。\n"
+    "- 调查员的名字只能来自「调查员团队当前状态」中列出的人（PL 卡设定的姓名），不要自创新主角。\n"
+)
+
 NOVELIZED_PL_PROMPT_SUFFIX = (
     "你扮演当前行动的调查员，用第一人称或近距离第三人称写出他/她此刻的反应、判断、"
     "行动和一两句话对话（如果有同伴在）。不要出现游戏术语。200-400 字。"
@@ -80,16 +100,13 @@ def _all_players_down(state: CocRunState) -> bool:
 
 
 def _check_termination(state: CocRunState) -> str | None:
-    """返回终止原因字符串，否则 None。"""
+    """返回终止原因字符串，否则 None。副本按自身时间线推进，不做天数硬上限。"""
     if _all_players_down(state):
         ps = state.players_state
         any_alive = any(p.get("hp", 0) > 0 for p in ps) if ps else state.hp > 0
         if not any_alive:
             return "dead"
         return "insane"
-    if state.current_day >= 7 and state.next_role == "keeper":
-        if len(state.turns) >= 14:
-            return "day7_resolved"
     if len(state.turns) >= state.max_turns:
         return "max_turns"
     return None
@@ -101,7 +118,7 @@ def _players_status_line(state: CocRunState) -> str:
     """在 x_block 里展示团队状态（小说化模式下仍保留数值用于 KP 参考，但不出现在最终叙事里）。"""
     ps = state.players_state
     if not ps:
-        return f"Day{state.current_day}/7"
+        return f"阶段{state.current_day}/7"
     parts = []
     for i, p in enumerate(ps):
         flag = ""
@@ -110,7 +127,7 @@ def _players_status_line(state: CocRunState) -> str:
         elif not p.get("alive", True):
             flag = "（死亡）"
         parts.append(f"{p.get('name', f'PL{i+1}')} SAN{p.get('san','?')} HP{p.get('hp','?')}{flag}")
-    return f"Day{state.current_day}/7 | " + "；".join(parts)
+    return f"阶段{state.current_day}/7 | " + "；".join(parts)
 
 
 def _keeper_materials_and_x(state: CocRunState, adapt_parsed: dict | None,
@@ -120,8 +137,8 @@ def _keeper_materials_and_x(state: CocRunState, adapt_parsed: dict | None,
     if book_store is not None:
         mats.append(Material(
             source_id="book:hardcards", family=MaterialFamily.REQUIRED,
-            content=book_store.render_all(),
-            title="书级硬卡（铁律/七日基线/主角刻度/终局锚）",
+            content=book_store.render_for_module_run(),
+            title="书级硬卡（原剧本阶段：已剥离唐迟/魂穿/七天倒计时）",
         ))
     if adapt_parsed:
         mats.append(Material(
@@ -149,26 +166,31 @@ def _keeper_materials_and_x(state: CocRunState, adapt_parsed: dict | None,
             f"# 当前进度\n\n{_players_status_line(state)}\n\n"
             f"# 最近情节\n\n{transcript}\n\n"
             f"# KP 本轮任务\n"
-            f"你以第三人称限知视角推进 Day{state.current_day} 的情节：\n"
+            f"你以第三人称限知视角推进第{state.current_day}阶段的情节：\n"
             f"- 描写环境氛围、NPC 的动作与言语、诡异征兆的自然浮现；\n"
             f"- 让调查员的行动得到回应（成功→推动线索，失败→付出代价/遭遇意外）；\n"
             f"- 给当前轮到行动的调查员以鲜明的、属于他/她性格的反应空间；\n"
             f"- 必须保留克苏鲁恐怖的未知感与无力感，不要一次掀开谜底；\n"
-            f"- Day4-Day6 之间必须推进本场核心反转，至少回收一个伏笔；\n"
+            f"- 注意：副本按自身时间线推进（小时/天/月/年自由跨度，不必凑 7 天），"
+            f"文本里用模组自然的时间表述（如「当晚」「第三天凌晨」「十年后」）；"
+            f"故事进入中后段（阶段 4-6）时必须推进核心反转，至少回收一个伏笔；\n"
             f"- 当前轮到行动的调查员是：{state.current_player_name()}。\n\n"
             f"{NOVELIZED_KP_PROMPT_SUFFIX}"
+            f"{MODULE_STAGE_NEGATIVE_CONSTRAINT}"
         )
     else:
         x = (
-            f"# 当前进度\n\nDay{state.current_day}/7   SAN {state.san}   HP {state.hp}\n\n"
+            f"# 当前进度\n\n阶段{state.current_day}/7   SAN {state.san}   HP {state.hp}\n\n"
             f"# 最近回合\n\n{transcript}\n\n"
             f"# KP 本轮任务\n"
-            f"请扮演守密人，推进 Day{state.current_day} 的情节：\n"
+            f"请扮演守密人，推进第{state.current_day}阶段的情节：\n"
             f"- 用第三人称小说笔调描写环境、NPC 行动、诡异征兆；\n"
             f"- 当需要判定时，在文中明确写出「投掷 XX：rolled/target 成功/失败」；\n"
             f"- SAN 检定失败时写明「失去 N SAN」；\n"
             f"- 必须保留克苏鲁恐怖的未知感与无力感，不要一次掀开谜底；\n"
+            f"- 副本按自身时间线推进，不必凑 7 天；中后段要推进核心反转回收伏笔；\n"
             f"- 控制在 800-1200 字。"
+            f"{MODULE_STAGE_NEGATIVE_CONSTRAINT}"
         )
     return mats, x
 
@@ -196,14 +218,16 @@ def _investigator_x(state: CocRunState, last_keeper_text: str,
             + (f"# 作者本节特别指示\n{user_directive}\n\n" if user_directive else "")
             + f"# 此刻轮到你（{pname}）行动\n"
               f"{NOVELIZED_PL_PROMPT_SUFFIX}"
+              f"{MODULE_STAGE_NEGATIVE_CONSTRAINT}"
         )
     return (
-        f"# 唐迟人物卡\n\n{state.player_card_render()}\n\n"
+        f"# 当前行动调查员人物卡\n\n{state.player_card_render()}\n\n"
         f"# KP 本轮描述\n\n{last_keeper_text}\n\n"
         + (f"# 作者本节特别指示\n{user_directive}\n\n" if user_directive else "")
-        + "# 扮演唐迟做出反应\n"
-          "他是怂的、惜命的、市井小聪明，不是英雄。输出：先写内心小算盘（怕死+观察到什么），"
+        + f"# 扮演 {pname}（{occ}）做出反应\n"
+          "他/她是有自己缺点和算盘的普通人，不是英雄。输出：先写内心判断（观察到什么/怕什么），"
           "再写具体行动（动作+对白+刻意避开什么），最后留一处破绽。控制 300-600 字。"
+          f"{MODULE_STAGE_NEGATIVE_CONSTRAINT}"
     )
 
 
@@ -378,7 +402,7 @@ def autorun_until_break(runner, state: CocRunState, *, adapt_parsed, book_store,
 
     if reason in ("day7_resolved", "dead", "insane", "max_turns"):
         hints = {
-            "day7_resolved": "第七日已经收束。",
+            "day7_resolved": "终局阶段已收束。",
             "dead": "调查员全员倒下，跑团以死亡结局告终。",
             "insane": "SAN 归零，调查员陷入临时疯狂。",
             "max_turns": f"回合数达到硬上限 {state.max_turns}。",
@@ -525,7 +549,7 @@ def _collect_survivors(state: CocRunState) -> list[str]:
     """从 players_state 里找出仍存活且未疯狂的玩家名字。"""
     ps = state.players_state
     if not ps:
-        return [] if state.hp <= 0 or state.san <= 0 else [state.player_card.get("name", "唐迟")]
+        return [] if state.hp <= 0 or state.san <= 0 else [state.player_card.get("name", "调查员")]
     return [p.get("name", f"PL{i}") for i, p in enumerate(ps)
             if p.get("alive", True) and not p.get("insane", False) and p.get("hp", 0) > 0]
 
@@ -536,31 +560,36 @@ def finalize(runner, state: CocRunState, run_store: CocRunStore, field_run_store
              *, field_no: int, adapt_parsed, book_store,
              on_event: Callable | None = None,
              novelized: bool | None = None) -> NodeArtifact:
-    """结束跑团，调用 coc_outcome 层产出 Day1-7 真相摘要，存为 NodeArtifact。"""
+    """结束跑团，调用 coc_outcome 层产出分段真相摘要（最多 7 段，段号 DayN 只是输出格式的阶段序号，非日历天），存为 NodeArtifact。"""
     novel = novelized if novelized is not None else getattr(state, "novelized", True)
     transcript = state.transcript()
     survivors = _collect_survivors(state)
     players_desc = "、".join(
         f"{p.get('name','?')}（SAN{p.get('san','?')}/HP{p.get('hp','?')}）"
         for p in state.players_state
-    ) if state.players_state else f"唐迟 SAN{state.san}/HP{state.hp}"
+    ) if state.players_state else f"调查员 SAN{state.san}/HP{state.hp}"
 
     if novel:
         task = (
             "# 任务\n"
-            "请按 Day1-Day7 把本场跑团日志整理成「真实事件经过」小说化梗概："
-            "每一天以「DayN：」开头（N 为 1-7 阿拉伯数字），紧接一段 50-150 字的纯叙事段落，"
-            "写出关键 NPC 动向、各调查员的选择与代价、第七日结局。"
-            "Day1 开头一句话交代入场，Day4-6 逐步揭开本场核心反转并回收至少 2 个伏笔，"
-            "Day7 按本场结局倾向收束，结尾 1 句定调本场基调（伞/雨/执念）。"
-            "不要出现骰子术语、玩家术语、KP/PL 字样，保持小说笔调。"
+            "请把本场跑团日志整理成「原剧本真实事件经过」小说化梗概：\n"
+            "- 按故事自然推进分成若干关键阶段，最多 7 段；每段以「DayN：」开头（N 为 1-7 阿拉伯数字，代表阶段序号，不是日历天）；\n"
+            "- 紧接一段 50-150 字的纯叙事段落；若模组故事短于 7 段，后续 Day 留空即可；\n"
+            "- 文本里用模组自身的时间表述（「当晚」「第三天凌晨」「二十年后」等），不要硬凑 7 天；\n"
+            "- 写出关键 NPC 动向、各调查员的选择与代价、最终结局；\n"
+            "- 开场一段交代入场，故事中后段逐步揭开本场核心反转并回收至少 2 个伏笔，\n"
+            "  末段按本场结局倾向收束，结尾 1 句定调本场基调（伞/雨/执念）。\n"
+            "不要出现骰子术语、玩家术语、KP/PL 字样，保持小说笔调。\n"
             "最后额外补一段「结局总评」100 字左右，概括幸存者、代价与基调。"
         )
     else:
         task = (
             "# 任务\n"
-            "请按 Day1-Day7 把跑团日志整理成「真实事件经过」小说化梗概："
-            "按日分段，每段 100-200 字，写出关键 NPC 动向、主角金手指使用与代价、第七日结局。"
+            "请把本场跑团日志整理成「原剧本真实事件经过」小说化梗概：\n"
+            "- 按故事自然推进分成若干关键阶段，最多 7 段；每段以「DayN：」开头（N 为 1-7 阿拉伯数字，代表阶段序号，不是日历天）；\n"
+            "- 每段 100-200 字；若模组故事短于 7 段，后续 Day 留空即可；\n"
+            "- 写出关键 NPC 动向、各调查员的选择与代价、最终结局；\n"
+            "- 文本里用模组自身的时间表述，不要硬凑 7 天。\n"
             "不要出现骰子术语和玩家术语，保持小说笔调。"
         )
 
@@ -572,16 +601,16 @@ def finalize(runner, state: CocRunState, run_store: CocRunStore, field_run_store
         f"# 跑团完整日志（{len(state.turns)} 回合）\n\n{transcript}\n\n"
         f"# 最终状态\n\n"
         f"结局类型：{_check_termination(state) or 'stopped_by_author'}\n"
-        f"金手指使用：{state.obsession_uses} 次\n"
         f"已发现线索：{len(state.clues_found)} 条\n\n"
         f"{task}"
+        f"{MODULE_STAGE_NEGATIVE_CONSTRAINT}"
     )
     mats: list[Material] = []
     if book_store is not None:
         mats.append(Material(
             source_id="book:hardcards", family=MaterialFamily.REQUIRED,
-            content=book_store.render_all(),
-            title="书级硬卡",
+            content=book_store.render_for_module_run(),
+            title="书级硬卡（原剧本阶段：已剥离唐迟/魂穿/七天倒计时）",
         ))
     if on_event:
         on_event("coc_finalize_start", {"turns": len(state.turns)})
@@ -703,14 +732,44 @@ def init_run(run_store: CocRunStore, field_no: int,
 def _summary_card_from_state(state: CocRunState, summary_raw: str, turns_used: int) -> dict:
     """把跑完的 session 压成一个可选 variant 的摘要卡。"""
     seed = state.variant_seed or {}
-    first_line = (summary_raw or "").strip().split("\n", 1)[0]
-    one_liner = first_line.split("。", 1)[0][:100]
+    # one_liner：优先取 final_summary 的第一句（中文。/！/？为句末），
+    # 失败则退化成结局标签 + 幸存者数。避免空串或 "..."。
+    text = (summary_raw or "").strip()
+    one_liner = ""
+    if text:
+        # 去掉 markdown 标题行 / 前缀注释，取第一段非空内容的第一句
+        import re as _re
+        cleaned = _re.sub(r"^\s*#.*$", "", text, flags=_re.M).strip()
+        m = _re.search(r"[^。！？!?\n]{6,120}[。！？!?]", cleaned)
+        one_liner = (m.group(0) if m else cleaned.split("\n", 1)[0])[:120]
+    if not one_liner:
+        surv_n = len(state.survivors or [])
+        one_liner = f"{seed.get('ending_label','未知结局')}；幸存者 {surv_n} 人"
+    # full_log：完整 KP/PL 对话日志 + 小说化梗概（压真相结果），供前端直接展示
+    transcript_text = state.transcript() or ""
+    full_log_parts = []
+    if transcript_text:
+        full_log_parts.append("===== 跑团完整日志（守密人 / 调查员对话）=====\n")
+        full_log_parts.append(transcript_text)
+        full_log_parts.append("")
+    full_log_parts.append("===== 小说化梗概（原剧本经过）=====\n")
+    full_log_parts.append(text or "（本场未能生成梗概）")
+    if state.error:
+        full_log_parts.append("")
+        full_log_parts.append(f"===== 调试信息 =====\nstate.error: {state.error}")
+    full_log = "\n".join(full_log_parts)
+
+    # label/title：用 seed 里的 ending_label，不再由调用方硬覆盖成预设名
+    ending_label = seed.get("ending_label") or f"第 {state.session_index} 场"
+    title = f"候选 #{state.session_index}：{ending_label}"
     return {
         "vid": str(state.session_index),
-        "title": f"候选 #{state.session_index}：{seed.get('ending_label', '')}",
+        "title": title,
+        "label": ending_label,
         "one_liner": one_liner,
+        "full_log": full_log,
         "ending_bias": seed.get("ending_bias", ""),
-        "ending_label": seed.get("ending_label", ""),
+        "ending_label": ending_label,
         "entrance_hook": seed.get("entrance_hook", ""),
         "tangchi_mood": seed.get("tangchi_mood", ""),
         "extra_npcs": [n.get("name", "") for n in seed.get("extra_npcs", [])],
@@ -723,6 +782,10 @@ def _summary_card_from_state(state: CocRunState, summary_raw: str, turns_used: i
         "players_count": len(state.player_cards),
         "turns": turns_used,
         "final_summary": summary_raw,
+        "transcript": transcript_text,
+        "state_error": state.error or "",
+        # flavor：留空表示全随机；角标由前端按 ending_bias 着色
+        "flavor": seed.get("ending_bias", ""),
     }
 
 
@@ -782,7 +845,7 @@ def run_coc_simulation_batch(
 
         transcript = state.transcript()
         survivors = _collect_survivors(state)
-        players_desc = "、".join(p.get("name", "?") for p in state.players_state) if state.players_state else "唐迟"
+        players_desc = "、".join(p.get("name", "?") for p in state.players_state) if state.players_state else "调查员"
         x = (
             f"# 选定模组方案\n\n{json.dumps(adapt_parsed, ensure_ascii=False, indent=2)}\n\n"
             f"# 本场差异化设定\n\n{render_variant_seed(seed)}\n\n"
@@ -791,19 +854,22 @@ def run_coc_simulation_batch(
             f"# 跑团完整日志（{len(state.turns)} 回合）\n\n{transcript}\n\n"
             f"# 最终状态\n\n"
             f"结局倾向：{seed.get('ending_label','')}\n"
-            f"金手指使用：{state.obsession_uses} 次\n"
             f"已发现线索：{len(state.clues_found)} 条\n\n"
             f"# 任务\n"
-            f"每一天以「DayN：」（N=1-7）开头写 50-150 字的小说化梗概，"
-            f"Day4-6 逐步揭开本场核心反转并回收至少 2 个伏笔，"
-            f"Day7 按本场结局倾向收束，结尾 1 句定调基调。"
+            f"把本场跑团日志整理成「原剧本真实事件经过」小说化梗概：\n"
+            f"- 按故事自然推进分成若干关键阶段，最多 7 段；每段以「DayN：」（N=1-7，阶段序号，不是日历天）开头写 50-150 字；\n"
+            f"- 若模组短于 7 段，后续 Day 留空即可；文本里用模组自身时间表述，不要硬凑 7 天；\n"
+            f"- 故事中后段逐步揭开本场核心反转并回收至少 2 个伏笔，\n"
+            f"  末段按本场结局倾向收束，结尾 1 句定调基调。\n"
             f"不要出现骰子/KP/PL 术语。最后补 100 字「结局总评」。"
+            f"{MODULE_STAGE_NEGATIVE_CONSTRAINT}"
         )
         mats: list[Material] = []
         if book_store is not None:
             mats.append(Material(
                 source_id="book:hardcards", family=MaterialFamily.REQUIRED,
-                content=book_store.render_all(), title="书级硬卡",
+                content=book_store.render_for_module_run(),
+                title="书级硬卡（原剧本阶段：已剥离唐迟/魂穿/七天倒计时）",
             ))
         try:
             spec = SPECS["coc_outcome"]
@@ -916,7 +982,7 @@ def _finalize_session_inline(runner, state: CocRunState, adapt_parsed, book_stor
         f"{p.get('name','?')}（{state.player_cards[i].get('occupation','')}，"
         f"SAN{p.get('san','?')}/HP{p.get('hp','?')}）"
         for i, p in enumerate(state.players_state)
-    ) if state.players_state else "唐迟"
+    ) if state.players_state else "调查员"
     x = (
         f"# 选定模组方案\n\n{json.dumps(adapt_parsed, ensure_ascii=False, indent=2)}\n\n"
         f"# 本场差异化设定\n\n{render_variant_seed(state.variant_seed or {})}\n\n"
@@ -925,24 +991,38 @@ def _finalize_session_inline(runner, state: CocRunState, adapt_parsed, book_stor
         f"# 跑团完整日志（{len(state.turns)} 回合）\n\n{transcript}\n\n"
         f"# 最终状态\n\n"
         f"结局倾向：{(state.variant_seed or {}).get('ending_label','')}\n"
-        f"金手指使用：{state.obsession_uses} 次\n"
         f"已发现线索：{len(state.clues_found)} 条\n\n"
         f"# 任务\n"
-        f"每一天以「DayN：」（N=1-7 阿拉伯数字）开头写 50-150 字的小说化梗概，"
-        f"严格按 Day1→Day7 顺序，Day4-6 逐步揭开本场核心反转并回收至少 2 个伏笔，"
-        f"Day7 按本场结局倾向收束，结尾 1 句定调基调（伞/雨/执念）。"
-        f"不要出现骰子术语、KP/PL、数值等元词汇，保持小说笔调。"
-        f"最后补一段「结局总评」100 字左右，概括幸存者、代价与基调。"
+        f"把本场跑团日志整理成「原剧本真实事件经过」小说化梗概：\n"
+        f"- 按故事自然推进分成若干关键阶段，最多 7 段；每段以「DayN：」（N=1-7 阿拉伯数字，阶段序号，不是日历天）开头写 50-150 字；\n"
+        f"- 若模组短于 7 段，后续 Day 留空即可；文本里用模组自身时间表述，不要硬凑 7 天；\n"
+        f"- 按阶段 1→7 顺序，故事中后段逐步揭开本场核心反转并回收至少 2 个伏笔，\n"
+        f"  末段按本场结局倾向收束，结尾 1 句定调基调（伞/雨/执念）。\n"
+        f"不要出现骰子术语、KP/PL、数值等元词汇，保持小说笔调。\n"
+        f"最后补一段「结局总评」100 字左右，概括幸存者、代价与基调；\n"
+        f"总评的第一行必须是单独一行【结局标签：XXX】（8-16字，紧扣本场具体故事，例如「巷子里多了一把伞」「心锚永远留在那条巷」「所有人都成了它的眼睛」「他带着雨声离开了」，不要用预设词、不要罗列名词）。"
+        f"{MODULE_STAGE_NEGATIVE_CONSTRAINT}"
     )
     mats: list[Material] = []
     if book_store is not None:
         mats.append(Material(
             source_id="book:hardcards", family=MaterialFamily.REQUIRED,
-            content=book_store.render_all(), title="书级硬卡",
+            content=book_store.render_for_module_run(),
+            title="书级硬卡（原剧本阶段：已剥离唐迟/魂穿/七天倒计时）",
         ))
     spec = SPECS["coc_outcome"]
     result = runner.run_layer(spec, [(x, "")], materials=mats, on_event=None)
     raw = result.y
+    # 从梗概里解析【结局标签：XXX】回写到 state.variant_seed，前端卡片会优先展示这个个性化标签
+    import re as _re_label
+    _m = _re_label.search(r"【结局标签[:：]\s*([^】\n]{2,30})】", raw or "")
+    if _m:
+        new_label = _m.group(1).strip()
+        seed = state.variant_seed or {}
+        seed["ending_label"] = new_label
+        state.variant_seed = seed
+        # 顺手把标签行从梗概正文里去掉，保持 final_summary 正文干净
+        raw = _re_label.sub("", raw, count=1).strip()
     state.final_summary = raw
     state.final_day_breakdown = _parse_day_breakdown(raw)
     state.survivors = survivors
@@ -991,12 +1071,20 @@ def _run_one_session(
     if session_store.exists(virtual_field):
         session_store.delete(virtual_field)
 
-    rng = random.Random(f"{field_no}-parallel-{idx}-{time.time_ns()}")
+    _cfg_seed = variant_config.get("rng_seed")
+    rng = random.Random(_cfg_seed if _cfg_seed is not None else f"{field_no}-parallel-{idx}-{time.time_ns()}")
     flavor = variant_config.get("flavor")
     seed = generate_variant_seed(rng, flavor=flavor)
-    for k in ("core_twist", "ending_label", "ending_bias", "entrance_hook"):
+    # 只覆写显式指定的字段（core_twist / ending_label / ending_bias / entrance_hook），
+    # flavor=None 时 ending_label 保留 generate_variant_seed 给出的默认值，finalize 阶段 KP 会产出更贴合故事的标签回写。
+    for k in ("core_twist", "entrance_hook"):
         if k in variant_config:
             seed[k] = variant_config[k]
+    # 如果 variant_config 显式传了 ending_label/ending_bias（例如 mock 或作者指定）才覆盖
+    if variant_config.get("ending_label"):
+        seed["ending_label"] = variant_config["ending_label"]
+    if variant_config.get("ending_bias"):
+        seed["ending_bias"] = variant_config["ending_bias"]
 
     state = init_run(
         session_store, virtual_field, adapt_parsed,
@@ -1026,16 +1114,19 @@ def _run_one_session(
                 "role": payload.get("role", ""),
             })
 
+    autorun_result = None
+    autorun_err = None
     try:
-        autorun_until_break(
+        autorun_result = autorun_until_break(
             runner, state, adapt_parsed=adapt_parsed, book_store=book_store,
             run_store=session_store, field_no=virtual_field,
             max_steps=max_pairs_per_session, user_directive=user_directive,
             on_event=turn_cb, novelized=True,
         )
     except Exception as e:
+        autorun_err = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
         state.add_turn("system", f"仿真异常：{type(e).__name__}: {e}",
-                       meta={"error": str(e)})
+                       meta={"error": str(e), "traceback": autorun_err})
         _emit(on_event, "coc_session_error", {
             "session": idx, "total": total_sessions,
             "day": state.current_day, "total_days": 7,
@@ -1044,20 +1135,59 @@ def _run_one_session(
             "message": f"第{idx}场出错：{type(e).__name__}",
         })
 
+    # autorun_until_break 内部已经捕获异常并返回 reason="error"；它把错误写进 state.error，
+    # 但不会 raise，外层 try/except 不会进。所以这里再兜底检查一次。
+    if autorun_result is None:
+        autorun_result = {"reason": "exception", "turns_added": len(state.turns)}
+    if state.error and autorun_result.get("reason") == "error" and len(state.turns) == 0:
+        # 一回合都没跑出来，把错误信息也塞到 final_summary 里，方便前端直接看到
+        state.final_summary = f"（本场仿真未能启动：{state.error}）"
+        state.final_day_breakdown = _parse_day_breakdown(state.final_summary)
+        _emit(on_event, "coc_session_error", {
+            "session": idx, "total": total_sessions,
+            "day": state.current_day, "total_days": 7,
+            "turn": 0, "max_turns": max_turns_per_session,
+            "error": state.error,
+            "message": f"第{idx}场仿真 0 回合退出：{state.error}",
+        })
+
+    _emit(on_event, "coc_session_finalize", {
+        "session": idx, "total": total_sessions,
+        "day": state.current_day, "turn": len(state.turns),
+    })
+
     try:
         raw = _finalize_session_inline(runner, state, adapt_parsed, book_store)
     except Exception as e:
-        raw = f"（本场压真相失败：{type(e).__name__}: {e}）"
+        tb = traceback.format_exc()
+        raw = f"（本场压真相失败：{type(e).__name__}: {e}）\n\n```\n{tb}\n```"
         state.final_summary = raw
         state.final_day_breakdown = _parse_day_breakdown(raw)
         state.survivors = _collect_survivors(state)
+        _emit(on_event, "coc_session_error", {
+            "session": idx, "total": total_sessions,
+            "day": state.current_day, "total_days": 7,
+            "turn": len(state.turns), "max_turns": max_turns_per_session,
+            "error": str(e),
+            "message": f"第{idx}场压真相失败：{type(e).__name__}",
+        })
 
     session_store.save(state)
     card = _summary_card_from_state(state, raw, len(state.turns))
-    card["label"] = variant_config.get("label", "")
+    # 不再覆盖 card["label"] / card["flavor"]：KP 在 finalize 阶段已经把个性化
+    # ending_label 回写到 state.variant_seed；fallback 到 variant_config 的平行宇宙标签，
+    # 只有在卡片本身 label 为空（极端情况）时才兜底。
+    if not card.get("label"):
+        card["label"] = variant_config.get("label", f"第{idx}场")
+    if not card.get("flavor"):
+        card["flavor"] = variant_config.get("flavor", "") or flavor or ""
     card["desc"] = variant_config.get("desc", "")
-    card["flavor"] = flavor
     card["elapsed_sec"] = round(time.time() - session_start, 2)
+    # 方便调试：把 autorun 的终止原因/回合数/错误写到 card.meta
+    card["autorun_reason"] = autorun_result.get("reason") if autorun_result else "unknown"
+    card["autorun_turns_added"] = autorun_result.get("turns_added") if autorun_result else 0
+    card["autorun_error"] = state.error
+    card["state_error"] = state.error
 
     _emit(on_event, "coc_session_done", {
         "session": idx, "total": total_sessions,

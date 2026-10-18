@@ -12,6 +12,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'done'): void
+  (e: 'back-to-adapt'): void
 }>()
 
 type UiState = 'loading' | 'ready' | 'running' | 'result' | 'completed'
@@ -23,12 +24,48 @@ const running = ref(false)
 const pickedVariantId = ref<string | null>(null)
 // 本地追加的自定义/编辑变体（不来自 job 结果）
 const extraVariants = ref<any[]>([])
+// 跑团实况（KP/PL 日志）折叠/展开状态，默认收起，只展示梗概
+const expandedTranscript = ref<string | null>(null)
+function toggleTranscript(vid: string) {
+  expandedTranscript.value = expandedTranscript.value === vid ? null : vid
+}
+// 已完成态：跑团实况折叠
+const showRaw = ref(false)
+/** 从 full_log 中拆分出「小说化梗概」部分（去掉前置 KP/PL 日志）；无分隔符时回退到 full_log 本身。 */
+function splitFullLog(full: string): { summary: string; transcript: string } {
+  const raw = String(full || '')
+  const markers = [
+    '===== 小说化梗概（原剧本经过）=====',
+    '===== 小说化梗概（原剧本经过）=====\n',
+  ]
+  for (const m of markers) {
+    const i = raw.indexOf(m)
+    if (i >= 0) {
+      const after = raw.slice(i + m.length)
+      const debugIdx = after.indexOf('===== 调试信息 =====')
+      const summary = debugIdx >= 0 ? after.slice(0, debugIdx).trim() : after.trim()
+      const transcript = raw.slice(0, i).trim()
+      return { summary, transcript }
+    }
+  }
+  return { summary: raw.trim(), transcript: '' }
+}
+const completedSummary = computed(() => {
+  const sv = completed.value?.selected_variant
+  if (sv?.final_summary) return String(sv.final_summary)
+  return splitFullLog(completed.value?.full_log || '').summary
+})
+const completedTranscript = computed(() => {
+  const sv = completed.value?.selected_variant
+  if (sv?.transcript) return String(sv.transcript)
+  return splitFullLog(completed.value?.full_log || '').transcript
+})
 
 // ---- 启动参数 ----
 const userDirective = ref('')
 const maxPairs = ref(6)
 const maxTurns = ref(20)
-const tangchiReplace = ref<number | null>(null)
+const useMock = ref(false)
 const optionsOpen = ref(false)
 
 // ---- 拼贴参数 ----
@@ -41,11 +78,9 @@ const SECTIONS = [
   { key: 'ending', label: '结局' },
   { key: 'npc_fates', label: 'NPC 命运' },
 ]
-const FROM_OPTIONS = [
-  { value: 0, label: '全员殒落线' },
-  { value: 1, label: '一人独活线' },
-  { value: 2, label: '真相污染线' },
-]
+const FROM_OPTIONS = computed(() =>
+  allVariants.value.map((v, i) => ({ value: i, label: v.label || `第${i+1}场` })),
+)
 const collageSelections = ref<Record<string, number>>({})
 const collageNotes = ref<Record<string, string>>({})
 const collageUserNote = ref('')
@@ -69,9 +104,34 @@ const jobVariants = computed<any[]>(() => {
   return []
 })
 
+/** 结局倾向枚举 → 中文短标签 */
+const BIAS_LABELS: Record<string, string> = {
+  bad: '黑暗结局',
+  bittersweet: '惨胜',
+  costly: '代价型',
+  tradeoff: '交换结局',
+  narrow_escape: '险胜',
+  good: '好运',
+  distinct: '洗牌',
+  mock: '示例',
+}
+
 /** 包含自定义卡的全部可选项（自定义卡追加在尾部） */
 const allVariants = computed<any[]>(() => {
-  return [...jobVariants.value, ...extraVariants.value]
+  const arr = [...jobVariants.value, ...extraVariants.value]
+  // 把 ending_bias / flavor 的英文枚举映射成中文短标签，方便角标直接显示
+  for (const v of arr) {
+    const key = v.ending_bias || v.flavor
+    if (key && BIAS_LABELS[key] && v.flavor !== BIAS_LABELS[key]) {
+      v.flavor = BIAS_LABELS[key]
+    }
+    // 确保 one_liner 有值
+    if (!v.one_liner && v.final_summary) {
+      const firstLine = String(v.final_summary).trim().split('\n', 1)[0]
+      v.one_liner = firstLine.slice(0, 80)
+    }
+  }
+  return arr
 })
 
 const completed = computed(() => volume.value?.simulated_run ?? null)
@@ -161,7 +221,7 @@ async function onStart(directive = '') {
       user_directive: directive || userDirective.value,
       max_pairs_per_session: maxPairs.value,
       max_turns_per_session: maxTurns.value,
-      tangchi_replace_idx: tangchiReplace.value,
+      use_mock: useMock.value,
     })
     job.value = r.job
     pickedVariantId.value = null
@@ -324,9 +384,13 @@ watch(() => props.volNo, () => {
 <template>
   <div class="coc-sim-view">
     <div class="sim-header">
-      <h2>🎲 COC 并行跑团仿真</h2>
+      <div class="header-row">
+        <h2>🎲 COC 并行跑团仿真</h2>
+        <el-button size="small" @click="emit('back-to-adapt')">← 返回上一步（重选剧本）</el-button>
+      </div>
       <p class="sub">
-        3 场并行（全员殒落 / 一人独活 / 真相污染），挑一场作为主线或拼贴多场精华
+        同一模组 · 同一组外乡调查员（PL）· 3 个平行宇宙并行推演，只在骰子与 KP 自由长上产生分歧；
+        挑一场作为主跑团记录，或跨场拼贴。本阶段尚未决定唐迟魂穿到谁身上（下一阶段再选）。
       </p>
       <div v-if="completed" class="completed-banner">
         <span>✓ 已选定跑团走向：{{ completed.summary || completed.label || '（已完成）' }}</span>
@@ -342,27 +406,21 @@ watch(() => props.volNo, () => {
           v-model="userDirective"
           type="textarea"
           :rows="3"
-          placeholder="可选：对本场跑团的特别指令，例如'多死人''让记者死在 Day3'..."
+          placeholder="可选：对本场跑团的特别指令，例如「多死人」「让记者死在中段」「偏向黑暗结局」..."
           class="directive-input"
         />
         <el-collapse v-model="optionsOpen" class="options-collapse">
           <el-collapse-item title="高级选项" name="opts">
             <div class="opt-row">
-              <label>每场最大 KP/PL 对数：{{ maxPairs }}</label>
-              <el-slider v-model="maxPairs" :min="4" :max="10" :step="1" />
+              <label>每场最大 KP/PL 对数：{{ maxPairs }}（每对 = 1 段 KP 推进 + 1 段 PL 行动）</label>
+              <el-slider v-model="maxPairs" :min="3" :max="10" :step="1" />
             </div>
             <div class="opt-row">
-              <label>每场最大回合数：{{ maxTurns }}（设为 1 可走测试 mock 路径，2-3 秒出结果）</label>
-              <el-slider v-model="maxTurns" :min="1" :max="40" :step="1" />
+              <label>每场硬上限回合数：{{ maxTurns }}</label>
+              <el-slider v-model="maxTurns" :min="8" :max="40" :step="2" />
             </div>
             <div class="opt-row">
-              <label>唐迟替换哪张 PL 卡：</label>
-              <el-radio-group v-model="tangchiReplace">
-                <el-radio :value="null">不替换</el-radio>
-                <el-radio :value="0">PL 1</el-radio>
-                <el-radio :value="1">PL 2</el-radio>
-                <el-radio :value="2">PL 3</el-radio>
-              </el-radio-group>
+              <el-checkbox v-model="useMock">快速演示（跳过 LLM，1 秒出 mock 占位，仅用于 UI 调试）</el-checkbox>
             </div>
           </el-collapse-item>
         </el-collapse>
@@ -382,16 +440,29 @@ watch(() => props.volNo, () => {
         <p class="msg">{{ job?.message || '等待开场…' }}</p>
         <div class="variant-cards-loading">
           <div class="var-loading-row">
-            <div v-for="(label, i) in ['全员殒落线', '一人独活线', '真相污染线']" :key="i" class="var-loading-card">
-              <div class="var-label">{{ label }}</div>
+            <div v-for="i in 3" :key="i" class="var-loading-card">
+              <div class="var-label">
+                {{ (job?.sub_results as any[])?.[i-1]?.label || `平行宇宙 #${i}` }}
+                <el-tag v-if="(job?.sub_results as any[])?.[i-1]?.flavor" size="small" style="margin-left: 6px">
+                  {{ (job?.sub_results as any[])[i-1].flavor }}
+                </el-tag>
+              </div>
               <div class="var-one-liner">
-                <template v-if="(job?.sub_results || []).length > i">
-                  {{ (job?.sub_results as any[])[i]?.one_liner || '推演中…' }}
+                <template v-if="(job?.sub_results || []).length >= i && (job?.sub_results as any[])[i-1]?.one_liner">
+                  {{ (job?.sub_results as any[])[i-1].one_liner }}
                 </template>
-                <template v-else>等待开场…</template>
+                <template v-else-if="(job?.sub_results || []).length >= i">
+                  {{ (job?.sub_results as any[])[i-1]?.one_liner || '该场已完成，汇总中…' }}
+                </template>
+                <template v-else>
+                  <span class="muted">等待开场…</span>
+                </template>
               </div>
             </div>
           </div>
+        </div>
+        <div class="actions">
+          <el-button size="small" @click="emit('back-to-adapt')">← 返回重选剧本（会保留本场任务）</el-button>
         </div>
       </el-card>
     </div>
@@ -402,10 +473,10 @@ watch(() => props.volNo, () => {
         mode="ensemble"
         :items="allVariants"
         :picked-id="pickedVariantId"
-        axis-label="3 场 COC 并行跑团结果"
+        axis-label="3 个平行宇宙 · 同一模组同一组 PL，骰子与 KP 自由发挥导致分歧"
         item-title-field="label"
         item-subtitle-field="one_liner"
-        item-content-field="full_log"
+        item-content-field="final_summary"
         item-badge-field="flavor"
         :plate-count="3"
         :is-active="true"
@@ -413,7 +484,27 @@ watch(() => props.volNo, () => {
         @rerun="onRerun"
         @custom-write="onCustomWrite"
         @edit-card="onEditCard"
-      />
+      >
+        <template #item="{ it }">
+          <div class="variant-meta-row">
+            <span class="meta-chip">幸存者 {{ (it.survivors || []).length }} 人</span>
+            <span class="meta-chip" v-if="it.turns">回合 {{ it.turns }}</span>
+            <el-button
+              link
+              type="info"
+              size="small"
+              @click="toggleTranscript(it.vid)"
+            >{{ expandedTranscript === it.vid ? '收起跑团实况' : '查看跑团实况（素材）' }}</el-button>
+          </div>
+          <el-collapse-transition>
+            <div v-if="expandedTranscript === it.vid" class="variant-transcript">
+              <div class="mat-hint">以下为完整 KP/PL 跑团日志，作为小说化梗概的原始素材；选版时以梗概为准。</div>
+              <pre class="transcript-pre">{{ it.transcript || '（无回合日志）' }}</pre>
+              <div v-if="it.state_error" class="state-error">state.error: {{ it.state_error }}</div>
+            </div>
+          </el-collapse-transition>
+        </template>
+      </SushiCards>
 
       <el-card shadow="never" class="collage-card">
         <h3>🧩 或：拼贴合成主跑团记录</h3>
@@ -429,7 +520,7 @@ watch(() => props.volNo, () => {
         <div class="section-grid">
           <div v-for="s in SECTIONS" :key="s.key" class="section-row">
             <span class="section-label">{{ s.label }}</span>
-            <el-select v-model="collageSelections[s.key]" :placeholder="`从${FROM_OPTIONS[collageBase].label}取`">
+            <el-select v-model="collageSelections[s.key]" :placeholder="`从${(FROM_OPTIONS.find(o => o.value === collageBase)?.label) || '主线'}取`">
               <el-option v-for="o in FROM_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
             </el-select>
             <el-input
@@ -462,9 +553,27 @@ watch(() => props.volNo, () => {
           </el-tag>
           <span class="summary">{{ completed?.summary || '' }}</span>
         </div>
-        <el-scrollbar max-height="400" class="log-scroll">
-          <pre class="full-log">{{ (completed?.full_log || '').slice(0, 1500) }}</pre>
-        </el-scrollbar>
+        <div class="completed-body">
+          <div class="summary-panel">
+            <h4>小说化梗概（原剧本经过）</h4>
+            <el-scrollbar max-height="420">
+              <pre class="summary-pre">{{ completedSummary }}</pre>
+            </el-scrollbar>
+          </div>
+          <div class="raw-toggle">
+            <el-button link type="info" size="small" @click="showRaw = !showRaw">
+              {{ showRaw ? '收起跑团实况（素材）' : '查看跑团实况（原始素材）' }}
+            </el-button>
+          </div>
+          <el-collapse-transition>
+            <div v-if="showRaw" class="raw-panel">
+              <div class="mat-hint">完整 KP/PL 对话日志，作为素材归档；正文写作以梗概为准。</div>
+              <el-scrollbar max-height="300">
+                <pre class="transcript-pre">{{ completedTranscript || '（无原始日志）' }}</pre>
+              </el-scrollbar>
+            </div>
+          </el-collapse-transition>
+        </div>
         <div class="actions">
           <el-button @click="onReset">重跑</el-button>
           <el-button type="primary" size="large" @click="emit('done')">下一阶段：魂穿唐迟</el-button>
@@ -509,14 +618,21 @@ watch(() => props.volNo, () => {
   margin: 0 auto;
 }
 
+.sim-header .header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
 .sim-header h2 {
-  margin: 0 0 4px 0;
+  margin: 0;
   font-size: 22px;
 }
 .sim-header .sub {
   color: #666;
-  margin: 0 0 12px 0;
+  margin: 8px 0 12px 0;
   font-size: 13px;
+  line-height: 1.6;
 }
 .completed-banner {
   background: #f0f9eb;
@@ -580,6 +696,9 @@ watch(() => props.volNo, () => {
   font-size: 13px;
   color: #666;
   line-height: 1.5;
+}
+.var-one-liner .muted {
+  color: #bbb;
 }
 
 /* 拼贴区域 */
@@ -653,6 +772,82 @@ watch(() => props.volNo, () => {
   padding: 12px;
   border-radius: 4px;
   margin: 0;
+}
+
+/* ---- 平行宇宙卡片：梗概为主，实况折叠 ---- */
+.variant-meta-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.meta-chip {
+  font-size: 12px;
+  color: #666;
+  background: #f0f2f5;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+.variant-transcript {
+  margin-top: 8px;
+  border-top: 1px dashed #e0e4ea;
+  padding-top: 8px;
+}
+.mat-hint {
+  font-size: 12px;
+  color: #888;
+  margin-bottom: 6px;
+}
+.transcript-pre {
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 12px;
+  line-height: 1.55;
+  background: #fafbfc;
+  border: 1px solid #eef0f3;
+  padding: 10px;
+  border-radius: 4px;
+  margin: 0;
+  max-height: 280px;
+  overflow: auto;
+}
+.state-error {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #c0392b;
+  background: #fdecea;
+  padding: 6px 8px;
+  border-radius: 4px;
+}
+
+/* ---- 已完成态：梗概面板 + 折叠实况 ---- */
+.completed-body {
+  margin: 12px 0;
+}
+.summary-panel h4 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  color: #333;
+  font-weight: 600;
+}
+.summary-pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 14px;
+  line-height: 1.75;
+  background: #fafbfc;
+  padding: 14px 16px;
+  border-radius: 6px;
+  border-left: 3px solid #409eff;
+  margin: 0;
+}
+.raw-toggle {
+  margin-top: 8px;
+  text-align: right;
+}
+.raw-panel {
+  margin-top: 6px;
 }
 
 .loading {
