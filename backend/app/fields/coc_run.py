@@ -295,10 +295,20 @@ class CocRunState:
             meta=dict(meta or {}),
             created_at=_now(),
         )
-        # PL 回合自动记录当前行动玩家
-        if role == "investigator" and "player_idx" not in t.meta:
-            t.meta["player_idx"] = self.active_player_idx
-            t.meta["player_name"] = self.current_player_name()
+        # PL 回合自动记录当前行动玩家（即便调用方已传 player_idx，也要补 player_name）
+        if role == "investigator":
+            if "player_idx" not in t.meta:
+                t.meta["player_idx"] = self.active_player_idx
+            pidx = t.meta.get("player_idx", self.active_player_idx)
+            if not t.meta.get("player_name"):
+                try:
+                    t.meta["player_name"] = (
+                        (self.players_state[pidx].get("name") if self.players_state and pidx < len(self.players_state) else None)
+                        or (self.player_cards[pidx].get("name") if self.player_cards and pidx < len(self.player_cards) else None)
+                        or f"调查员{pidx+1}"
+                    )
+                except Exception:
+                    t.meta["player_name"] = "调查员"
         self.turns.append(t)
         self.updated_at = _now()
         return t
@@ -321,9 +331,10 @@ class CocRunState:
 
     def current_player_name(self) -> str:
         if not self.players_state:
-            return self.player_card.get("name", "唐迟")
+            return (self.player_cards[0].get("name") if self.player_cards else None) or "调查员1"
         return self.players_state[self.active_player_idx].get("name",
-               self.player_cards[self.active_player_idx].get("name", f"调查员{self.active_player_idx+1}"))
+               (self.player_cards[self.active_player_idx].get("name") if self.player_cards and self.active_player_idx < len(self.player_cards) else None)
+               or f"调查员{self.active_player_idx+1}")
 
     def current_player_card(self) -> dict:
         if self.player_cards:
@@ -341,15 +352,21 @@ class CocRunState:
         """把回合拼成跑团日志（喂给下一层 / 喂给 outcome）。
 
         - keeper 回合：标注【守密人】
-        - investigator 回合：标注具体角色名（不再硬编码"唐迟"），旧回合无 player_name 时回退"唐迟"
+        - investigator 回合：标注具体角色名（优先 player_name meta，回退到 player_cards 名）
         """
         turns = self.turns if last_n is None else self.turns[-last_n:]
-        lines = []
+        lines: list[str] = []
         for t in turns:
             if t.role == "keeper":
                 lines.append(f"【守密人 回合 {t.turn_no}】\n{t.text}")
             elif t.role == "investigator":
-                pname = t.meta.get("player_name") or "唐迟"
+                pname = t.meta.get("player_name")
+                if not pname:
+                    pidx = t.meta.get("player_idx")
+                    if isinstance(pidx, int) and self.player_cards and pidx < len(self.player_cards):
+                        pname = self.player_cards[pidx].get("name") or f"调查员{pidx+1}"
+                    else:
+                        pname = "调查员"
                 lines.append(f"【{pname} 行动 {t.turn_no}】\n{t.text}")
             elif t.role == "author":
                 lines.append(f"【作者介入】{t.text}")
@@ -628,7 +645,7 @@ def parse_dice_rolls(text: str) -> list[CocRoll]:
     return rolls
 
 
-# 自动检测 Day 推进（支持「Day3」「第3天」「第三日」「第七日」）
+# 自动检测阶段推进（支持「Day3」「第3天」「第三日」「终局/第七日」——兼容旧日志与新双轨语义）
 _DAY_RE = re.compile(r"(?:Day\s*([1-7])|第\s*([1-7一二三四五六七])\s*[天日])")
 _CN_NUM = {"一":1,"二":2,"三":3,"四":4,"五":5,"六":6,"七":7}
 
@@ -650,13 +667,13 @@ def detect_day(text: str) -> int | None:
 
 NPC_POOL = [
     {"name": "送伞的哑巴阿婆", "secret": "她就是上一场留下的执念残响", "stance": "看似慈祥实则引诱"},
-    {"name": "穿中山装的修伞匠", "secret": "知道第七日伞骨接法但要拿一条回忆换", "stance": "市侩、守旧"},
-    {"name": "穿红衣的小女孩", "secret": "她是第一天就死了的人，一直在找哥哥", "stance": "天真、执着、令人心疼"},
+    {"name": "穿中山装的修伞匠", "secret": "知道终局那日伞骨接法但要拿一条回忆换", "stance": "市侩、守旧"},
+    {"name": "穿红衣的小女孩", "secret": "她是故事开场就死了的人，一直在找哥哥", "stance": "天真、执着、令人心疼"},
     {"name": "打油纸伞的卖花姑娘", "secret": "花是用亡者的指甲种的", "stance": "笑里藏刀"},
-    {"name": "巡夜的老警察", "secret": "七日前就死了，反复巡逻同一条街", "stance": "僵硬、机械、会重复同一句话"},
+    {"name": "巡夜的老警察", "secret": "故事开始前就死了，反复巡逻同一条街", "stance": "僵硬、机械、会重复同一句话"},
     {"name": "巷口算命的瞎子", "secret": "他能看见每个入巷者的死期", "stance": "慈悲但不肯直说"},
     {"name": "开裁缝铺的旗袍女人", "secret": "她缝的寿衣用的是活人皮肤", "stance": "客气、诡异"},
-    {"name": "修自行车的外地青年", "secret": "他是唯一的活人但已经困在巷里三十天", "stance": "慌张、想逃"},
+    {"name": "修自行车的外地青年", "secret": "他是唯一的活人但已经困在巷里很久", "stance": "慌张、想逃"},
     {"name": "井边打水的白发老太", "secret": "井水是忘川，喝一口就忘了自己是谁", "stance": "沉默、招手"},
     {"name": "卖馄饨的夜摊老板", "secret": "馄饨馅是人肉但他自己不知道", "stance": "热情、健谈"},
 ]
@@ -665,25 +682,25 @@ TWIST_POOL = [
     "NPC 在关键时刻背叛众人——他/她其实是实体的化身",
     "死者死前留了反转让附身者踩中陷阱",
     "某个 NPC 其实是其中一位调查员自己前几场遗留的执念",
-    "时间在第二天循环了两次，有人发现口袋里多了一把伞",
-    "第七日反转：杀死实体的代价是成为下一任守巷人",
+    "时间在故事中段循环了两次，有人发现口袋里多了一把伞",
+    "终局反转：杀死实体的代价是成为下一任守巷人",
     "大家以为救了的人其实早死了，众人一直在跟空气说话",
     "金手指代价翻倍——每用一次听忆，遗忘一段人生",
     "实体用调查员最在意的人的声音诱他/她入瓮",
     "巷子里出现第二个某调查员，声称自己才是真的",
-    "看似安全的庇护所（裁缝铺/馄饨摊）到第五天变成致命陷阱",
+    "看似安全的庇护所（裁缝铺/馄饨摊）到故事后段变成致命陷阱",
 ]
 
 FORESHADOW_POOL = [
-    "第一天某扇门上的划痕正好对应第七日的死亡方式",
+    "开场某扇门上的划痕正好对应终局的死亡方式",
     "童谣歌词藏着实体的真名",
-    "NPC 反复哼的调子是送葬曲，哼到第七段就收命",
-    "伞骨的裂纹每天多一条，七天满七条人亡",
+    "NPC 反复哼的调子是送葬曲，哼到最后一段就收命",
+    "伞骨的裂纹随故事推进逐条增加，裂纹满数对应人亡",
     "井水能照出死人，第一次照见的是主角自己",
     "镜子里众人的倒影比真人慢半拍",
     "巷子里多出来的门牌号码是上一位死者的卒年",
     "每个 NPC 都少一根手指，凑起来正好开实体所在的锁",
-    "雨停的瞬间是第七日零时",
+    "雨停的瞬间是终局零时",
     "铜纽扣上的花纹是实体的眼睛，谁捡到就被盯上",
 ]
 

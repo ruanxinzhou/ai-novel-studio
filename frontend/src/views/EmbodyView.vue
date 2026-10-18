@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElProgress } from 'element-plus'
 import SushiCards from '../components/SushiCards.vue'
 import { embodyApi } from '../api'
+import { provideChatContext } from '../chatContext'
 import type {
   EmbodyCandidate,
   EmbodyEntryPoint,
@@ -18,6 +19,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'done'): void
+  (e: 'back-to-simulate'): void
 }>()
 
 // ---- 步骤状态 ----
@@ -44,6 +46,58 @@ const genProgress = ref(0)
 const genMessage = ref('')
 const pickedOutlineId = ref<string | null>(null)
 const pickedOutline = ref<EmbodyOutline | null>(null)
+
+// 注册聊天上下文：魂穿入戏三选一（宿主/切入点/反应）+ 最终五版大纲
+provideChatContext(() => {
+  const step_names = ['选宿主（candidates）', '选切入点（entry_points）', '选第一反应（stances）', '生成五版大纲', '完成']
+  const picked = pickedOutline.value
+  return {
+    phase: '🫀 魂穿入戏',
+    system_hint:
+      '作者在 4 步魂穿入戏：选宿主→选切入点（三幕：假死因红鲱鱼→核心反转→规则利用破局）→选第一反应→生成五版三折死因大纲。'
+      + '回答时先看 context.step / context.candidate / context.entry_point / context.stance 定位当前哪一步，'
+      + '再给具体改法；尤其要遵守：主角能力必须长线复用（不能只针对单本剧本）、三折死因链必须完整。',
+    context: {
+      volume_no: props.volNo,
+      step_idx: step.value,
+      step_name: step_names[step.value] || '',
+      candidates: candidates.value.map(c => ({
+        id: c.id, name: c.name, role: c.role, death: c.death, summary: (c.summary || c.bio || '').slice(0, 400),
+      })),
+      selected_candidate: candidate.value ? {
+        id: candidate.value.id, name: candidate.value.name, role: candidate.value.role,
+        death: candidate.value.death, summary: candidate.value.summary || candidate.value.bio || '',
+      } : null,
+      entry_points: entryPoints.value.map(e => ({
+        id: e.id, act: e.act, title: e.title, false_cause: e.false_cause,
+        core_twist: e.core_twist, rule_exploit: e.rule_exploit, summary: (e.summary || '').slice(0, 400),
+      })),
+      selected_entry_point: entryPoint.value ? {
+        id: entryPoint.value.id, act: entryPoint.value.act, title: entryPoint.value.title,
+        false_cause: entryPoint.value.false_cause, core_twist: entryPoint.value.core_twist,
+        rule_exploit: entryPoint.value.rule_exploit, summary: entryPoint.value.summary || '',
+      } : null,
+      stances: stances.value.map(s => ({
+        id: s.id, label: s.label, tone: s.tone,
+        summary: (s.summary || s.description || '').slice(0, 400),
+      })),
+      selected_stance: stance.value ? {
+        id: stance.value.id, label: stance.value.label, tone: stance.value.tone,
+        summary: stance.value.summary || stance.value.description || '',
+      } : null,
+      user_directive: userDirective.value || null,
+      outlines_count: outlines.value.length,
+      selected_outline: picked ? {
+        id: picked.id, title: picked.title, tone: picked.tone,
+        false_cause: picked.false_cause, core_twist: picked.core_twist, rule_exploit: picked.rule_exploit,
+        text: picked.text || picked.summary || '',
+        acts: Array.isArray((picked as any).acts) ? (picked as any).acts.map((a: any) => ({
+          name: a?.name || a?.act, summary: (a?.summary || '').slice(0, 300),
+        })) : [],
+      } : null,
+    },
+  }
+})
 
 const completing = ref(false)
 const completedHost = ref<EmbodyCandidate | null>(null)
@@ -365,6 +419,18 @@ function goBack() {
   if (step.value > 0) step.value -= 1
 }
 
+// ---- 返回上一阶段（跑团）----
+async function goBackToSimulate() {
+  const pid = currentProjectId.value
+  if (!pid) return
+  try {
+    await fetch(`/api/projects/${pid}/workbench/volumes/${props.volNo}/embody/back-to-simulate`, { method: 'POST' })
+    emit('back-to-simulate')
+  } catch (e: any) {
+    ElMessage.error('返回失败：' + (e?.message ?? e))
+  }
+}
+
 // ---- 启动 5 版大纲 ----
 async function startGenerate(isRerun = false) {
   const pid = currentProjectId.value
@@ -504,7 +570,10 @@ const activeStep = computed(() => Math.min(step.value, 4))
 <template>
   <div class="embody-view">
     <div class="embody-header">
-      <h2>👻 唐迟魂穿·四步入壳</h2>
+      <div class="embody-header-top">
+        <h2>👻 唐迟魂穿·四步入壳</h2>
+        <el-button size="small" @click="goBackToSimulate">← 返回跑团</el-button>
+      </div>
       <p class="sub">
         在 3 个倒霉到骨子里的将死之人里选一个身体，挑准穿入时机、确立立场，让唐迟以一具被诅咒/已死/将死的皮囊，硬扛七日副本。
       </p>
@@ -740,6 +809,12 @@ const activeStep = computed(() => Math.min(step.value, 4))
   min-height: 100%;
 }
 
+.embody-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
 .embody-header h2 {
   margin: 0 0 4px;
   font-size: 22px;

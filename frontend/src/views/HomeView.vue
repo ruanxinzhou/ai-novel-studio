@@ -262,6 +262,27 @@ function onChatRefresh() {
   ElMessage.info('已请求重新生成')
 }
 
+async function onBackToAdapt() {
+  const pid = currentProjectId.value
+  const vn = currentVolumeNo.value
+  if (!pid || !vn) return
+  try {
+    // 调用后端专用接口：清空 simulated_run、重置 stage_completed.simulate 为 False、取消运行中任务
+    const resp = await fetch(`/api/projects/${pid}/workbench/volumes/${vn}/simulate/back-to-adapt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    })
+    if (!resp.ok) {
+      const t = await resp.text().catch(() => '')
+      throw new Error(`HTTP ${resp.status} ${t.slice(0, 120)}`)
+    }
+    await loadPhase(vn)
+    ElMessage.success('已返回剧本改编阶段，可以重新选版')
+  } catch (e: any) {
+    ElMessage.error('返回失败：' + (e?.message ?? e))
+  }
+}
+
 onMounted(() => {
   if (currentProjectId.value) {
     loadPhase()
@@ -319,6 +340,7 @@ defineExpose({ refresh: loadPhase })
             v-else-if="phase === 'simulate'"
             :vol-no="currentVolumeNo"
             @done="loadPhase"
+            @back-to-adapt="onBackToAdapt"
           />
 
           <!-- embody 阶段：唐迟魂穿 4 步 -->
@@ -326,6 +348,7 @@ defineExpose({ refresh: loadPhase })
             v-else-if="phase === 'embody'"
             :vol-no="currentVolumeNo"
             @done="loadPhase"
+            @back-to-simulate="loadPhase"
           />
 
           <!-- scaffold 阶段：副本详设 6 卡 -->
