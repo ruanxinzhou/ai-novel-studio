@@ -401,7 +401,8 @@ class LayerRunIn(BaseModel):
     project_state: bool = False           # 注入项目状态账本（已写剧情/正文近况/实体账本）
 
 
-_FAMILIES = {"required": MaterialFamily.REQUIRED, "finalized": MaterialFamily.FINALIZED,
+_FAMILIES = {"context": MaterialFamily.CONTEXT, "required": MaterialFamily.REQUIRED,
+             "finalized": MaterialFamily.FINALIZED,
              "candidate": MaterialFamily.CANDIDATE, "reference": MaterialFamily.REFERENCE}
 
 
@@ -1990,7 +1991,7 @@ def desk_run_stream(pid: str, chapter: int, body: DeskRunIn) -> StreamingRespons
 
 @app.post("/api/projects/{pid}/desk/{chapter}/review")
 def desk_review(pid: str, chapter: int) -> dict:
-    """单章七项一致性审稿（第七项跨章联结对照上一章结尾），结果入章台记录；
+    """单章九项一致性审稿（第九项克苏鲁白描空泛套话锁，第七项跨章联结对照上一章结尾），结果入章台记录；
     附节奏饥饿与三线断档/占比检查（纯数据，不走 LLM）。"""
     _require_project(pid)
     desk = _desk_for(pid)
@@ -2103,6 +2104,17 @@ def desk_finalize(pid: str, chapter: int, body: DeskFinalizeIn | None = None) ->
             _chore_provider(), _prompt_store, _project_store, pid,
             _entities_for(pid), _markers_for(pid), _desk_for(pid),
             chapter, auto_entities=auto, payoff=payoff)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.post("/api/projects/{pid}/desk/{chapter}/unfinalize")
+def desk_unfinalize(pid: str, chapter: int) -> dict:
+    """反定稿：清除 finalized_at，保留正文/润色/审稿结果，允许作者改完再定稿。"""
+    _require_project(pid)
+    try:
+        work = _desk_for(pid).unfinalize(chapter)
+        return {"chapter": chapter, "finalized_at": work.finalized_at, "ok": True}
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
@@ -4376,6 +4388,7 @@ register_simulate_routes(
     coc_run_for=_coc_run_for,
     field_run_for=_field_run_for,
     chore_provider=_chore_provider,
+    coc_runner_factory=_coc_runner_factory,
 )
 
 # ============================================================
@@ -4410,4 +4423,5 @@ register_rhythm_routes(
     volumes_for=_volumes_for,
     chore_provider=_chore_provider,
 )
-
+from .chat_routes import register as register_chat_routes
+register_chat_routes(app, get_router)

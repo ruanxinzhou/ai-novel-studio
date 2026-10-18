@@ -99,7 +99,7 @@ def test_skill_materials_render_into_dedicated_section():
 def test_module_rules_bloat_causes_explicit_capacity_error():
     # 规则是 REQUIRED：装不下必须显式失败，绝不静默截断
     tiny = MaterialAssembler(max_bytes=500)
-    with pytest.raises(Exception, match="必需材料超出预算"):
+    with pytest.raises(Exception, match="必进材料"):
         tiny.assemble(skill_materials("draft", None))
 
 

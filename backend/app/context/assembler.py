@@ -15,6 +15,7 @@ import json
 from dataclasses import dataclass
 
 from app.context.material import (
+    MANDATORY_FAMILIES,
     OPTIONAL_FAMILY_ORDER,
     Material,
     MaterialCapacityError,
@@ -79,6 +80,12 @@ class ContextSnapshot:
             items = [m for m in self.included if m.family == family]
             if not items:
                 continue
+            if family is MaterialFamily.CONTEXT:
+                # 运行时实况/本场世界基础——独立分区，不混入 REQUIRED 的 skill/markers 拆分
+                sections["本场实况·世界基础"] = "\n\n".join(
+                    f"【{m.title or m.source_id}】\n{m.content}" for m in items
+                )
+                continue
             if family is MaterialFamily.REQUIRED:
                 rules = [m for m in items if m.source_id.startswith("skill:")]
                 marks = [m for m in items if m.source_id.startswith("markers:")]
@@ -119,21 +126,21 @@ class MaterialAssembler:
         anchor = truncate_tail_at_sentence(anchor_text, self.anchor_max_chars)
         used = utf8_size(anchor)
 
-        required = [m for m in materials if m.family == MaterialFamily.REQUIRED]
-        required_bytes = sum(m.byte_size for m in required)
-        if used + required_bytes > self.max_bytes:
-            overflow = used + required_bytes - self.max_bytes
-            ids = [m.source_id for m in required]
+        mandatory = [m for m in materials if m.family in MANDATORY_FAMILIES]
+        mandatory_bytes = sum(m.byte_size for m in mandatory)
+        if used + mandatory_bytes > self.max_bytes:
+            overflow = used + mandatory_bytes - self.max_bytes
+            ids = [m.source_id for m in mandatory]
             raise MaterialCapacityError(
-                f"必需材料超出预算 {overflow} 字节（锚点 {used} + 必需 {required_bytes} > 预算 {self.max_bytes}）。"
-                "请扩充预算或精简必需材料——禁止静默截断。",
+                f"必进材料（CONTEXT+REQUIRED）超出预算 {overflow} 字节（锚点 {used} + 必进 {mandatory_bytes} > 预算 {self.max_bytes}）。"
+                "请扩充预算或精简必进材料——禁止静默截断。",
                 overflow_bytes=overflow,
                 source_ids=ids,
             )
-        included = list(required)
-        used += required_bytes
+        included = list(mandatory)
+        used += mandatory_bytes
 
-        optional = [m for m in materials if m.family != MaterialFamily.REQUIRED]
+        optional = [m for m in materials if m.family not in MANDATORY_FAMILIES]
         optional.sort(key=lambda m: (OPTIONAL_FAMILY_ORDER.index(m.family), -m.relevance, m.source_id))
 
         omissions: list[Omission] = []
@@ -163,7 +170,7 @@ class MaterialAssembler:
             if m.source_id in seen:
                 raise ValueError(f"source_id 重复: {m.source_id}")
             seen.add(m.source_id)
-            if m.family == MaterialFamily.REQUIRED and not m.content.strip():
-                raise ValueError(f"必需材料内容为空: {m.source_id}")
+            if m.family in MANDATORY_FAMILIES and not m.content.strip():
+                raise ValueError(f"必进材料（{m.family.value}）内容为空: {m.source_id}")
             if m.byte_size == 0:
                 raise ValueError(f"材料内容为空: {m.source_id}")
