@@ -614,19 +614,23 @@ def _pick_outline(pid: str, vol_no: int, body: _PickOutlineIn):
         "outline_text": outline_text,
     }
     v.stage_completed["embody"] = True
+    if isinstance(v.stage_completed, dict) and "_view" in v.stage_completed:
+        v.stage_completed.pop("_view", None)
     vs.save(v)
     return {"ok": True, "volume": v.as_dict(), "picked": picked}
 
 
 def _back_to_simulate(pid: str, vol_no: int) -> dict:
-    """从魂穿阶段返回跑团阶段：重置 stage_completed.embody 及后续阶段为 False，不清空跑团结果。"""
+    """从魂穿阶段返回跑团阶段：
+    - 不清空跑团结果（simulated_run 保留，方便重选盘/查看梗概）
+    - 保留 stage_completed.simulate=True（跑团已完成）
+    - 写入 stage_completed._view = "simulate"，让 /phase 路由返回 simulate 阶段
+    - 清空魂穿阶段的产出，避免回到魂穿时看到旧选择
+    """
     vs, v = _get_volume_or_404(pid, vol_no)
     sc = dict(v.stage_completed or {})
-    # 保留 simulate 之前的完成状态；只重置 embody 及后续
-    for k in ("embody", "scaffold", "rhythm", "briefing", "desk", "settle", "interlude"):
-        sc[k] = False
+    sc["_view"] = "simulate"
     v.stage_completed = sc
-    # 清空魂穿阶段的产出，避免回到魂穿时看到旧选择
     v.host_character = None
     v.entry_point = None
     v.info_gap = None

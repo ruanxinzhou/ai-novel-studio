@@ -4,7 +4,7 @@
     from .simulate_routes import register_simulate_routes
     register_simulate_routes(app, require_project=..., volumes_for=..., project_dir=...,
                              book_for=..., fields_for=..., coc_run_for=..., field_run_for=...,
-                             chore_provider=...)
+                             chore_provider=..., coc_runner_factory=_coc_runner_factory)
 """
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ class _Deps:
     coc_run_for: Callable[[str], Any]
     field_run_for: Callable[[str], Any]
     chore_provider: Callable[[str], Any]
+    coc_runner_factory: Callable[[], Any]  # 每线程一个全新 PipelineRunner，见 jobs_routes 模式
 
 
 _deps: _Deps | None = None
@@ -47,6 +48,7 @@ def register_simulate_routes(
     coc_run_for: Callable[[str], Any],
     field_run_for: Callable[[str], Any],
     chore_provider: Callable[[str], Any],
+    coc_runner_factory: Callable[[], Any],
 ) -> None:
     global _deps
     _deps = _Deps(
@@ -58,6 +60,7 @@ def register_simulate_routes(
         coc_run_for=coc_run_for,
         field_run_for=field_run_for,
         chore_provider=chore_provider,
+        coc_runner_factory=coc_runner_factory,
     )
 
     router = APIRouter()
@@ -85,6 +88,10 @@ def register_simulate_routes(
         "/api/projects/{pid}/workbench/volumes/{vol_no}/simulate/save-custom",
         _save_custom_variant, methods=["POST"],
     )
+    router.add_api_route(
+        "/api/projects/{pid}/workbench/volumes/{vol_no}/simulate/back-to-adapt",
+        _back_to_adapt, methods=["POST"],
+    )
     app.include_router(router)
 
 
@@ -100,7 +107,7 @@ class _StartIn(BaseModel):
     user_directive: str = ""
     max_pairs_per_session: int = 6
     max_turns_per_session: int = 20
-    tangchi_replace_idx: int | None = None
+    use_mock: bool = False  # 显式要求 mock（测试/快速演示）；默认走真 LLM
 
 
 class _PickOneIn(BaseModel):
@@ -210,10 +217,19 @@ def _start_sim(pid: str, vol_no: int, body: _StartIn) -> dict:
         ]
         player_cards = (player_cards + defaults)[:4]
 
-    from ..pipeline.coc_simulator import build_2same_1different_configs, run_coc_parallel_batch
-    player_sets, variant_configs = build_2same_1different_configs(
-        player_cards, tangchi_replace_idx=body.tangchi_replace_idx,
-    )
+    # 跑团仿真先于魂穿：PL 均为外乡调查员（模组 NPC 故事里的人），
+    # 本阶段不注入唐迟，也不允许把某张 PL 卡替换成唐迟。
+    # 三场 PL 完全相同、模组/NPC/开场钩子完全相同；只通过独立 rng_seed + KP 自由发挥产生差异。
+    from ..pipeline.coc_simulator import run_coc_parallel_batch
+    import copy as _copy, random as _r
+    _brng = _r.Random()
+    NS = 3
+    player_sets = [_copy.deepcopy(player_cards) for _ in range(NS)]
+    variant_configs = []
+    for i in range(NS):
+        ss = _brng.randint(1, 2**30)
+        variant_configs.append({"flavor": None, "label": f"平行宇宙 #{i+1}",
+            "desc": f"同模组·同PL·骰子种子 {ss}；KP 自由长", "rng_seed": ss})
 
     book_store = d.book_for(pid)
     field_store = d.fields_for(pid)
@@ -236,39 +252,54 @@ def _start_sim(pid: str, vol_no: int, body: _StartIn) -> dict:
         "flavors": [vc.get("flavor") for vc in variant_configs],
         "volume_no": vol_no,
     })
-    labels = ["全员殒落线", "一人独活线", "真相污染线"]
+    _session_labels = [vc.get("label", f"第{i+1}场") for i, vc in enumerate(variant_configs)]
 
     progress_lock = threading.Lock()
-    session_state = {i: {"day": 1, "turn": 0, "done": False} for i in range(3)}
+    session_state = {i: {"day": 1, "turn": 0, "done": False, "finalizing": False} for i in range(3)}
 
     def _on_event(kind: str, payload: dict):
         with progress_lock:
             try:
                 sess_idx = int(payload.get("session", 1)) - 1
+                if not (0 <= sess_idx < NS):
+                    return
                 i = payload.get("session")
+                _lab = _session_labels[sess_idx]
+                ss = session_state[sess_idx]
                 if kind == "coc_session_start":
-                    msg = f"第 {i}/3 场（{labels[sess_idx]}）开场…"
-                elif kind == "coc_session_turn":
-                    day = int(payload.get("day", payload.get("current_day", 1) or 1))
-                    turn = int(payload.get("turn", 0))
-                    session_state[sess_idx]["day"] = day
-                    session_state[sess_idx]["turn"] = turn
-                    msg = f"第 {i}/3 场（{labels[sess_idx]}）Day{day} 推演中…"
+                    ss["done"] = False
+                    ss["finalizing"] = False
+                    msg = f"第 {i}/3 场（{_lab}）开场…"
+                elif kind in ("coc_session_turn", "coc_turn_done", "coc_turn_start"):
+                    day = int(payload.get("day", payload.get("current_day", ss.get("day", 1)) or 1))
+                    turn = int(payload.get("turn", payload.get("turn_no", ss.get("turn", 0)) or 0))
+                    role = payload.get("role", "")
+                    ss["day"] = day
+                    ss["turn"] = turn
+                    role_cn = "守密人推进" if role == "keeper" else ("调查员行动" if role == "investigator" else "推演中")
+                    msg = f"第 {i}/3 场（{_lab}）阶段{day} · {role_cn} · 回合{turn}"
+                elif kind == "coc_session_finalize":
+                    ss["finalizing"] = True
+                    msg = f"第 {i}/3 场（{_lab}）跑团结束，整理小说化梗概…"
                 elif kind == "coc_session_done":
-                    session_state[sess_idx]["done"] = True
-                    msg = f"第 {i}/3 场（{labels[sess_idx]}）完成"
+                    ss["done"] = True
+                    ss["finalizing"] = False
+                    msg = f"第 {i}/3 场（{_lab}）完成"
                 elif kind == "coc_session_error":
-                    msg = f"第 {i}/3 场出错：{str(payload.get('error',''))[:40]}"
+                    msg = f"第 {i}/3 场出错：{str(payload.get('error',''))[:60]}"
                 else:
-                    msg = kind
+                    msg = f"第 {i}/3 场（{_lab}）{kind}"
                 done_cnt = sum(1 for vv in session_state.values() if vv["done"])
-                base = done_cnt * 30
-                in_flight_pct = 0
+                # 进度按「已完成场 × 33% + 当前进行中场的回合进度」估算
+                pct = done_cnt * 33.0
                 for vv in session_state.values():
                     if not vv["done"]:
-                        in_flight_pct = 20 + vv["turn"] * 3
+                        if vv["finalizing"]:
+                            pct += 30
+                        else:
+                            pct += min(28, 4 + vv.get("turn", 0) * 2.2)
                         break
-                pct = min(99, base + in_flight_pct)
+                pct = min(99, pct)
                 job_store.update(job.job_id, progress=pct, message=msg)
             except Exception:
                 pass
@@ -277,46 +308,49 @@ def _start_sim(pid: str, vol_no: int, body: _StartIn) -> dict:
     max_pairs = int(body.max_pairs_per_session or 6)
     max_turns = int(body.max_turns_per_session or 20)
     user_dir = body.user_directive or None
+    use_mock = bool(body.use_mock)
     chore_provider = d.chore_provider
 
+    # 进度计算：三场并行，每场 max_pairs*2 回合（KP+PL），我们按回合数估算进度
+    _per_session_turns = max(1, max_pairs * 2 + 2)  # +2 for finalize start/done
+    _total_turn_estimate = _per_session_turns * 3
+
     def _work(j, update):
-        # ---- 短路 mock 路径：max_turns_per_session <= 1 时不调 LLM，2 秒后返回 mock variants ----
-        if max_turns <= 1:
-            update(progress=5, message="测试模式：max_turns=1，跳过 LLM 直接生成 mock 结果…")
-            time.sleep(2)
+        # ---- mock 路径：仅当前端显式 use_mock=true 时启用，默认走真 LLM ----
+        if use_mock:
+            update(progress=5, message="演示模式：跳过 LLM 直接生成 mock 结果…")
+            time.sleep(1)
             variants = []
-            _mock_oneliners = [
-                "无人生还——SAN 集体崩盘，全员在第七日同归于尽的绝望团。",
-                "只剩唐迟一人活下来——同伴逐一被替换/疯掉，他要独自面对真相。",
-                "揭开真相的人被真相吞噬——知道得越多，SAN 掉得越快，所有人都变成了它的一部分。",
-            ]
-            for i, lab in enumerate(labels):
+            import random as _mr
+            _mock_bias = ["bad", "bittersweet", "tradeoff", "narrow_escape", "costly"]
+            for i, lab in enumerate(_session_labels):
+                bias = _mock_bias[i % len(_mock_bias)]
                 v = {
                     "label": lab,
+                    "ending_label": f"{lab}（演示）",
                     "index": i,
-                    "one_liner": _mock_oneliners[i],
+                    "one_liner": "【演示结果】mock 跑团，未调用真实 LLM；请关闭「快速演示」后重跑以获得真实剧情。",
                     "flavor": "mock",
+                    "ending_bias": "mock",
                     "full_log": (
-                        f"这是【{lab}】的完整跑团日志 mock...\n"
-                        f"Day1 开场...（{lab}）\n"
-                        f"Day3 异常浮现...\n"
-                        f"Day5 遭遇第一个死亡...\n"
-                        f"Day7 高潮...\n"
-                        f"结局：唐迟以 SAN {20+i*5} 逃脱/死亡。"
+                        f"===== 跑团完整日志（演示）=====\n"
+                        f"（此为演示占位内容，非真实 KP 产出。）\n\n"
+                        f"===== 小说化梗概（演示）=====\n"
+                        f"请关闭「高级选项 → 快速演示」后重新开跑，获得真实跑团日志与小说化梗概。"
                     ),
                 }
                 variants.append(v)
                 job_store.append_sub_result(job.job_id, v)
                 update(progress=30 * (i + 1), message=f"{lab} mock 完成")
-                time.sleep(0.3)
-            update(progress=100, message="3 场全部完成（mock）", result={"variants": variants})
+                time.sleep(0.2)
+            update(progress=100, message="3 场演示完成（mock）", result={"variants": variants})
             return {"variants": variants}
 
         # ---- 真实路径 ----
-        def _factory():
-            return chore_provider("coc")
+        # 每线程一个全新 PipelineRunner（coc_runner_factory 已由 main.py 注入）
+        runner_factory = d.coc_runner_factory
         variants = run_coc_parallel_batch(
-            _factory,
+            runner_factory,
             book_store=book_store, field_store=field_store,
             field_no=field_no, coc_store=coc_store, field_run_store=field_run_store,
             adapt_parsed=adapt_parsed,
@@ -329,7 +363,9 @@ def _start_sim(pid: str, vol_no: int, body: _StartIn) -> dict:
             max_workers=3,
         )
         for i, v in enumerate(variants):
-            v["label"] = labels[i] if i < len(labels) else f"第{i+1}场"
+            # 优先用 LLM 跑出来的 ending_label，fallback 到 variant_config 的占位 label
+            v["label"] = v.get("ending_label") or _session_labels[i] if i < len(_session_labels) else (v.get("ending_label") or f"第{i+1}场")
+            v["flavor"] = v.get("ending_bias") or v.get("flavor")
             v["index"] = i
             job_store.append_sub_result(job.job_id, v)
         update(progress=100, message="3 场全部完成", result={"variants": variants})
@@ -381,6 +417,9 @@ def _pick_one(pid: str, vol_no: int, body: _PickOneIn) -> dict:
     }
     v.simulated_run = main_record
     v.stage_completed["simulate"] = True
+    # 选盘完成 → 清除阶段视图覆盖，恢复按真实进度判定（下一阶段是 embody）
+    if isinstance(v.stage_completed, dict) and "_view" in v.stage_completed:
+        v.stage_completed.pop("_view", None)
     vs.save(v)
     return {"ok": True, "volume": v.as_dict()}
 
@@ -402,6 +441,40 @@ def _save_custom_variant(pid: str, vol_no: int, body: _SaveCustomVariantIn) -> d
     }
     v.simulated_run = main_record
     v.stage_completed["simulate"] = True
+    if isinstance(v.stage_completed, dict) and "_view" in v.stage_completed:
+        v.stage_completed.pop("_view", None)
+    vs.save(v)
+    return {"ok": True, "volume": v.as_dict()}
+
+
+def _back_to_adapt(pid: str, vol_no: int) -> dict:
+    """从 simulate 阶段回退到 adapt（剧本改编/选版），清空跑团结果并允许重新选版。
+
+    - 清空 v.simulated_run
+    - 重置 stage_completed 中 simulate 及其后续阶段（embody/scaffold/rhythm）为 False
+    - 把该卷下所有 running/pending 的 coc_batch 任务标记为 aborted
+    """
+    from ..jobs.store import job_store
+    vs, v = _get_volume_or_404(pid, vol_no)
+    sid = _sim_session_id(pid, vol_no)
+    # 终止正在进行的跑团任务（避免后台继续写状态）
+    try:
+        for j in job_store.list_session(sid):
+            if j.kind == "coc_batch" and j.status in ("pending", "running"):
+                job_store.update(
+                    j.job_id,
+                    status="cancelled",
+                    error="用户返回上一步（重选剧本），任务已取消",
+                )
+    except Exception:
+        # 不要因为 job_store 清理失败阻塞回退
+        pass
+    # 清空跑团结果
+    v.simulated_run = None
+    sc = dict(v.stage_completed or {})
+    for stage in ("simulate", "embody", "scaffold", "rhythm"):
+        sc[stage] = False
+    v.stage_completed = sc
     vs.save(v)
     return {"ok": True, "volume": v.as_dict()}
 
@@ -494,5 +567,7 @@ def _collage(pid: str, vol_no: int, body: _CollageIn) -> dict:
     }
     v.simulated_run = main_record
     v.stage_completed["simulate"] = True
+    if isinstance(v.stage_completed, dict) and "_view" in v.stage_completed:
+        v.stage_completed.pop("_view", None)
     vs.save(v)
     return {"ok": True, "volume": v.as_dict()}

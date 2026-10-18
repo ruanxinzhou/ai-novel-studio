@@ -168,6 +168,29 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
             is_reviewing = True
         # 未完结旧卷：is_reviewing 保持 False，走正常编辑流程
 
+    # ---- 阶段视图覆盖：允许用户从后续阶段"返回查看/编辑"某个已完成阶段 ----
+    # 合法覆盖值：simulate / adapt / embody / scaffold / rhythm / briefing / desk
+    sc = target_vol.stage_completed or {}
+    view_override = (sc.get("_view") if isinstance(sc, dict) else None)
+    _VIEW_TO_PHASE = {
+        "adapt": "adapt",
+        "simulate": "simulate",
+        "embody": "embody",
+        "scaffold": "scaffold",
+        "rhythm": "rhythm",
+        "briefing": "briefing",
+        "desk": "desk",
+    }
+    if isinstance(view_override, str) and view_override in _VIEW_TO_PHASE:
+        return {
+            "phase": _VIEW_TO_PHASE[view_override],
+            "volume_no": target_vol.volume_no,
+            "volume_kind": target_vol.volume_kind,
+            "chapter_no": None,
+            "is_last_chapter": False,
+            "is_reviewing": False,
+        }
+
     desk = d.desk_for(pid)
 
     # 过滤出属于该卷的章节：优先 field_no == vol_no；is_interlude 且未正确绑 field_no 的老数据归到最近 interlude 卷
