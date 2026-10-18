@@ -143,15 +143,30 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
 
     last_vol = max(vols, key=lambda v: v.volume_no)
 
-    # ---- 查看旧卷模式：target_volume_no 存在且 != last_vol ----
+    # ---- 判定 target_vol 是否"真正完结"（进入只读回看）----
+    # 完结条件：
+    #   dungeon 卷：settle 不为 None（已杀青归账）
+    #   interlude 卷：interlude_plan.finalized_at 存在（间章已定稿）
+    # 未完结的卷即使不是 last_vol，也允许继续编辑（不是只读回看），
+    # 这样用户创建新卷后仍可返回旧卷推进到跑团/魂穿等阶段。
+    def _is_volume_settled(v) -> bool:
+        if v.settle is not None:
+            return True
+        if v.volume_kind == "interlude":
+            return bool((v.interlude_plan or {}).get("finalized_at"))
+        return False
+
+    # ---- 查看旧卷模式：target_volume_no 存在、!= last_vol、且该卷已完结 ----
     is_reviewing = False
     target_vol = last_vol
     if target_volume_no is not None and target_volume_no != last_vol.volume_no:
-        is_reviewing = True
         matched = [v for v in vols if v.volume_no == target_volume_no]
         if not matched:
             raise HTTPException(404, f"卷 {target_volume_no} 不存在")
         target_vol = matched[0]
+        if _is_volume_settled(target_vol):
+            is_reviewing = True
+        # 未完结旧卷：is_reviewing 保持 False，走正常编辑流程
 
     desk = d.desk_for(pid)
 
@@ -309,52 +324,46 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
             "is_reviewing": True,
         }
 
-    # ---- 最新卷：原流程（只针对 target_vol = last_vol 的情况）----
+    # ---- 非回看：当前工作卷流程（target_vol 可能是最新卷，也可能是未完结旧卷）----
     all_chapter_nos = target_ch_nos  # 只看当前卷的章
     # 3. 杀青判定：当前卷所有章 finalized，settle 为 None。
-    #    卷末判定：要么 advance 显式置 stage_completed.briefing+desk=True，
-    #    要么本卷已写章数已达到 rhythm_blueprint 建议上限/章计划最大章号，
-    #    或者 force_volume_end=True 强制；force_volume_end=False 时即使到达 plan_max 也不进 settle。
-    if all_chapter_nos and last_vol.settle is None:
+    if all_chapter_nos and target_vol.settle is None:
         all_finalized = all(bool(desk.get(no) and desk.get(no).finalized_at) for no in all_chapter_nos)
-        sc = last_vol.stage_completed or {}
-        bp = last_vol.rhythm_blueprint or {}
+        sc = target_vol.stage_completed or {}
+        bp = target_vol.rhythm_blueprint or {}
         plan_list = bp.get('chapter_plan') if isinstance(bp, dict) else []
         plan_max = max((int(p.get('chapter') or 0) for p in (plan_list or []) if isinstance(p, dict)), default=0)
         rng = (bp.get('suggested_chapter_range') or [0, 0]) if isinstance(bp, dict) else [0, 0]
         range_max = int(rng[1] or 0) if len(rng) >= 2 else 0
         cur_max_ch = max(all_chapter_nos) if all_chapter_nos else 0
-        # 间章：章数达到 zhangshu.suggested_chapters 即视为卷末
-        interlude_plan = last_vol.interlude_plan or {}
+        interlude_plan = target_vol.interlude_plan or {}
         interlude_expected = 0
-        if last_vol.volume_kind == 'interlude':
+        if target_vol.volume_kind == 'interlude':
             zp = interlude_plan.get('zhangshu') or {}
             interlude_expected = int(zp.get('suggested_chapters') or 0)
         reached_plan_end = (
             bool(sc.get('briefing') and sc.get('desk'))
             or (plan_max > 0 and cur_max_ch >= plan_max)
             or (range_max > 0 and cur_max_ch >= range_max)
-            or (last_vol.volume_kind == 'interlude' and interlude_expected > 0 and len(all_chapter_nos) >= interlude_expected)
+            or (target_vol.volume_kind == 'interlude' and interlude_expected > 0 and len(all_chapter_nos) >= interlude_expected)
         )
-        # 强制杀青 / 压制杀青（优先于自动判断）
         end_forced = bool(sc.get('end_forced'))
         end_suppressed = bool(sc.get('end_suppressed'))
         if end_forced and all_finalized:
             return {
                 "phase": "settle",
-                "volume_no": last_vol.volume_no,
-                "volume_kind": last_vol.volume_kind,
+                "volume_no": target_vol.volume_no,
+                "volume_kind": target_vol.volume_kind,
                 "chapter_no": None,
                 "is_last_chapter": False,
                 "is_reviewing": False,
             }
         if end_suppressed:
-            # 被压制：继续写下一章，永不在此处进 settle
             if all_finalized:
                 return {
                     "phase": "briefing",
-                    "volume_no": last_vol.volume_no,
-                    "volume_kind": last_vol.volume_kind,
+                    "volume_no": target_vol.volume_no,
+                    "volume_kind": target_vol.volume_kind,
                     "chapter_no": cur_max_ch,
                     "is_last_chapter": True,
                     "is_reviewing": False,
@@ -363,8 +372,8 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
         elif all_finalized and reached_plan_end:
             return {
                 "phase": "settle",
-                "volume_no": last_vol.volume_no,
-                "volume_kind": last_vol.volume_kind,
+                "volume_no": target_vol.volume_no,
+                "volume_kind": target_vol.volume_kind,
                 "chapter_no": None,
                 "is_last_chapter": False,
                 "is_reviewing": False,
@@ -372,32 +381,32 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
         if all_finalized and not reached_plan_end:
             return {
                 "phase": "briefing",
-                "volume_no": last_vol.volume_no,
-                "volume_kind": last_vol.volume_kind,
+                "volume_no": target_vol.volume_no,
+                "volume_kind": target_vol.volume_kind,
                 "chapter_no": cur_max_ch,
                 "is_last_chapter": True,
                 "is_reviewing": False,
             }
 
     # 4. 间章判定（仅当前卷）
-    if last_vol.volume_kind == "interlude" and last_vol.settle is None:
+    if target_vol.volume_kind == "interlude" and target_vol.settle is None:
         unfinished = [no for no in all_chapter_nos if not bool(desk.get(no) and desk.get(no).finalized_at)]
         if unfinished:
             earliest = min(unfinished)
             max_ch = max(all_chapter_nos) if all_chapter_nos else 0
             return {
                 "phase": "desk",
-                "volume_no": last_vol.volume_no,
-                "volume_kind": last_vol.volume_kind,
+                "volume_no": target_vol.volume_no,
+                "volume_kind": target_vol.volume_kind,
                 "chapter_no": earliest,
                 "is_last_chapter": (earliest == max_ch),
                 "is_reviewing": False,
             }
-        if not last_vol.interlude_plan or not last_vol.interlude_plan.get("finalized_at"):
+        if not target_vol.interlude_plan or not target_vol.interlude_plan.get("finalized_at"):
             return {
                 "phase": "interlude",
-                "volume_no": last_vol.volume_no,
-                "volume_kind": last_vol.volume_kind,
+                "volume_no": target_vol.volume_no,
+                "volume_kind": target_vol.volume_kind,
                 "chapter_no": None,
                 "is_last_chapter": False,
                 "is_reviewing": False,
@@ -412,8 +421,8 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
         if ch and ch.is_interlude:
             return {
                 "phase": "desk",
-                "volume_no": last_vol.volume_no,
-                "volume_kind": last_vol.volume_kind,
+                "volume_no": target_vol.volume_no,
+                "volume_kind": target_vol.volume_kind,
                 "chapter_no": earliest,
                 "is_last_chapter": (earliest == max_ch),
                 "is_reviewing": False,
@@ -421,16 +430,16 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
         if ch and not (ch.brief and isinstance(ch.brief, dict) and ch.brief.get("selected")):
             return {
                 "phase": "briefing",
-                "volume_no": last_vol.volume_no,
-                "volume_kind": last_vol.volume_kind,
+                "volume_no": target_vol.volume_no,
+                "volume_kind": target_vol.volume_kind,
                 "chapter_no": earliest,
                 "is_last_chapter": (earliest == max_ch),
                 "is_reviewing": False,
             }
         return {
             "phase": "desk",
-            "volume_no": last_vol.volume_no,
-            "volume_kind": last_vol.volume_kind,
+            "volume_no": target_vol.volume_no,
+            "volume_kind": target_vol.volume_kind,
             "chapter_no": earliest,
             "is_last_chapter": (earliest == max_ch),
             "is_reviewing": False,
@@ -438,13 +447,13 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
 
     # 6. 按 stage_completed 顺序找第一个 False
     stage_order = ["adapt", "simulate", "embody", "scaffold", "rhythm"]
-    sc = last_vol.stage_completed or {}
+    sc = target_vol.stage_completed or {}
     for stage_key in stage_order:
         if not sc.get(stage_key, False):
             return {
                 "phase": stage_key,
-                "volume_no": last_vol.volume_no,
-                "volume_kind": last_vol.volume_kind,
+                "volume_no": target_vol.volume_no,
+                "volume_kind": target_vol.volume_kind,
                 "chapter_no": None,
                 "is_last_chapter": False,
                 "is_reviewing": False,
@@ -453,8 +462,8 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
     # 7. 都 True → briefing
     return {
         "phase": "briefing",
-        "volume_no": last_vol.volume_no,
-        "volume_kind": last_vol.volume_kind,
+        "volume_no": target_vol.volume_no,
+        "volume_kind": target_vol.volume_kind,
         "chapter_no": None,
         "is_last_chapter": False,
         "is_reviewing": False,
