@@ -211,7 +211,7 @@ class ChapterWork:
     strands: list[str] = field(default_factory=list)  # 本章推进的线：quest/fire/bond 多选，空=未记录
     # 书化字段（《第七日的亡者》四层结构）
     field_no: int | None = None                  # 所属场号（None = 未分配到具体场）
-    day: int | None = None                       # 1-7 戏内七日；None = 现实间章 / 未分配
+    day: int | None = None                       # 1-7 唐迟入戏第 N 天（T-6→T-0，写作节拍，非原剧本日历天）；None = 现实间章 / 未分配
     is_interlude: bool = False                   # 是否现实间章
     interlude_kind: str = ""                     # 间章类型：爽点/羁绊/伏笔/污染征兆/杀青账
     # M1 新增
@@ -320,6 +320,16 @@ class DeskStore:
     def mark_finalized(self, no: int) -> ChapterWork:
         work = self.ensure(no)
         work.finalized_at = _now()
+        self._flush()
+        return work
+
+    def unfinalize(self, no: int) -> ChapterWork:
+        """反定稿：清除 finalized_at，但保留正文/剧情/润色/审稿结果——
+        作者可以改字后重新定稿，不会丢失已写内容。"""
+        work = self.ensure(no)
+        if not work.finalized_at:
+            raise ValueError(f"第 {no} 章尚未定稿，无需反定稿")
+        work.finalized_at = ""
         self._flush()
         return work
 

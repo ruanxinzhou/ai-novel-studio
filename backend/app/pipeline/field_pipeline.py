@@ -105,7 +105,7 @@ def _base_materials(book_store, field_store, run_store, field_no: int) -> list[M
         mats.append(Material(
             source_id="book:hardcards", family=MaterialFamily.REQUIRED,
             content=book_store.render_all(),
-            title="书级硬卡（铁律/七日基线/唐迟刻度/终局锚）",
+            title="书级硬卡（铁律/唐迟刻度/终局锚；本阶段推演原剧本，不注入七天倒计时）",
         ))
     fw = field_store.get(field_no) if field_store is not None else None
     if fw is not None:
@@ -162,9 +162,11 @@ def _x_for_node(node_id: str, layer: str, field_store, run_store,
             return (
                 f"# 选定的模组方案\n\n{chosen_text}\n\n"
                 f"# 跑团完整日志（{len(coc_state.turns)} 回合）\n\n{transcript}\n\n"
-                f"# 当前状态\nSAN {coc_state.san}  HP {coc_state.hp}  Day{coc_state.current_day}/7\n\n"
-                f"# 任务\n按 Day1-Day7 把跑团日志整理成「真实事件经过」小说化梗概："
-                f"按日分段、每段 100-200 字，关键 NPC/金手指/代价/第七日结局要写清，"
+                f"# 当前状态\nSAN {coc_state.san}  HP {coc_state.hp}  阶段{coc_state.current_day}/7\n\n"
+                f"# 任务\n把本场跑团日志整理成「原剧本真实事件经过」小说化梗概：\n"
+                f"- 按故事自然推进分成若干关键阶段，最多 7 段；每段以「DayN：」开头（N 为阶段序号 1-7，不是日历天），每段 100-200 字；\n"
+                f"- 模组时间线自由（小时/天/月/年均可），文本里用模组自身时间表述，不要硬凑 7 天；若模组短于 7 段，后续 Day 留空；\n"
+                f"- 写出关键 NPC 动向、调查员选择与代价、最终结局；故事中后段回收至少 2 个伏笔。\n"
                 f"不要出现骰子术语或玩家术语。"
             )
         # 回退：单轮结论（未启动 coc 仿真时兼容旧流程）
@@ -175,9 +177,11 @@ def _x_for_node(node_id: str, layer: str, field_store, run_store,
             chosen_text = json.dumps(chosen, ensure_ascii=False, indent=2)
         return (
             f"# 选定的模组方案\n\n{chosen_text}\n\n"
-            f"# 任务\n请按 Day1-Day7 推演这一模组的真实事件经过（单轮结论，不需要投骰子和KP轮次）："
-            f"唐迟附身死者后每天发生什么、遇到哪些NPC、用了几次金手指、付了什么代价、"
-            f"第七日如何收束。按日分段输出，每段 100-200 字。"
+            f"# 任务\n请推演这一模组的「原剧本真实事件经过」（单轮结论，不需要投骰子和 KP 轮次）：\n"
+            f"- 按故事自然推进分成若干关键阶段，最多 7 段；每段以「DayN：」开头（N 为阶段序号 1-7，不是日历天），每段 100-200 字；\n"
+            f"- 模组时间线自由（小时/天/月/年均可），文本里用模组自身时间表述，不要硬凑 7 天；若模组短于 7 段，后续 Day 留空；\n"
+            f"- 写出关键 NPC 动向、调查员的选择与代价、金手指（若有）使用与副作用、最终结局；\n"
+            f"- 注意：此时还没有唐迟魂穿，本任务只是推演副本原剧本本身的走向，不要给任何角色套上「七天倒计时」。"
         )
 
     if node_id == "tang_outline":

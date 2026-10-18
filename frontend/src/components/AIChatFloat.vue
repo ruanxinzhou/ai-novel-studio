@@ -1,317 +1,288 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { ChatDotRound, Close, Promotion } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { ChatDotRound, Close } from '@element-plus/icons-vue'
-import { currentPhase } from '../state'
+import { chatApi, type ChatMessage } from '../api'
+import { useChatContext } from '../chatContext'
+import {
+  currentPhase,
+  currentVolumeNo,
+  currentChapterNo,
+  currentVolumeKind,
+  currentIsLastChapter,
+  isReviewingVolume,
+  currentProjectId,
+} from '../state'
 
-const emit = defineEmits<{
-  (e: 'refresh'): void
-}>()
+// ---- 根据 phase 字符串映射到中文阶段名 ----
+const PHASE_NAME: Record<string, string> = {
+  setup: '📖 开书设定',
+  adapt: '📕 上传 COC 模组并改编',
+  adapt_empty: '📕 上传 COC 模组并改编',
+  simulate: '🎲 COC 并行跑团',
+  embody: '🫀 魂穿入戏',
+  scaffold: '🏗️ 副本详设',
+  rhythm: '📅 节奏骨架',
+  briefing: '📝 章前 5 分钟方向卡',
+  desk: '✍️ 章台写作',
+  settle: '🧾 杀青归账',
+  interlude: '🌌 蓝星间章',
+}
+function inferPhase(): string {
+  if (isReviewingVolume.value) return '📚 旧卷回看'
+  return PHASE_NAME[currentPhase.value] || '小说工坊'
+}
+
+const PHASE_HINTS: Record<string, string> = {
+  '📖 开书设定': '作者刚开书，可能在选背景/世界观/主角基调。',
+  '📕 上传 COC 模组并改编':
+    '作者刚上传一个 COC 模组 PDF，AI 并行生成 3-8 版差异化改编（基调/背景/角色/事件重写）。这一阶段只处理副本本身的独立故事（原剧本有自己的时间线，可以是几小时/几天/几个月/几代人），不提前注入七天死期。作者在挑一版，可能对某一版的基调、角色能力、改编方向不满意。',
+  '🎲 COC 并行跑团': '并行跑团阶段，AI 开多线程跑同模组收集关键 NPC / 事件 / 规则，推演副本原剧本的走向。此阶段不涉及唐迟七天倒计时。',
+  '🫀 魂穿入戏':
+    '【双轨时间线启动点】作者在选宿主（魂穿哪个角色，可以是 PL 调查员或任意 NPC）、切入点（此刻原剧本在什么事件？睁眼第一秒是什么状态？三幕：假死因红鲱鱼→核心反转→规则利用）、求生姿态。七天死期是从这一步才加在唐迟身上的——他的 T-7→T-0 个人倒计时从睁眼启动；同时原剧本事件继续按自己节奏推进。',
+  '🏗️ 副本详设': '作者在做副本详设（基于宿主+切入点+反应的结构化方案，含线索卡/人物关系/伏笔节点），需要兼顾唐迟七天倒计时与原剧本事件并行。',
+  '📅 节奏骨架': '作者在唐迟入戏第1-7天（T-6→T-0，这是唐迟个人倒计时，不是原剧本的 Day1-Day7）上排节拍/事件/气氛曲线/章节分配，同时标注原剧本此刻事件（双轨时间线并行）。',
+  '📝 章前 5 分钟方向卡': '作者在敲定下一章的方向卡（前章锚点/本章目标/必现标记/情绪曲线），day 指唐迟入戏第几天。',
+  '✍️ 章台写作': '作者在某章的 plot→draft→polish→review→finalize 流程中，要注意九项审稿、白描锁、长线伏笔，以及唐迟倒计时/原剧本事件的双轨清晰度。',
+  '🧾 杀青归账': '作者在整卷定稿/归账，检查伏笔兑现、实体归档、审稿结果、T-0代价是否落地。',
+  '🌌 蓝星间章': '作者在写蓝星现实线的间章，交代唐迟身体/精神状态变化、长期能力沉淀。',
+  '📚 旧卷回看': '作者在回看已定稿的旧卷，可能在检查伏笔或想反定稿修改。',
+}
+
+const getPageCtx = useChatContext()
 
 const open = ref(false)
-const inputText = ref('')
-const msgList = ref<Array<{ role: 'ai' | 'user'; text: string }>>([
-  { role: 'ai', text: '你好！有什么想聊的，随时告诉我。' },
-])
+const input = ref('')
+const sending = ref(false)
+const messages = ref<ChatMessage[]>([])
+const scrollRef = ref<HTMLElement | null>(null)
 
-const PHASE_HINTS: Record<string, { hint: string; shortcuts: string[] }> = {
-  setup: {
-    hint: '开书设定阶段：先和 AI 聊聊核心设定、主角起点与终局吧。',
-    shortcuts: ['帮我想一个讣告铁律', '唐迟初始状态该怎么写', '七日后终局怎么收'],
-  },
-  adapt: {
-    hint: '剧本改编阶段：可以让 AI 帮忙改编副本素材，规避版权风险。',
-    shortcuts: ['上传 PDF 改编', '帮我梳理副本要素', '风险点检查'],
-  },
-  adapt_empty: {
-    hint: '新卷待启动：先聊聊新副本的核心诡计与场景吧。',
-    shortcuts: ['新副本灵感', '帮我列 3 个核心场景', '设定副本规则'],
-  },
-  simulate: {
-    hint: '模拟跑团阶段：AI 可以帮你推演多线剧情走向。',
-    shortcuts: ['COC 三版模拟', '主角厄运分支', '关键 NPC 反应'],
-  },
-  embody: {
-    hint: '魂穿设计阶段：把跑团结果落到唐迟第一视角。',
-    shortcuts: ['帮我写魂穿体验', 'SAN 值扣减描写', '身体记忆错位'],
-  },
-  scaffold: {
-    hint: '卷内详设阶段：细化本卷的章节节奏与伏笔分布。',
-    shortcuts: ['拆 7 日节奏', '伏笔分布表', '章末钩子建议'],
-  },
-  rhythm: {
-    hint: '节奏骨架阶段：梳理本卷的峰谷节奏和三线配比。',
-    shortcuts: ['检查三线占比', '高潮位置建议', '节奏饥饿报警'],
-  },
-  briefing: {
-    hint: '章前规划阶段：开写前明确本章任务书。',
-    shortcuts: ['生成本章任务书', '必现标记清单', '上章结尾回顾'],
-  },
-  desk: {
-    hint: '日更阶段：大纲 → 正文 → 润色，一步步推进。',
-    shortcuts: ['续写大纲', '生成正文', '润色本章'],
-  },
-  settle: {
-    hint: '杀青阶段：做卷末总结与状态结算。',
-    shortcuts: ['卷末总结', '污染结算', '主角状态更新'],
-  },
-  interlude: {
-    hint: '蓝星间章：写一段蓝星日常，调节节奏。',
-    shortcuts: ['蓝星日常灵感', '羁绊线推进', '伏笔埋入'],
-  },
-}
-
-const phaseInfo = computed(() => {
-  return PHASE_HINTS[currentPhase.value] ?? {
-    hint: '我是 AI 聊一聊，随时可以和我讨论剧情、设定或写作问题。',
-    shortcuts: ['帮我润色一段', '检查逻辑漏洞', '生成灵感'],
-  }
+// 初次打开时给欢迎语（不是 AI 回复，只显示一次）
+onMounted(() => {
+  messages.value = [{ role: 'assistant', content: '你好！我是这本书的 AI 写作搭子，看到你现在的页面和作品进度。要改什么、吐槽什么、要灵感，直接说就好。' }]
 })
 
-function toggle() {
-  open.value = !open.value
+function toggle() { open.value = !open.value }
+
+function _buildSnapshot() {
+  const phaseFromState = inferPhase()
+  const page = getPageCtx?.() ?? null
+  const phase = page?.phase || phaseFromState
+  const system_hint = page?.system_hint || PHASE_HINTS[phaseFromState] || ''
+  const progress = {
+    project_id: currentProjectId.value || null,
+    volume_no: currentVolumeNo.value,
+    chapter_no: currentChapterNo.value ?? null,
+    volume_kind: currentVolumeKind.value,
+    is_last_chapter: currentIsLastChapter.value,
+    is_reviewing: isReviewingVolume.value,
+  }
+  const context = page?.context || null
+  return { phase, system_hint, progress, context }
 }
 
-function useShortcut(text: string) {
-  inputText.value = text
-}
-
-function doRefresh() {
-  console.debug('[AIChatFloat] refresh requested for phase', currentPhase.value)
-  emit('refresh')
-  ElMessage.info('已请求重新生成')
-}
-
-function doNote() {
-  inputText.value = '记一笔：'
-}
-
-const msgListEl = ref<HTMLElement | null>(null)
-
-async function scrollToBottom() {
+async function _scrollBottom() {
   await nextTick()
-  if (msgListEl.value) {
-    msgListEl.value.scrollTop = msgListEl.value.scrollHeight
+  if (scrollRef.value) scrollRef.value.scrollTop = scrollRef.value.scrollHeight
+}
+
+async function send() {
+  const content = input.value.trim()
+  if (!content || sending.value) return
+  messages.value.push({ role: 'user', content })
+  input.value = ''
+  sending.value = true
+  await _scrollBottom()
+  // 先放一条 thinking 占位
+  const thinkIdx = messages.value.length
+  messages.value.push({ role: 'assistant', content: '思考中…' })
+  await _scrollBottom()
+  try {
+    const { phase, system_hint, progress, context } = _buildSnapshot()
+    // 只送最近 30 条，避免爆炸
+    const msgs = messages.value.slice(0, -1).slice(-30) // 去掉 thinking 占位
+    const resp = await chatApi.send({ messages: msgs, phase, system_hint, progress, context })
+    messages.value[thinkIdx] = { role: 'assistant', content: resp.text }
+  } catch (e: any) {
+    messages.value[thinkIdx] = { role: 'assistant', content: `（调用失败：${e?.message || e}）` }
+    ElMessage.error('AI 调用失败')
+  } finally {
+    sending.value = false
+    _scrollBottom()
   }
 }
 
-function send() {
-  const text = inputText.value.trim()
-  if (!text) return
-  msgList.value.push({ role: 'user', text })
-  inputText.value = ''
-  scrollToBottom()
-  // mock 回复
-  setTimeout(() => {
-    msgList.value.push({ role: 'ai', text: '这个问题我记下了，稍后帮你处理~' })
-    scrollToBottom()
-  }, 1000)
+function clearAll() {
+  messages.value = [{ role: 'assistant', content: '（已清空对话，我继续盯着当前页面。有新问题直接说。）' }]
 }
 
-function onKeydown(e: KeyboardEvent) {
+function onKey(e: KeyboardEvent) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     send()
   }
-  // Shift+Enter 默认行为是换行，不需要处理
 }
+
+watch(open, (v) => { if (v) _scrollBottom() })
+
+const placeholder = computed(() => {
+  const { phase } = _buildSnapshot()
+  return `在【${phase}】阶段有什么想聊的？（Enter 发送，Shift+Enter 换行）`
+})
 </script>
 
 <template>
-  <div class="ai-chat-float">
-    <Transition name="fade">
+  <div class="ai-float-root">
+    <Transition name="ai-pop">
       <div v-if="open" class="ai-panel">
-        <div class="ai-panel-header">
-          <span>💬 AI 聊一聊</span>
-          <el-button :icon="Close" circle size="small" text @click="open = false" />
-        </div>
-        <div class="ai-panel-body">
-          <div class="ai-hint">
+        <div class="ai-head">
+          <div class="ai-head-title">
             <el-icon><ChatDotRound /></el-icon>
-            <span>{{ phaseInfo.hint }}</span>
+            <span>AI 写作搭子</span>
           </div>
-          <div class="ai-shortcuts">
-            <el-tag
-              v-for="s in phaseInfo.shortcuts"
-              :key="s"
-              class="sc-tag"
-              effect="plain"
-              type="primary"
-              @click="useShortcut(s)"
-            >
-              {{ s }}
-            </el-tag>
-            <el-tag
-              class="sc-tag action-tag"
-              effect="plain"
-              type="warning"
-              @click="doRefresh"
-            >
-              🔄 重新生成
-            </el-tag>
-            <el-tag
-              class="sc-tag action-tag"
-              effect="plain"
-              type="success"
-              @click="doNote"
-            >
-              📝 帮我记一笔
-            </el-tag>
-          </div>
-          <div class="ai-msg-list" ref="msgListEl">
-            <div
-              v-for="(m, idx) in msgList"
-              :key="idx"
-              class="ai-msg"
-              :class="m.role"
-            >
-              <div class="ai-msg-bubble">{{ m.text }}</div>
-            </div>
+          <div class="ai-head-actions">
+            <el-button size="small" text @click="clearAll">清空</el-button>
+            <el-button size="small" text :icon="Close" @click="toggle" />
           </div>
         </div>
-        <div class="ai-panel-footer">
+        <div class="ai-scroll" ref="scrollRef">
+          <div
+            v-for="(m, i) in messages"
+            :key="i"
+            :class="['ai-bubble', m.role === 'user' ? 'ai-user' : 'ai-assistant']"
+          >{{ m.content }}</div>
+        </div>
+        <div class="ai-input">
           <el-input
-            v-model="inputText"
+            v-model="input"
             type="textarea"
-            :rows="3"
-            placeholder="输入消息，Enter 发送，Shift+Enter 换行"
+            :rows="2"
             resize="none"
-            @keydown="onKeydown"
+            :placeholder="placeholder"
+            @keydown="onKey"
           />
-          <div class="ai-send-row">
-            <el-button type="primary" size="small" @click="send" :disabled="!inputText.trim()">发送</el-button>
-          </div>
+          <el-button
+            class="ai-send"
+            type="primary"
+            :loading="sending"
+            :disabled="!input.trim()"
+            @click="send"
+          >
+            发送
+          </el-button>
         </div>
       </div>
     </Transition>
 
-    <el-button
-      v-if="!open"
-      class="ai-fab"
-      type="primary"
-      :icon="ChatDotRound"
-      circle
-      size="large"
-      @click="toggle"
-    />
+    <button class="ai-fab" :class="{ 'ai-fab--open': open }" @click="toggle" title="AI 写搭">
+      <el-icon v-if="!open"><Promotion /></el-icon>
+      <el-icon v-else><Close /></el-icon>
+    </button>
   </div>
 </template>
 
 <style scoped>
-.ai-chat-float {
+.ai-float-root {
   position: fixed;
-  right: 24px;
-  bottom: 24px;
-  z-index: 2000;
+  right: 22px;
+  bottom: 22px;
+  z-index: 9998;
 }
 .ai-fab {
-  width: 52px;
-  height: 52px;
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+  border: none;
+  background: linear-gradient(135deg, #409eff, #6b5bff);
+  color: #fff;
   font-size: 22px;
-  box-shadow: 0 4px 16px rgba(64, 158, 255, 0.35);
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(64,158,255,0.45);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform .2s, box-shadow .2s;
 }
+.ai-fab:hover { transform: translateY(-2px); box-shadow: 0 10px 24px rgba(64,158,255,0.5); }
+.ai-fab--open { background: linear-gradient(135deg,#f56c6c,#e6a23c); }
+
 .ai-panel {
-  width: 380px;
-  height: 480px;
+  position: absolute;
+  right: 0;
+  bottom: 70px;
+  width: 440px;
+  max-width: calc(100vw - 40px);
+  height: 580px;
+  max-height: calc(100vh - 100px);
   background: #fff;
-  border-radius: 12px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+  border-radius: 14px;
+  box-shadow: 0 14px 40px rgba(0,0,0,0.18);
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  margin-bottom: 12px;
+  border: 1px solid #ebeef5;
 }
-.ai-panel-header {
+.ai-head {
+  padding: 10px 14px;
+  border-bottom: 1px solid #f0f2f5;
+  background: linear-gradient(90deg, #ecf5ff 0%, #f4ecff 100%);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px;
-  border-bottom: 1px solid #ebeef5;
-  font-weight: 600;
-  font-size: 14px;
 }
-.ai-panel-body {
+.ai-head-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: #303133;
+}
+.ai-head-actions { display: flex; gap: 4px; }
+
+.ai-scroll {
   flex: 1;
   overflow-y: auto;
-  padding: 12px 16px;
-  background: #f7f8fa;
-}
-.ai-hint {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-  font-size: 12px;
-  color: #606266;
-  background: #ecf5ff;
-  padding: 8px 10px;
-  border-radius: 8px;
-  margin-bottom: 10px;
-  line-height: 1.5;
-}
-.ai-shortcuts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 12px;
-}
-.sc-tag {
-  cursor: pointer;
-  font-size: 12px;
-}
-.sc-tag:hover {
-  background: #ecf5ff;
-}
-.action-tag:hover {
-  opacity: 0.85;
-}
-.ai-msg-list {
+  padding: 14px;
+  background: #fafbfc;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
-.ai-msg {
-  display: flex;
-}
-.ai-msg.ai {
-  justify-content: flex-start;
-}
-.ai-msg.user {
-  justify-content: flex-end;
-}
-.ai-msg-bubble {
-  max-width: 80%;
-  padding: 8px 12px;
+.ai-bubble {
+  max-width: 85%;
+  padding: 9px 12px;
   border-radius: 10px;
-  font-size: 13px;
-  line-height: 1.5;
-  background: #fff;
-  border: 1px solid #ebeef5;
-  word-break: break-word;
+  font-size: 14px;
+  line-height: 1.65;
   white-space: pre-wrap;
+  word-break: break-word;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.04);
 }
-.ai-msg.user .ai-msg-bubble {
+.ai-user {
+  align-self: flex-end;
   background: #409eff;
   color: #fff;
-  border-color: #409eff;
+  border-bottom-right-radius: 3px;
 }
-.ai-panel-footer {
-  border-top: 1px solid #ebeef5;
-  padding: 10px 12px;
+.ai-assistant {
+  align-self: flex-start;
   background: #fff;
-}
-.ai-send-row {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 6px;
+  color: #303133;
+  border: 1px solid #ebeef5;
+  border-bottom-left-radius: 3px;
 }
 
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.2s, transform 0.2s;
+.ai-input {
+  padding: 10px 12px;
+  border-top: 1px solid #f0f2f5;
+  background: #fff;
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
 }
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
-  transform: translateY(10px) scale(0.95);
-}
+.ai-input :deep(.el-textarea__inner) { font-size: 14px; line-height: 1.55; }
+.ai-send { flex-shrink: 0; height: 40px; }
+
+.ai-pop-enter-active, .ai-pop-leave-active { transition: all .2s ease; transform-origin: bottom right; }
+.ai-pop-enter-from, .ai-pop-leave-to { opacity: 0; transform: scale(0.85) translateY(10px); }
 </style>

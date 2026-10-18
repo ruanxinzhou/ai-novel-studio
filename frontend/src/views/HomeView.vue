@@ -283,6 +283,17 @@ async function onBackToAdapt() {
   }
 }
 
+async function onBackToSimulate() {
+  // EmbodyView 内部已经 POST 过 back-to-simulate 端点清了魂穿产出，
+  // 这里只要按当前卷号刷新阶段状态即可，不能 loadPhase()（会跳到最新活跃卷）。
+  const vn = currentVolumeNo.value
+  if (!vn) {
+    await loadPhase()
+    return
+  }
+  await loadPhase(vn)
+}
+
 onMounted(() => {
   if (currentProjectId.value) {
     loadPhase()
@@ -348,7 +359,7 @@ defineExpose({ refresh: loadPhase })
             v-else-if="phase === 'embody'"
             :vol-no="currentVolumeNo"
             @done="loadPhase"
-            @back-to-simulate="loadPhase"
+            @back-to-simulate="onBackToSimulate"
           />
 
           <!-- scaffold 阶段：副本详设 6 卡 -->

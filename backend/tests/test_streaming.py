@@ -263,4 +263,4 @@ class TestDeskRunStreamApi:
         with sse_client.stream("POST", f"/api/projects/{pid}/desk/1/run/stream",
                                json={"stage": "plot"}) as r:
             body = "".join(chunk for chunk in r.iter_text())
-        assert "event: fail" in body and "故事架构" in body
+        assert "event: fail" in body and "方向卡" in body

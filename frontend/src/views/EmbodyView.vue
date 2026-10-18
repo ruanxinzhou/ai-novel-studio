@@ -585,8 +585,8 @@ const activeStep = computed(() => Math.min(step.value, 4))
     <!-- Step 0：选身体 -->
     <div v-if="step === 0" class="embody-step">
       <h3>Step 1 · 选一具身体</h3>
-      <p class="hint">挑一个倒霉蛋——唐迟穿进去的时候，他/她正处于最接近死亡/崩溃的那个瞬间。可以 reroll 整盘重抽，也可以自定义/编辑某一版。</p>
-      <div v-if="loadingCandidates" class="loading-hint">正在打捞副本里最倒霉的几位……</div>
+      <p class="hint">挑一个倒霉蛋——唐迟睁眼进入TA时，距离TA在原剧本里命定的死劫正好还有<strong>七天</strong>（唐迟自己的 T-7→T-0 倒计时从此刻启动）。这时阴谋可能还在酝酿，诅咒可能刚露苗头，也可能死劫的锁链已经悄悄套上脖子；具体发生什么要看TA的命格。可以 reroll 整盘重抽，也可以自定义/编辑某一版。</p>
+      <div v-if="loadingCandidates" class="loading-hint">正在打捞副本里七天后必死的几位倒霉蛋……</div>
       <SushiCards
         v-else
         mode="ensemble"

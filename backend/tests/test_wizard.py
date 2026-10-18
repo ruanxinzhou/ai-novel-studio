@@ -42,20 +42,19 @@ def _cards_json() -> str:
     ], ensure_ascii=False)
 
 
+_REVIEW_ALL9 = ["剧情逻辑", "人物目标", "情绪关系", "身体信息", "场景转场",
+                "章末承接", "跨章联结", "信息揭露节奏", "克苏鲁白描"]
+
 _REVIEW_PASS = json.dumps({
-    "items": [{"name": n, "status": "稳", "problem": ""}
-              for n in ["剧情逻辑", "人物目标", "情绪关系", "身体信息", "场景转场", "章末承接", "跨章联结"]],
+    "items": [{"name": n, "status": "稳", "problem": ""} for n in _REVIEW_ALL9],
     "summary": "全稳",
 }, ensure_ascii=False)
 
 _REVIEW_BLOCKED = json.dumps({
     "items": [{"name": "剧情逻辑", "status": "不稳", "problem": "因果断裂"},
               {"name": "人物目标", "status": "不稳", "problem": "动机不明"},
-              {"name": "情绪关系", "status": "稳", "problem": ""},
-              {"name": "身体信息", "status": "稳", "problem": ""},
-              {"name": "场景转场", "status": "稳", "problem": ""},
-              {"name": "章末承接", "status": "稳", "problem": ""},
-              {"name": "跨章联结", "status": "稳", "problem": ""}],
+              *[{"name": n, "status": "稳", "problem": ""}
+                for n in _REVIEW_ALL9 if n not in ("剧情逻辑", "人物目标")]],
     "summary": "两项不稳",
 }, ensure_ascii=False)
 
@@ -257,7 +256,7 @@ class TestDeskStore:
 
 class TestRunChapterStage:
     def test_plot_requires_outline(self, env):
-        with pytest.raises(ValueError, match="故事架构"):
+        with pytest.raises(ValueError, match="大纲/方向卡中未找到第"):
             run_chapter_stage(FakeProseProvider(), env.prompts, env.project, env.pid,
                               env.markers, env.wizard, env.desk, 1, "plot")
 
@@ -546,7 +545,7 @@ class TestDeskApi:
         monkeypatch.setattr("app.api.main.get_router", lambda: FakeRouter("x"))
         r = client.post(f"/api/projects/{pid}/desk/1/run", json={"stage": "plot"})
         assert r.status_code == 422
-        assert "故事架构" in r.json()["detail"]
+        assert "方向卡" in r.json()["detail"]
 
     def test_desk_chapter_view_and_manual_edit(self, client, monkeypatch):
         pid = self._setup_book(client, monkeypatch)

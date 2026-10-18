@@ -13,6 +13,7 @@ from app.review.reviewer import (
     ITEM_NAMES,
     ChapterReview,
     ReviewItem,
+    find_cliche_horror_hits,
     review_chapter,
 )
 from app.review.book_checks import book_review_checks
@@ -30,6 +31,7 @@ __all__ = [
     "ReviewItem",
     "book_review_checks",
     "extract_markers",
+    "find_cliche_horror_hits",
     "markers_material",
     "review_chapter",
 ]

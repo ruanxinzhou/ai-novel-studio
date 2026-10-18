@@ -485,22 +485,22 @@ watch(() => props.volNo, () => {
         @custom-write="onCustomWrite"
         @edit-card="onEditCard"
       >
-        <template #item="{ it }">
+        <template #item="{ item: it }">
           <div class="variant-meta-row">
-            <span class="meta-chip">幸存者 {{ (it.survivors || []).length }} 人</span>
-            <span class="meta-chip" v-if="it.turns">回合 {{ it.turns }}</span>
+            <span class="meta-chip">幸存者 {{ (it?.survivors || []).length }} 人</span>
+            <span class="meta-chip" v-if="it?.turns">回合 {{ it.turns }}</span>
             <el-button
               link
               type="info"
               size="small"
-              @click="toggleTranscript(it.vid)"
-            >{{ expandedTranscript === it.vid ? '收起跑团实况' : '查看跑团实况（素材）' }}</el-button>
+              @click="toggleTranscript(it?.vid)"
+            >{{ expandedTranscript === it?.vid ? '收起跑团实况' : '查看跑团实况（素材）' }}</el-button>
           </div>
           <el-collapse-transition>
-            <div v-if="expandedTranscript === it.vid" class="variant-transcript">
+            <div v-if="expandedTranscript === it?.vid" class="variant-transcript">
               <div class="mat-hint">以下为完整 KP/PL 跑团日志，作为小说化梗概的原始素材；选版时以梗概为准。</div>
-              <pre class="transcript-pre">{{ it.transcript || '（无回合日志）' }}</pre>
-              <div v-if="it.state_error" class="state-error">state.error: {{ it.state_error }}</div>
+              <pre class="transcript-pre">{{ it?.transcript || '（无回合日志）' }}</pre>
+              <div v-if="it?.state_error" class="state-error">state.error: {{ it.state_error }}</div>
             </div>
           </el-collapse-transition>
         </template>

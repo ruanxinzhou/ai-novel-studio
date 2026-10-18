@@ -195,6 +195,142 @@ async function addEntity() {
   }
 }
 
+// ============== 完整实体库 Dialog ==============
+const vaultDialogOpen = ref(false)
+const vaultLoading = ref(false)
+const vaultFilter = ref({ type: '', status: '', keyword: '' })
+const vaultList = ref<EntityInfo[]>([])
+const vaultCounts = ref<Record<string, number>>({})
+const vaultSelected = ref<EntityInfo | null>(null)
+const vaultEditing = ref(false)
+const vaultForm = ref<{ name: string; summary: string; details: string; status: string; type: string }>({
+  name: '', summary: '', details: '', status: 'active', type: 'character',
+})
+const vaultSaving = ref(false)
+
+async function loadVault() {
+  if (!currentProjectId.value) return
+  vaultLoading.value = true
+  try {
+    const q: Record<string, string> = {}
+    if (vaultFilter.value.type) q.type = vaultFilter.value.type
+    if (vaultFilter.value.status) q.status = vaultFilter.value.status
+    if (vaultFilter.value.keyword) q.keyword = vaultFilter.value.keyword
+    const r = await entitiesApi.list(currentProjectId.value, q)
+    vaultList.value = r.entities ?? []
+    vaultCounts.value = r.counts ?? {}
+    if (vaultSelected.value) {
+      const still = vaultList.value.find((e) => e.id === vaultSelected.value!.id)
+      vaultSelected.value = still ?? null
+    }
+  } catch (e: any) {
+    ElMessage.error(`加载实体库失败: ${e?.message ?? e}`)
+  } finally {
+    vaultLoading.value = false
+  }
+}
+
+function openVault() {
+  vaultDialogOpen.value = true
+  vaultFilter.value = { type: '', status: '', keyword: '' }
+  vaultSelected.value = null
+  vaultEditing.value = false
+  loadVault()
+}
+
+function selectEntity(e: EntityInfo) {
+  vaultSelected.value = e
+  vaultEditing.value = false
+}
+
+function startEdit() {
+  if (!vaultSelected.value) return
+  const e = vaultSelected.value
+  vaultForm.value = {
+    name: e.name, summary: e.summary ?? '', details: e.details ?? '',
+    status: e.status, type: e.type,
+  }
+  vaultEditing.value = true
+}
+
+async function saveEntity() {
+  if (!currentProjectId.value || !vaultSelected.value) return
+  vaultSaving.value = true
+  try {
+    const updated = await entitiesApi.update(
+      currentProjectId.value,
+      vaultSelected.value.id,
+      {
+        name: vaultForm.value.name,
+        summary: vaultForm.value.summary,
+        details: vaultForm.value.details,
+        status: vaultForm.value.status,
+      },
+    )
+    Object.assign(vaultSelected.value, updated)
+    vaultEditing.value = false
+    ElMessage.success('已保存')
+    await Promise.all([loadVault(), loadEntities()])
+  } catch (e: any) {
+    ElMessage.error(`保存失败: ${e?.message ?? e}`)
+  } finally {
+    vaultSaving.value = false
+  }
+}
+
+async function removeEntity() {
+  if (!currentProjectId.value || !vaultSelected.value) return
+  const e = vaultSelected.value
+  try {
+    await ElMessageBox.confirm(`确定删除实体「${e.name}」？`, '删除实体', {
+      confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning',
+    })
+  } catch {
+    return
+  }
+  try {
+    await entitiesApi.remove(currentProjectId.value, e.id)
+    ElMessage.success('已删除')
+    vaultSelected.value = null
+    await Promise.all([loadVault(), loadEntities()])
+  } catch (e2: any) {
+    ElMessage.error(`删除失败: ${e2?.message ?? e2}`)
+  }
+}
+
+async function addVaultEntity() {
+  if (!currentProjectId.value) return
+  try {
+    const { value: name } = await ElMessageBox.prompt('实体名称', '新增实体', {
+      confirmButtonText: '下一步', cancelButtonText: '取消',
+      inputPattern: /.+/, inputErrorMessage: '名称不能为空',
+    })
+    const typeOptions = Object.entries(ENTITY_TYPE_LABELS)
+      .map(([k, v], i) => `${i + 1}. ${v} (${k})`).join('\n')
+    const { value: typeChoice } = await ElMessageBox.prompt(
+      `选择类型（输入序号或英文 key）:\n${typeOptions}`,
+      '新增实体',
+      { confirmButtonText: '添加', cancelButtonText: '取消', inputValue: '1' },
+    )
+    let type = (typeChoice ?? '').trim()
+    const idx = Number(type)
+    const typeKeys = Object.keys(ENTITY_TYPE_LABELS)
+    if (!Number.isNaN(idx) && idx >= 1 && idx <= typeKeys.length) {
+      type = typeKeys[idx - 1]
+    }
+    if (!ENTITY_TYPE_LABELS[type]) {
+      ElMessage.error('无效的类型')
+      return
+    }
+    await entitiesApi.add(currentProjectId.value, { name, type, status: 'active' })
+    ElMessage.success('已添加')
+    await Promise.all([loadVault(), loadEntities()])
+  } catch {
+    /* cancel */
+  }
+}
+
+
 // ============== 资料 ==============
 const corpusTypes = ref<{ type: string; count: number }[]>([])
 const corpusTags = ref<{ tag: string; count: number }[]>([])
@@ -335,7 +471,7 @@ function layerCompleted(layer: string): boolean {
 </script>
 
 <template>
-  <el-drawer v-model="open" title="设置与工具" direction="rtl" size="400px">
+  <el-drawer v-model="open" title="设置与工具" direction="rtl" size="480px">
     <el-collapse v-model="activeNames">
       <!-- 📖 书稿 -->
       <el-collapse-item name="manuscript" title="📖 书稿">
@@ -376,29 +512,35 @@ function layerCompleted(layer: string): boolean {
               ➕ 快速添加
             </el-button>
           </el-tooltip>
-          <el-button size="small" text disabled>完整实体库（Task 14 后开放）</el-button>
+          <el-button size="small" type="primary" plain @click="openVault">
+            📖 打开实体库
+          </el-button>
         </div>
-        <el-table
+        <div
           v-loading="loading.entities"
-          :data="entities"
-          size="small"
-          stripe
-          style="width: 100%"
-          max-height="240"
+          class="entity-mini-list"
+          style="max-height: 320px; overflow-y: auto; border: 1px solid #ebeef5; border-radius: 4px"
         >
-          <el-table-column prop="name" label="名称" min-width="100" show-overflow-tooltip />
-          <el-table-column label="类型" width="70">
-            <template #default="{ row }">
-              <el-tag size="small" type="info">{{ ENTITY_TYPE_LABELS[row.type] ?? row.type }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="状态" width="70">
-            <template #default="{ row }">
-              <el-tag size="small">{{ ENTITY_STATUS_LABELS[row.status] ?? row.status }}</el-tag>
-            </template>
-          </el-table-column>
-        </el-table>
-        <div class="empty-hint" v-if="!loading.entities && entities.length === 0">暂无实体</div>
+          <div v-if="!loading.entities && entities.length === 0" class="empty-hint" style="padding: 16px">暂无实体</div>
+          <div
+            v-for="e in entities"
+            :key="e.id"
+            style="padding: 8px 10px; border-bottom: 1px solid #f5f7fa"
+          >
+            <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap">
+              <b style="font-size: 13px">{{ e.name }}</b>
+              <el-tag size="small" type="info">{{ ENTITY_TYPE_LABELS[e.type] ?? e.type }}</el-tag>
+              <el-tag size="small">{{ ENTITY_STATUS_LABELS[e.status] ?? e.status }}</el-tag>
+              <span v-if="(e.appearances ?? []).length" style="font-size: 11px; color: #909399; margin-left: auto">
+                出场 {{ e.appearances.length }} 章
+              </span>
+            </div>
+            <div
+              v-if="e.summary"
+              style="font-size: 12px; color: #606266; margin-top: 4px; line-height: 1.5; white-space: pre-wrap; word-break: break-word"
+            >{{ e.summary }}</div>
+          </div>
+        </div>
       </el-collapse-item>
 
       <!-- 📚 资料 -->
@@ -518,6 +660,119 @@ function layerCompleted(layer: string): boolean {
       </el-collapse-item>
     </el-collapse>
   </el-drawer>
+
+  <!-- 实体库 Dialog -->
+  <el-dialog v-model="vaultDialogOpen" title="🗂 实体库" width="960px" top="5vh" destroy-on-close>
+    <div style="display: flex; gap: 12px; margin-bottom: 10px; align-items: center; flex-wrap: wrap">
+      <el-input v-model="vaultFilter.keyword" placeholder="搜索名称/简介" clearable style="width: 220px" @keyup.enter="loadVault" />
+      <el-select v-model="vaultFilter.type" placeholder="类型" clearable style="width: 120px" @change="loadVault">
+        <el-option v-for="(label, k) in ENTITY_TYPE_LABELS" :key="k" :label="label" :value="k" />
+      </el-select>
+      <el-select v-model="vaultFilter.status" placeholder="状态" clearable style="width: 120px" @change="loadVault">
+        <el-option v-for="(label, k) in ENTITY_STATUS_LABELS" :key="k" :label="label" :value="k" />
+      </el-select>
+      <el-button size="small" @click="loadVault">筛选</el-button>
+      <span style="flex: 1" />
+      <span style="font-size: 12px; color: #909399">
+        共 {{ vaultList.length }} 条 ·
+        <span v-for="(label, k) in ENTITY_TYPE_LABELS" :key="k" style="margin-left: 6px">
+          {{ label }} {{ vaultCounts[k] ?? 0 }}
+        </span>
+      </span>
+      <el-button size="small" type="primary" @click="addVaultEntity">➕ 新增</el-button>
+    </div>
+
+    <div v-loading="vaultLoading" style="display: flex; gap: 12px; height: 480px">
+      <!-- 左侧列表 -->
+      <div style="flex: 1; border: 1px solid #ebeef5; border-radius: 4px; overflow: auto">
+        <div
+          v-for="e in vaultList"
+          :key="e.id"
+          @click="selectEntity(e)"
+          :style="{
+            padding: '10px 12px',
+            cursor: 'pointer',
+            borderBottom: '1px solid #f5f7fa',
+            background: vaultSelected?.id === e.id ? '#ecf5ff' : '#fff',
+          }"
+        >
+          <div style="display: flex; gap: 6px; align-items: center">
+            <b>{{ e.name }}</b>
+            <el-tag size="small" type="info">{{ ENTITY_TYPE_LABELS[e.type] ?? e.type }}</el-tag>
+            <el-tag size="small">{{ ENTITY_STATUS_LABELS[e.status] ?? e.status }}</el-tag>
+          </div>
+          <div v-if="e.summary" style="font-size: 12px; color: #909399; margin-top: 4px; line-height: 1.4">
+            {{ e.summary.slice(0, 80) }}{{ e.summary.length > 80 ? '…' : '' }}
+          </div>
+          <div style="font-size: 11px; color: #c0c4cc; margin-top: 2px">
+            出场章：{{ (e.appearances ?? []).length ? e.appearances.join(', ') : '未出场' }} · 更新 {{ e.updated_at?.slice(0, 16).replace('T', ' ') }}
+          </div>
+        </div>
+        <el-empty v-if="!vaultLoading && vaultList.length === 0" description="暂无实体" :image-size="80" />
+      </div>
+
+      <!-- 右侧详情 -->
+      <div style="flex: 1; border: 1px solid #ebeef5; border-radius: 4px; padding: 12px; overflow: auto">
+        <el-empty v-if="!vaultSelected" description="选择左侧实体查看/编辑" :image-size="80" />
+        <template v-else>
+          <div v-if="!vaultEditing">
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px">
+              <h3 style="margin: 0">{{ vaultSelected.name }}</h3>
+              <el-tag size="small" type="info">{{ ENTITY_TYPE_LABELS[vaultSelected.type] ?? vaultSelected.type }}</el-tag>
+              <el-tag size="small">{{ ENTITY_STATUS_LABELS[vaultSelected.status] ?? vaultSelected.status }}</el-tag>
+            </div>
+            <div style="font-size: 12px; color: #909399; margin-bottom: 10px">
+              来源：{{ vaultSelected.source || '-' }} ·
+              出场章：{{ (vaultSelected.appearances ?? []).length ? vaultSelected.appearances.join(', ') : '未出场' }} ·
+              创建 {{ vaultSelected.created_at?.slice(0, 10) }}
+            </div>
+            <div style="margin-bottom: 10px">
+              <b>简介</b>
+              <div style="white-space: pre-wrap; margin-top: 4px; font-size: 13px; color: #606266; line-height: 1.5">
+                {{ vaultSelected.summary || '（未填）' }}
+              </div>
+            </div>
+            <div style="margin-bottom: 10px">
+              <b>细节档案</b>
+              <div style="white-space: pre-wrap; margin-top: 4px; font-size: 13px; color: #606266; line-height: 1.5">
+                {{ vaultSelected.details || '（未填）' }}
+              </div>
+            </div>
+            <div style="display: flex; gap: 8px; margin-top: 12px">
+              <el-button size="small" type="primary" @click="startEdit">编辑</el-button>
+              <el-button size="small" type="danger" plain @click="removeEntity">删除</el-button>
+            </div>
+          </div>
+
+          <el-form v-else label-position="top" size="small">
+            <el-form-item label="名称">
+              <el-input v-model="vaultForm.name" />
+            </el-form-item>
+            <el-form-item label="类型">
+              <el-select v-model="vaultForm.type" disabled>
+                <el-option v-for="(label, k) in ENTITY_TYPE_LABELS" :key="k" :label="label" :value="k" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="状态">
+              <el-select v-model="vaultForm.status">
+                <el-option v-for="(label, k) in ENTITY_STATUS_LABELS" :key="k" :label="label" :value="k" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="简介">
+              <el-input v-model="vaultForm.summary" type="textarea" :rows="3" />
+            </el-form-item>
+            <el-form-item label="细节档案">
+              <el-input v-model="vaultForm.details" type="textarea" :rows="8" placeholder="外貌、关系、伏笔、性格、线索…" />
+            </el-form-item>
+            <div style="display: flex; gap: 8px">
+              <el-button type="primary" :loading="vaultSaving" @click="saveEntity">保存</el-button>
+              <el-button @click="vaultEditing = false">取消</el-button>
+            </div>
+          </el-form>
+        </template>
+      </div>
+    </div>
+  </el-dialog>
 </template>
 
 <style scoped>

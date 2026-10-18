@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Loading, UploadFilled, Document } from '@element-plus/icons-vue'
+import { Loading, UploadFilled, Document, WarningFilled } from '@element-plus/icons-vue'
 import SushiCards from '../components/SushiCards.vue'
 import { adaptApi } from '../api'
 import type { Job } from '../api'
 import { currentProjectId } from '../state'
+import { provideChatContext } from '../chatContext'
 
 const props = defineProps<{
   volNo: number
@@ -158,6 +159,17 @@ function onFilePick(uploadFile: any) {
   file.value = f
 }
 
+function onRemoveFile() {
+  file.value = null
+}
+
+function formatSize(bytes?: number): string {
+  if (!bytes || bytes < 0) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`
+}
+
 /** 内部：启动 pdf5（允许传入额外 directive 追加到 userHint） */
 async function _runPdf5(extraDirective = '') {
   if (!file.value) { ElMessage.warning('请先选择 PDF 文件'); return }
@@ -217,7 +229,11 @@ async function onPickAdapt(id: string | null, idx?: number) {
 // ---- SushiCards 迭代事件 ----
 function onRerun(idx: number | null, directive: string) {
   if (!file.value) {
-    ElMessage.warning('需要有原始 PDF 才能重抽。请先在上传区选择 PDF。')
+    ElMessage.warning('需要有原始 PDF 才能重抽。请在上方文件条选择一个 PDF。')
+    if (uiState.value !== 'upload') {
+      // 保留已生成的 adaptations，跳到上传页让用户选 PDF；选完再点「开始并行改编」会重抽
+      uiState.value = 'upload'
+    }
     return
   }
   const extra = directive
@@ -272,6 +288,56 @@ function onNextStage() {
   emit('done')
 }
 
+// 向悬浮窗 AI 注册当前页上下文（必须在 setup 同步阶段 provide）
+provideChatContext(() => {
+  const picked = adaptations.value.find((a: any) => a.id === pickedAdaptId.value) || null
+  const others = adaptations.value
+    .filter((a: any) => a.id !== pickedAdaptId.value)
+    .map((a: any, i: number) => ({
+      idx: i + 1,
+      title: a?.title || a?.axis || `第${i + 1}版`,
+      tone: a?.tone || a?.axis || '',
+      summary: (a?.text || a?.summary || '').slice(0, 600),
+    }))
+  const focus = picked
+    ? {
+        title: picked?.title || picked?.axis || '选中版',
+        tone: picked?.tone || picked?.axis || '',
+        player_cards_count: Array.isArray(picked?.player_cards) ? picked.player_cards.length : 0,
+        changed_elements_count: Array.isArray(picked?.changed_elements) ? picked.changed_elements.length : 0,
+        full_text: picked?.text || picked?.summary || '',
+        player_cards: picked?.player_cards || [],
+        changed_elements: picked?.changed_elements || [],
+      }
+    : null
+  return {
+    phase: '📕 上传 COC 模组并改编',
+    system_hint:
+      '作者在比对 3-8 版 AI 并行改编方案。他可能在吐槽某一版的能力设计/基调/白描。'
+      + '回答时先从 context.focus 或 context.other_adaptations 里定位他在说的是哪一版，给具体可落地的改写（含至少一段替换示范），'
+      + '尤其要遵守铁律：「主角替换获得的能力必须长线复用，不能只针对单本剧本」——要给未来剧本还能用、能进化/反噬的能力方向。',
+    context: {
+      volume_no: realVolNo.value || props.volNo,
+      ui_state: uiState.value,
+      pdf: file.value ? { name: file.value.name, size: file.value.size } : null,
+      user_hint: userHint.value || null,
+      adaptations_count: adaptations.value.length,
+      picked_idx: pickedAdaptId.value
+        ? adaptations.value.findIndex((a: any) => a.id === pickedAdaptId.value) + 1
+        : null,
+      focus,
+      other_adaptations: picked
+        ? others
+        : adaptations.value.map((a: any, i: number) => ({
+            idx: i + 1,
+            title: a?.title || a?.axis || `第${i + 1}版`,
+            tone: a?.tone || a?.axis || '',
+            summary: (a?.text || a?.summary || '').slice(0, 400),
+          })),
+    },
+  }
+})
+
 onMounted(async () => {
   if (isEmptyVol.value) {
     await ensureVolume()
@@ -297,6 +363,31 @@ onUnmounted(() => {
       <p class="adapt-subtitle">上传官方/第三方 COC 模组 PDF，AI 会并行跑 5 版差异化改编，避开版权风险</p>
     </div>
 
+    <!-- 常驻文件条：所有状态下都可见，用于看当前 PDF/重传 PDF -->
+    <div class="adapt-file-bar">
+      <el-upload
+        accept=".pdf"
+        :auto-upload="false"
+        :show-file-list="false"
+        :on-change="onFilePick"
+        class="adapt-file-upload"
+      >
+        <el-button size="small" type="primary" plain :icon="UploadFilled">
+          {{ file ? '重新选择 PDF' : '选择 PDF 文件' }}
+        </el-button>
+      </el-upload>
+      <div v-if="file" class="adapt-file-info-inline">
+        <el-icon><Document /></el-icon>
+        <span class="adapt-file-name" :title="file.name">{{ file.name }}</span>
+        <span class="adapt-file-size">({{ formatSize(file.size) }})</span>
+        <el-button size="small" text type="danger" @click="onRemoveFile">移除</el-button>
+      </div>
+      <div v-else class="adapt-file-missing">
+        <el-icon><WarningFilled /></el-icon>
+        <span>未选择 PDF，请先选一个模组文件再开始或重抽</span>
+      </div>
+    </div>
+
     <!-- loading -->
     <div v-if="uiState === 'loading'" class="adapt-loading">
       <el-icon class="is-loading"><Loading /></el-icon>
@@ -319,11 +410,6 @@ onUnmounted(() => {
           <div class="el-upload__tip">仅支持 .pdf 文件，最大 20MB</div>
         </template>
       </el-upload>
-      <div v-if="file" class="adapt-file-info">
-        <el-icon><Document /></el-icon>
-        <span>{{ file.name }}</span>
-        <el-button size="small" text @click="file = null">移除</el-button>
-      </div>
 
       <el-input
         v-model="userHint"
@@ -371,9 +457,37 @@ onUnmounted(() => {
         >
           <template #item="{ item }">
             <div v-if="item.changed_elements?.length" class="meta-line">
-              <span v-for="(c, i) in item.changed_elements.slice(0, 3)" :key="i" class="meta-chip">{{ c }}</span>
+              <span v-for="(c, i) in item.changed_elements" :key="i" class="meta-chip">{{ c }}</span>
             </div>
-            <div v-if="item.player_cards?.length" class="meta-hint">角色卡 {{ item.player_cards.length }} 位</div>
+            <div v-if="item.player_cards?.length" class="player-cards-block">
+              <div class="player-cards-title">🎭 角色卡（{{ item.player_cards.length }} 位）</div>
+              <div class="player-card" v-for="(pc, pi) in item.player_cards" :key="pi">
+                <div class="pc-head">
+                  <b class="pc-name">{{ pc.name || `调查员${pi + 1}` }}</b>
+                  <el-tag v-if="pc.occupation" size="small" type="info">{{ pc.occupation }}</el-tag>
+                  <el-tag v-if="pc.age" size="small">{{ pc.age }}岁</el-tag>
+                  <span v-if="pc.hp_max || pc.san_max || pc.mp_max" class="pc-stats">
+                    <template v-if="pc.hp_max">HP {{ pc.hp_max }}</template>
+                    <template v-if="pc.san_max"> · SAN {{ pc.san_max }}</template>
+                    <template v-if="pc.mp_max"> · MP {{ pc.mp_max }}</template>
+                  </span>
+                </div>
+                <div v-if="pc.background || pc.bio || pc.concept || pc.trait || pc.personality" class="pc-bio">
+                  {{ pc.background || pc.bio || pc.concept || pc.trait || pc.personality }}
+                </div>
+                <div v-if="pc.skills && Object.keys(pc.skills).length" class="pc-skills">
+                  <span class="pc-label">技能：</span>
+                  <span v-for="(v, k) in pc.skills" :key="String(k)" class="pc-skill">{{ k }} {{ v }}</span>
+                </div>
+                <div v-if="pc.obsession || pc.drive || pc.secret || pc.bond || pc.flaw" class="pc-bio">
+                  <span v-if="pc.obsession"><b>执念：</b>{{ pc.obsession }} </span>
+                  <span v-if="pc.drive"><b>驱动：</b>{{ pc.drive }} </span>
+                  <span v-if="pc.secret"><b>秘密：</b>{{ pc.secret }} </span>
+                  <span v-if="pc.bond"><b>羁绊：</b>{{ pc.bond }} </span>
+                  <span v-if="pc.flaw"><b>缺陷：</b>{{ pc.flaw }}</span>
+                </div>
+              </div>
+            </div>
           </template>
         </SushiCards>
       </div>
@@ -399,9 +513,37 @@ onUnmounted(() => {
       >
         <template #item="{ item }">
           <div v-if="item.changed_elements?.length" class="meta-line">
-            <span v-for="(c, i) in item.changed_elements.slice(0, 3)" :key="i" class="meta-chip">{{ c }}</span>
+            <span v-for="(c, i) in item.changed_elements" :key="i" class="meta-chip">{{ c }}</span>
           </div>
-          <div v-if="item.player_cards?.length" class="meta-hint">角色卡 {{ item.player_cards.length }} 位</div>
+          <div v-if="item.player_cards?.length" class="player-cards-block">
+            <div class="player-cards-title">🎭 角色卡（{{ item.player_cards.length }} 位）</div>
+            <div class="player-card" v-for="(pc, pi) in item.player_cards" :key="pi">
+              <div class="pc-head">
+                <b class="pc-name">{{ pc.name || `调查员${pi + 1}` }}</b>
+                <el-tag v-if="pc.occupation" size="small" type="info">{{ pc.occupation }}</el-tag>
+                <el-tag v-if="pc.age" size="small">{{ pc.age }}岁</el-tag>
+                <span v-if="pc.hp_max || pc.san_max || pc.mp_max" class="pc-stats">
+                  <template v-if="pc.hp_max">HP {{ pc.hp_max }}</template>
+                  <template v-if="pc.san_max"> · SAN {{ pc.san_max }}</template>
+                  <template v-if="pc.mp_max"> · MP {{ pc.mp_max }}</template>
+                </span>
+              </div>
+              <div v-if="pc.background || pc.bio || pc.concept || pc.trait || pc.personality" class="pc-bio">
+                {{ pc.background || pc.bio || pc.concept || pc.trait || pc.personality }}
+              </div>
+              <div v-if="pc.skills && Object.keys(pc.skills).length" class="pc-skills">
+                <span class="pc-label">技能：</span>
+                <span v-for="(v, k) in pc.skills" :key="String(k)" class="pc-skill">{{ k }} {{ v }}</span>
+              </div>
+              <div v-if="pc.obsession || pc.drive || pc.secret || pc.bond || pc.flaw" class="pc-bio">
+                <span v-if="pc.obsession"><b>执念：</b>{{ pc.obsession }} </span>
+                <span v-if="pc.drive"><b>驱动：</b>{{ pc.drive }} </span>
+                <span v-if="pc.secret"><b>秘密：</b>{{ pc.secret }} </span>
+                <span v-if="pc.bond"><b>羁绊：</b>{{ pc.bond }} </span>
+                <span v-if="pc.flaw"><b>缺陷：</b>{{ pc.flaw }}</span>
+              </div>
+            </div>
+          </div>
         </template>
       </SushiCards>
     </div>
@@ -450,21 +592,21 @@ onUnmounted(() => {
 
 <style scoped>
 .module-adapt-view {
-  max-width: 980px;
+  max-width: 1360px;
   margin: 0 auto;
-  padding: 8px 4px 40px;
+  padding: 12px 16px 48px;
 }
 .adapt-header {
   margin-bottom: 20px;
 }
 .adapt-header h2 {
   margin: 0 0 6px;
-  font-size: 22px;
+  font-size: 24px;
   color: #303133;
 }
 .adapt-subtitle {
   margin: 0;
-  font-size: 13px;
+  font-size: 14px;
   color: #909399;
 }
 .adapt-loading {
@@ -477,6 +619,47 @@ onUnmounted(() => {
 }
 .adapt-upload-drag {
   margin-bottom: 16px;
+}
+
+/* 常驻文件条 */
+.adapt-file-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: #f4f8ff;
+  border: 1px solid #d9ecff;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.adapt-file-upload :deep(.el-upload) { display: inline-block; }
+.adapt-file-info-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #303133;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.adapt-file-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 520px;
+}
+.adapt-file-size {
+  color: #909399;
+  font-size: 12px;
+}
+.adapt-file-missing {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #e6a23c;
 }
 .adapt-file-info {
   display: flex;
@@ -573,5 +756,71 @@ onUnmounted(() => {
 .meta-hint {
   font-size: 11px;
   color: #909399;
+}
+
+/* 角色卡展示 */
+.player-cards-block {
+  margin-top: 6px;
+  border-top: 1px dashed #ebeef5;
+  padding-top: 6px;
+}
+.player-cards-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #409eff;
+  margin-bottom: 6px;
+}
+.player-card {
+  background: #f9fafc;
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.pc-head {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 3px;
+}
+.pc-name {
+  font-size: 13px;
+  color: #303133;
+}
+.pc-stats {
+  font-size: 11px;
+  color: #e6a23c;
+  margin-left: auto;
+  font-family: monospace;
+}
+.pc-bio {
+  color: #606266;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 2px 0;
+}
+.pc-skills {
+  margin-top: 2px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.pc-label {
+  font-size: 11px;
+  color: #909399;
+}
+.pc-skill {
+  font-size: 11px;
+  color: #606266;
+  background: #fff;
+  border: 1px solid #ebeef5;
+  border-radius: 3px;
+  padding: 0 5px;
 }
 </style>

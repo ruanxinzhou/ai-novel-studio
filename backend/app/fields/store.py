@@ -59,11 +59,11 @@ class Obituary:
     deceased_identity: str = ""          # 死者身份
     cause_of_death: str = ""             # 死因（文字描述；空=尚未知）
     cause_blacked: bool = False          # 死因是否涂黑（读者/主角都不知道）
-    seventh_day_death: str = ""          # 第七日死法
+    seventh_day_death: str = ""          # T-0（入戏第七日）死法/死劫兑现方式
     obsession: str = ""                  # 执念
     obsession_power: str = ""            # 执念金手指（能力描述）
     obsession_cost: str = ""             # 人间副作用
-    day_beats_override: dict | None = None  # 本场特化七日节点（None=用全局基线）
+    day_beats_override: dict | None = None  # 本场特化唐迟入戏日节点（None=用全局 T-6→T-0 基线）
     remaining_page_ash: str = ""         # 残页灰文（散场时填）
     cast_replaced_role: str = "PL"       # 唐迟替换角色：PL/NPC/BOSS/幕后黑手
     finale_record_template: str = ""     # 杀青一行模板
@@ -259,7 +259,7 @@ class FieldWork:
         )
 
     def ensure_days(self) -> None:
-        """补齐 Day1-Day7 空 DayWork（如果不存在）。"""
+        """补齐唐迟入戏第1-7天（T-6→T-0）空 DayWork（如果不存在）。"""
         for d in range(1, 8):
             if d not in self.days:
                 self.days[d] = DayWork(day=d)

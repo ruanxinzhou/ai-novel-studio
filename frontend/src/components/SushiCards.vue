@@ -4,7 +4,7 @@
 //   - diverge（默认）：编辑流程（出 N 盘→选一盘→进入 AI 改稿→锁定），向后兼容旧 diverge 编辑流
 //   - ensemble        ：通用 N 选 1 只读对比面板（pdf5/coc/outline5 等批量产出展示）
 import { computed, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type { Candidate, EditingState, SessionMessage } from '../api'
 
 interface Props {
@@ -174,12 +174,47 @@ function applySuggestion(m: SessionMessage) {
 const ensembleItems = computed(() => props.items || [])
 const rerunDirective = ref('')
 
-function doRerunAll() {
-  emit('rerun', null, rerunDirective.value.trim())
+async function doRerunAll() {
+  let directive = rerunDirective.value.trim()
+  // 顶部没有填指令时，也弹框让用户补
+  if (!directive) {
+    try {
+      const { value } = await ElMessageBox.prompt(
+        '对这一整轮重抽有什么调整方向？（留空则完全随机重抽）',
+        '🔄 重新抽一轮',
+        {
+          confirmButtonText: '开始重抽',
+          cancelButtonText: '取消',
+          inputType: 'textarea',
+          inputPlaceholder: '例如：主角能力要长线有用、不要只针对单本剧本、克苏鲁白描更冷一点…',
+        },
+      )
+      directive = (value ?? '').trim()
+    } catch {
+      return
+    }
+  }
+  emit('rerun', null, directive)
   rerunDirective.value = ''
 }
-function doRerunOne(idx: number) {
-  emit('rerun', idx, rerunDirective.value.trim())
+async function doRerunOne(idx: number) {
+  let directive = rerunDirective.value.trim()
+  try {
+    const { value } = await ElMessageBox.prompt(
+      `基于第 ${idx + 1} 版微调。告诉我要怎么改？`,
+      '🔄 基于此版微调出新 3 版',
+      {
+        confirmButtonText: '开始微调',
+        cancelButtonText: '取消',
+        inputType: 'textarea',
+        inputPlaceholder: '例如：主角获得的能力不要只针对当前剧本，要能长线复用；风格更阴冷；删去 XX 要素…',
+      },
+    )
+    directive = (value ?? '').trim()
+  } catch {
+    return
+  }
+  emit('rerun', idx, directive)
   rerunDirective.value = ''
 }
 
@@ -408,7 +443,7 @@ const sushiCardsGridClass = computed(() => {
             <div
               v-if="getField(it, itemContentField)"
               class="sushi-cand-text sushi-cand-text--truncated"
-            >{{ truncate(getField(it, itemContentField), 600) }}</div>
+            >{{ getField(it, itemContentField) }}</div>
             <!-- 默认具名插槽：允许父组件传自定义详情（例如 Day 列表、meta chip）-->
             <div v-if="$slots.item" class="sushi-cand-extra">
               <slot name="item" :item="it" :index="idx" />
@@ -437,31 +472,31 @@ const sushiCardsGridClass = computed(() => {
 <style scoped>
 .sushi-card-block {
   border: 1px solid #e4e7ed;
-  border-radius: 8px;
-  padding: 10px;
-  margin-bottom: 12px;
+  border-radius: 10px;
+  padding: 14px;
+  margin-bottom: 14px;
   background: #fcfcfc;
 }
 .sushi-title-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 8px;
-  font-size: 14px;
+  margin-bottom: 10px;
+  font-size: 15px;
   font-weight: 600;
 }
 .sushi-label { color: #303133; }
-.sushi-hint { font-size: 12px; color: #909399; }
+.sushi-hint { font-size: 13px; color: #909399; }
 
 .sushi-locked-text {
-  font-size: 13px;
-  line-height: 1.7;
+  font-size: 15px;
+  line-height: 1.8;
   color: #303133;
   white-space: pre-wrap;
   background: #f0f9eb;
-  border-left: 3px solid #67c23a;
-  padding: 8px 10px;
-  border-radius: 4px;
+  border-left: 4px solid #67c23a;
+  padding: 12px 14px;
+  border-radius: 6px;
 }
 
 .sushi-axis {
@@ -480,41 +515,46 @@ const sushiCardsGridClass = computed(() => {
 
 .sushi-cards {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px;
 }
-/* 按卡片数自适应列数：3→3列，4→4列，5→5列，6+→auto-fill 每卡最小 220px */
-.sushi-cards.sushi-cards-3   { grid-template-columns: repeat(3, 1fr); }
-.sushi-cards.sushi-cards-4   { grid-template-columns: repeat(4, 1fr); }
-.sushi-cards.sushi-cards-5   { grid-template-columns: repeat(5, 1fr); }
-.sushi-cards.sushi-cards-6plus { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
-@media (max-width: 1440px) {
-  .sushi-cards.sushi-cards-5 { grid-template-columns: repeat(3, 1fr); }
-  .sushi-cards.sushi-cards-4 { grid-template-columns: repeat(2, 1fr); }
+/* 按卡片数自适应列数——大卡片为主，默认最多 2 列 */
+.sushi-cards.sushi-cards-3   { grid-template-columns: repeat(2, 1fr); }
+.sushi-cards.sushi-cards-4   { grid-template-columns: repeat(2, 1fr); }
+.sushi-cards.sushi-cards-5   { grid-template-columns: repeat(3, 1fr); }
+.sushi-cards.sushi-cards-6plus { grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); }
+@media (max-width: 1200px) {
+  .sushi-cards.sushi-cards-3,
+  .sushi-cards.sushi-cards-4,
+  .sushi-cards.sushi-cards-5 { grid-template-columns: repeat(2, 1fr); }
 }
-@media (max-width: 900px) {
+@media (max-width: 760px) {
   .sushi-cards.sushi-cards-3,
   .sushi-cards.sushi-cards-4,
   .sushi-cards.sushi-cards-5 { grid-template-columns: 1fr; }
 }
 
 .sushi-cand {
-  position: relative; /* 给 #idx 角标定位 */
+  position: relative;
   border: 1px solid #dcdfe6;
-  border-radius: 6px;
-  padding: 8px;
+  border-radius: 8px;
+  padding: 14px 14px 12px;
   background: white;
   display: flex;
   flex-direction: column;
   transition: border-color .2s, box-shadow .2s;
+  min-width: 0;
+  /* 卡片自身不滚动，让内部固定高度区分别滚动，底部按钮永远可见 */
+  max-height: none;
+  overflow: visible;
 }
 .sushi-cand:hover {
   border-color: #409eff;
-  box-shadow: 0 2px 8px rgba(64,158,255,0.12);
+  box-shadow: 0 4px 14px rgba(64,158,255,0.15);
 }
 .sushi-cand--picked {
   border-color: #67c23a;
-  box-shadow: 0 0 0 2px rgba(103,194,58,0.18);
+  box-shadow: 0 0 0 2px rgba(103,194,58,0.2);
 }
 .sushi-cand--custom {
   border-color: #e6a23c;
@@ -522,19 +562,19 @@ const sushiCardsGridClass = computed(() => {
 }
 .sushi-cand-idx {
   position: absolute;
-  top: 6px;
-  right: 8px;
-  font-size: 11px;
+  top: 10px;
+  right: 12px;
+  font-size: 12px;
   color: #c0c4cc;
   font-weight: 600;
 }
 .sushi-cand-actions {
   position: absolute;
-  top: 6px;
-  left: 8px;
+  top: 10px;
+  left: 12px;
   display: flex;
-  gap: 4px;
-  opacity: 0.45;
+  gap: 6px;
+  opacity: 0.5;
   transition: opacity .2s;
   z-index: 2;
 }
@@ -542,13 +582,13 @@ const sushiCardsGridClass = computed(() => {
   opacity: 1;
 }
 .sushi-cand-icon-btn {
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
   border: 1px solid #dcdfe6;
   background: white;
   cursor: pointer;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1;
   padding: 0;
   display: inline-flex;
@@ -569,69 +609,109 @@ const sushiCardsGridClass = computed(() => {
   display: flex;
   gap: 8px;
   align-items: center;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
   flex-wrap: wrap;
 }
 .sushi-ensemble-directive {
   flex: 1;
-  min-width: 240px;
+  min-width: 260px;
 }
 .sushi-cand-axis {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   color: #e6a23c;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
   text-align: center;
-  padding: 2px 0;
+  padding: 4px 0;
   background: #fdf6ec;
   border-radius: 4px;
 }
 .sushi-cand-title {
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 700;
   color: #303133;
   margin-bottom: 4px;
+  line-height: 1.4;
 }
 .sushi-cand-subtitle {
-  font-size: 12px;
+  font-size: 13px;
   color: #e6a23c;
-  margin-bottom: 6px;
-  line-height: 1.5;
+  margin-bottom: 8px;
+  line-height: 1.6;
 }
 .sushi-cand-text {
-  font-size: 13px;
-  line-height: 1.7;
+  font-size: 14px;
+  line-height: 1.75;
   color: #303133;
   white-space: pre-wrap;
-  flex: 1;
-  max-height: 240px;
+  word-break: break-word;
+  /* 故事区：固定高度 + 内部滚动条 */
+  flex: 0 0 auto;
+  height: 420px;
   overflow-y: auto;
+  padding: 6px 8px 6px 0;
+  border: 1px solid #f0f2f5;
+  border-radius: 4px;
+  background: #fafbfc;
 }
 .sushi-cand-text--truncated {
-  max-height: 160px;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 7;
-  -webkit-box-orient: vertical;
-  /* 截断时用 overflow-y: hidden 避免滚动条 */
-  overflow-y: hidden;
+  height: 420px;
+  overflow-y: auto;
+  display: block;
+  -webkit-line-clamp: unset;
+  -webkit-box-orient: unset;
+}
+.sushi-cand-text--truncated::-webkit-scrollbar,
+.sushi-cand-text::-webkit-scrollbar {
+  width: 8px;
+}
+.sushi-cand-text--truncated::-webkit-scrollbar-track,
+.sushi-cand-text::-webkit-scrollbar-track {
+  background: #f5f7fa;
+  border-radius: 4px;
+}
+.sushi-cand-text--truncated::-webkit-scrollbar-thumb,
+.sushi-cand-text::-webkit-scrollbar-thumb {
+  background: #c0c4cc;
+  border-radius: 4px;
+}
+.sushi-cand-text--truncated::-webkit-scrollbar-thumb:hover,
+.sushi-cand-text::-webkit-scrollbar-thumb:hover {
+  background: #909399;
 }
 .sushi-cand-rationale {
-  font-size: 11px;
+  font-size: 12px;
   color: #909399;
-  margin-top: 6px;
-  padding-top: 6px;
+  margin-top: 8px;
+  padding: 6px 8px;
   border-top: 1px dashed #ebeef5;
-  line-height: 1.5;
+  line-height: 1.6;
 }
 .sushi-cand-extra {
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px dashed #ebeef5;
-}
-.sushi-cand-pick {
   margin-top: 8px;
+  padding: 8px;
+  border-top: 1px dashed #ebeef5;
+  /* extra 区（含角色卡、改动点）：固定高度独立滚动 */
+  flex: 0 0 auto;
+  max-height: 280px;
+  overflow-y: auto;
+  background: #fcfcfc;
+  border-radius: 4px;
+}
+.sushi-cand-extra::-webkit-scrollbar { width: 8px; }
+.sushi-cand-extra::-webkit-scrollbar-track { background: #f5f7fa; border-radius: 4px; }
+.sushi-cand-extra::-webkit-scrollbar-thumb { background: #c0c4cc; border-radius: 4px; }
+.sushi-cand-extra::-webkit-scrollbar-thumb:hover { background: #909399; }
+.sushi-cand-pick {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #ebeef5;
   text-align: center;
+  flex-shrink: 0;
+}
+.sushi-cand-pick .el-button {
+  font-size: 14px;
+  padding: 8px 24px;
 }
 
 .sushi-plate-actions {

@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import TYPE_CHECKING
 
@@ -153,7 +154,7 @@ def build_state_materials(project_store, entity_store: EntityStore,
         try:
             mats.append(Material(
                 source_id="book:hardcards", family=MaterialFamily.REQUIRED,
-                content=book_store.render_all(), title="书级硬卡（铁律/七日基线/唐迟刻度/终局锚）",
+                content=book_store.render_all(), title="书级硬卡（铁律/双轨时间线锚/唐迟刻度/终局锚）",
             ))
         except Exception:
             pass
@@ -338,13 +339,187 @@ def _written_nos(desk: DeskStore) -> list[int]:
     return out
 
 
+def _build_volume_and_shader_context(volume, cur_day: int | None, tangchi_data: dict | None) -> str:
+    """把 Volume 的魂穿宿主/信息差/核心诡计/当日节点 + 唐迟污染度感官滤镜拼为 REQUIRED 段落。
+    这是 v2.0「唐迟七天求生追查死因」核心叙事引擎的上下文锚：AI 必须时刻知道唐迟顶着谁的壳、
+    此刻是他入戏第几天、离 T-0 死劫还有几天、什么是他以为的「假死因」什么是「真死因底牌」、
+    他现在异化到什么程度、以及【原剧本故事】此刻正在哪个事件（双轨时间线并行）。
+    注意：cur_day 指唐迟入戏第几天（T-7+cur_day），不是原剧本的 Day N；原剧本自身的时间线按副本改编逻辑独立推进。"""
+    parts: list[str] = []
+    if volume is not None:
+        parts.append(f"**当前副本卷**：第 {volume.volume_no} 卷《{volume.title or '未命名副本'}》")
+        hc = volume.host_character or {}
+        if isinstance(hc, dict) and hc.get("name"):
+            identity = hc.get("identity") or hc.get("role") or ""
+            death = hc.get("seventh_day_death") or hc.get("original_fate") or "（讣告未明确）"
+            module_pos = hc.get("original_story_position", "")
+            pos_str = f"｜原剧本入戏点：{module_pos}" if module_pos else ""
+            parts.append(
+                f"**唐迟本卷魂穿宿主**：{hc.get('name')}"
+                f"（表面身份：{identity}｜T-0 死劫：{death}{pos_str}）"
+            )
+        if volume.info_gap:
+            ig = volume.info_gap if isinstance(volume.info_gap, str) else json.dumps(volume.info_gap, ensure_ascii=False)
+            parts.append(f"**唐迟当前信息差与伪装困境**：{ig}")
+        st = volume.stance
+        if st:
+            attitude = st.get("title") or st.get("attitude") if isinstance(st, dict) else str(st)
+            parts.append(f"**本卷求生与查因策略**：{attitude}")
+        if volume.entry_point:
+            parts.append(f"**本章切入点**：{volume.entry_point}")
+
+        cards = volume.scaffold_cards or {}
+        def _card_text(key: str) -> str:
+            c = cards.get(key)
+            if isinstance(c, dict):
+                t = c.get("text")
+                if t:
+                    return str(t)
+                vs = c.get("variants") or []
+                pi = c.get("picked_idx")
+                if isinstance(pi, int) and 0 <= pi < len(vs):
+                    picked = vs[pi]
+                    if isinstance(picked, str):
+                        return picked
+            return ""
+
+        twist = _card_text("core_twist")
+        cost_cap = _card_text("cost_cap")
+        start = _card_text("tangchi_start")
+        if start:
+            parts.append(f"**【卷首锚·唐迟睁眼第一秒】**：\n{start}")
+        if twist:
+            parts.append(
+                f"**【全卷底牌·原主在原剧本中必死的真正原因】（全局硬约束：严禁让唐迟在入戏第1-3天提前看穿，"
+                f"必须经过第4-5天反转才揭晓；但写作时你心里必须始终装着这个底）**：\n{twist}"
+            )
+        if cost_cap:
+            parts.append(f"**【本卷代价上限】（T-0破局必须付出的对等代价，不可减免）**：{cost_cap}")
+
+        # 当日节点：death/climax/clue；注意 death_nodes/climax_nodes 可能是三维数组
+        # （[版A, 版B, 版C] 每版一个 list），desk._join_by_layer 用的是 picked 版；这里做扁平提取
+        def _picked_list(key: str) -> list[dict]:
+            c = cards.get(key)
+            arr = getattr(volume, key, None) or []
+            if isinstance(c, dict):
+                pi = c.get("picked_idx")
+                vs = c.get("variants") or []
+                if isinstance(pi, int) and 0 <= pi < len(vs) and isinstance(vs[pi], list):
+                    return [n for n in vs[pi] if isinstance(n, dict)]
+            # fallback：扁平提取所有版中 day == cur_day 的节点
+            picked: list[dict] = []
+            for ver in (arr or []):
+                if not isinstance(ver, list):
+                    continue
+                for n in ver:
+                    if isinstance(n, dict) and int(n.get("day") or 0) == (cur_day or 0):
+                        picked.append(n)
+            return picked
+
+        if cur_day is not None:
+            day_deaths = _picked_list("death_nodes")
+            day_climaxes = _picked_list("climax_nodes")
+            # clue_nodes 二维
+            c_clue = cards.get("clue_nodes") if isinstance(cards.get("clue_nodes"), dict) else None
+            day_clues: list[dict] = []
+            if c_clue:
+                pi = c_clue.get("picked_idx")
+                vs = c_clue.get("variants") or []
+                if isinstance(pi, int) and 0 <= pi < len(vs) and isinstance(vs[pi], list):
+                    day_clues = [n for n in vs[pi] if isinstance(n, dict) and int(n.get("day") or 0) == cur_day]
+            if not day_clues:
+                for ver in (getattr(volume, "clue_nodes", None) or []):
+                    if isinstance(ver, list):
+                        for n in ver:
+                            if isinstance(n, dict) and int(n.get("day") or 0) == cur_day:
+                                day_clues.append(n)
+
+            day_lines: list[str] = [f"**【副本 Day {cur_day} 锁定节点】**："]
+            # fate_layer 前缀
+            layer_label = {
+                "doomed": "[原剧本死劫·DOOMED · 唐迟预见但大概率救不下——先知感/信息差核心]",
+                "diverted": "[唐迟改命·DIVERTED · 他介入救下/转移，但必须当场付代价]",
+                "escalated": "[改命反噬·ESCALATED · 他以为救成了，反而触发更严重污染/更多死亡]",
+            }
+            seen_layers: set[str] = set()
+            for d in day_deaths:
+                layer = str(d.get("fate_layer") or "").strip().lower()
+                pref = layer_label.get(layer, "")
+                who = d.get("who") or "？"
+                how = d.get("how") or ""
+                cost = d.get("cost") or ""
+                tease = d.get("tease") or ""
+                line = f"- [死亡] {pref} {who}：{how}"
+                if cost:
+                    line += f"\n    死因启示/代价：{cost}"
+                if tease:
+                    line += f"\n    事前预兆：{tease}"
+                day_lines.append(line)
+                if layer:
+                    seen_layers.add(layer)
+            for c in day_climaxes:
+                layer = str(c.get("fate_layer") or "").strip().lower()
+                pref = layer_label.get(layer, "")
+                title = c.get("title") or "？"
+                beat = c.get("beat") or ""
+                w = c.get("weight")
+                weight_tag = f"（权重 {w}）" if w else ""
+                day_lines.append(f"- [高潮转折] {pref} {title}{weight_tag}：{beat}")
+                if layer:
+                    seen_layers.add(layer)
+            for cl in day_clues:
+                tag = "【红鲱鱼/假死因误导】" if cl.get("is_red_herring") else "【真死因线索】"
+                where = cl.get("where") or ""
+                what = cl.get("what") or ""
+                leads = cl.get("leads_to") or ""
+                day_lines.append(f"- {tag}（地点：{where}）：{what} ➔ 指向：{leads}")
+            if len(day_lines) > 1:
+                parts.append("\n".join(day_lines))
+            if not seen_layers.intersection({"doomed", "diverted", "escalated"}) and cur_day:
+                # 数据缺 fate_layer 时加一句软提醒，不报错
+                parts.append(
+                    f"（提醒：Day {cur_day} 节点暂未标注 fate_layer——请按「原剧本死劫/唐迟改命/改命反噬」"
+                    f"三类各自至少一个来组织本章戏剧冲突）"
+                )
+
+    # 污染度与旧卷残影感官滤镜
+    td = tangchi_data or {}
+    erosion = int(td.get("erosion_level") or td.get("contamination_level") or 0)
+    echoes = td.get("echoes") or []
+    crafts = td.get("crafts") or []
+    shader_lines: list[str] = [f"**【唐迟感官滤镜（当前污染度 {erosion}%）】**："]
+    shader_lines.append(
+        "- 思维底色：唐迟是程序员，面对诡异现象时不尖叫、不抒情，本能地把它拆成"
+        "「触发条件（Trigger）/判定边界（Boundary）/状态死锁（Deadlock）」来推理。"
+    )
+    if erosion >= 30:
+        shader_lines.append(
+            f"- 生理异化（≥30%）：日常描写中自然植入 1-2 处局部生理错位（皮肤盐晶/关节藤壶/视野延迟/听觉海声），"
+            "唐迟已习以为常，不向旁人解释，按压或遮住就继续干活。"
+        )
+    elif erosion >= 10 or echoes:
+        sample = "；".join(
+            str(e.get("name", e) if isinstance(e, dict) else e) for e in echoes[-2:]
+        ) if echoes else "镜面或阴影偶尔慢 0.3 秒"
+        shader_lines.append(
+            f"- 污染残影渗透（≥10%）：环境或动作描写中自然带出 1 处旧污染残留（如：{sample}），"
+            "唐迟顺手按压或无视，绝不主动解释。"
+        )
+    if crafts:
+        recent = ", ".join(str(c.get("name", c) if isinstance(c, dict) else c) for c in crafts[-2:])
+        shader_lines.append(f"- 已积累手艺：{recent}——遇到相似场景时他会下意识复用这些活命手艺。")
+    parts.append("\n".join(shader_lines))
+    return "\n\n".join(p for p in parts if p)
+
+
 def build_chapter_checklist(entity_store: EntityStore, desk: DeskStore,
                             chapter: int, outline_total: int,
-                            book_store=None, field_store=None) -> Material | None:
+                            book_store=None, field_store=None,
+                            volume_store=None, current_volume=None) -> Material | None:
     """开章任务书：写第 N 章前的 REQUIRED 自检材料，五段结构。
 
     ①开篇委托（上一章结尾，开篇接住变化）②本章故事（进度与跳章提醒）
-    ③本书本场（书铁律+七日Day节拍+讣告卡——book/field 有传才注入）
+    ③本书本场（书铁律+双轨时间线节拍+讣告卡——book/field 有传才注入）
     ④本章人物与设定（截至上一章的实体快照，含已退场/未出场标注）
     ⑤怎么写更顺（节奏位置 + 三线近况 + 到期伏笔按账龄排急缓）
     ⑥收在哪里（章末收束要求）。六段全空（开书第一章且无设定）返回 None。
@@ -374,14 +549,15 @@ def build_chapter_checklist(entity_store: EntityStore, desk: DeskStore,
     if len(pos) > 1:  # 只有「本章为第 N 章」一行时不单独成节
         sections.append("【本章故事】（本章位置）\n" + "；".join(pos))
 
-    # ③ 本书本场（书铁律+七日Day节拍+讣告卡）——仅在传了 book_store/field_store 时注入
+    # ③ 本书本场（书铁律+双轨时间线节拍+讣告卡）——仅在传了 book_store/field_store 时注入
     book_field_parts: list[str] = []
     if book_store is not None:
         try:
             premise = book_store.premise()
             book_field_parts.append(
-                "**铁律**：七日锚（Day1→Day7 顺序永不跳）；讣告三功能（入场/机制/出场）；"
-                "神不出场不对话；第七日=死期永不破。\n"
+                "**铁律**：双轨时间线——副本原剧本时间线独立推进（自由跨度，不要求七日），"
+                "唐迟个人入戏第1→7天（T-6→T-0）倒计时锚从不跳、不倒退；"
+                "讣告三功能（入场/机制/出场）；神不出场不对话；唐迟T-0死劫必降临但可截断。\n"
                 f"**主角**：{_clean(premise.data.get('protagonist', ''), 120)}"
             )
             # 唐迟当前侵蚀度提醒
@@ -475,6 +651,51 @@ def build_chapter_checklist(entity_store: EntityStore, desk: DeskStore,
         if field_context:
             sec.append(field_context)
         sections.append("\n\n".join(sec))
+
+    # ③-b 副本卷魂穿与死因追查档案 + 污染度感官滤镜（v2.0 核心）
+    vol = None
+    ch_day = None
+    w = desk.get(chapter)
+    if w is not None:
+        ch_day = getattr(w, "day", None)
+        br = getattr(w, "brief", None)
+        if isinstance(br, dict):
+            override = br.get("story_day_override")
+            sel = br.get("selected") if isinstance(br.get("selected"), dict) else None
+            if isinstance(override, int) and 0 <= override <= 7:
+                ch_day = override if override > 0 else ch_day
+            elif ch_day is None and isinstance(sel, dict) and sel.get("day"):
+                ch_day = sel.get("day")
+    if current_volume is not None:
+        vol = current_volume
+    elif volume_store is not None:
+        try:
+            vol_no = None
+            if w is not None and getattr(w, "field_no", None):
+                vol_no = int(w.field_no)
+            if vol_no is None:
+                vols = volume_store.all_list() if hasattr(volume_store, "all_list") else []
+                dungeon_vols = [v for v in vols if getattr(v, "volume_kind", "dungeon") == "dungeon"]
+                if dungeon_vols:
+                    vol_no = max(dungeon_vols, key=lambda v: v.volume_no).volume_no
+            if vol_no is not None and hasattr(volume_store, "get"):
+                vol = volume_store.get(vol_no)
+        except Exception:
+            vol = None
+    if vol is not None:
+        try:
+            tangchi_raw = book_store.tangchi_raw() if book_store is not None else {}
+            vol_ctx = _build_volume_and_shader_context(vol, ch_day, tangchi_raw)
+            if vol_ctx:
+                sections.append(
+                    "【本卷魂穿与死因追查档案 + 唐迟感官滤镜】"
+                    "（你必须时刻记住唐迟此刻顶着谁的壳、这是他入戏第几天、离 T-0 死劫还有几天、"
+                    "原剧本故事此刻正在哪个事件、他以为的死因是真是假、他的身体现在异化到什么程度——"
+                    "这些信息必须自然渗入视角、推理与生理感受描写中；记住是双轨时间线并行）\n" + vol_ctx
+                )
+        except Exception as _e:
+            import logging as _logging
+            _logging.getLogger(__name__).warning("volume context 注入失败：%s", _e)
 
     # ④ 本章人物与设定（实体快照）
     for etype in ("character", "location", "item", "plotline"):

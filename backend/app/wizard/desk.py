@@ -214,6 +214,43 @@ def outline_map(project_store, pid: str) -> dict[int, str]:
     return chapter_outlines(v.y) if v else {}
 
 
+def _brief_outline_text(work) -> str:
+    """从新工作台 ChapterWork.brief.selected 构造本章大纲输入 x。
+    兼容旧版全书 outline 缺失的工作台项目（T1-T16 之后的标准起手）。"""
+    if not work or not isinstance(getattr(work, "brief", None), dict):
+        return ""
+    sel = work.brief.get("selected")
+    if not isinstance(sel, dict):
+        return ""
+    lines: list[str] = []
+    day = sel.get("day") or getattr(work, "day", None) or 1
+    title = sel.get("title") or getattr(work, "title", "") or f"第{getattr(work, 'no', '?')}章"
+    lines.append(f"【本章标题】{title}（副本 Day {day}）")
+    beat = sel.get("beat_type")
+    if beat:
+        lines.append(f"【节奏定位】{beat}")
+    summary = sel.get("summary")
+    if summary:
+        lines.append(f"【本章核心剧情方向】\n{summary}")
+    extra = sel.get("extra_edits")
+    if extra:
+        lines.append(f"【作者追加修正要求】\n{extra}")
+    hooks = sel.get("hooks")
+    if isinstance(hooks, list) and hooks:
+        lines.append("【章尾必留钩子】")
+        for h in hooks:
+            lines.append(f"- {h}")
+    elif isinstance(hooks, str) and hooks.strip():
+        lines.append(f"【章尾必留钩子】\n{hooks}")
+    fsa = sel.get("foreshadow_advance") or sel.get("foreshadow") or []
+    if isinstance(fsa, list) and fsa:
+        lines.append(f"【本章需推进/埋设的伏笔】{', '.join(str(x) for x in fsa)}")
+    eos = sel.get("entities_on_stage") or []
+    if isinstance(eos, list) and eos:
+        lines.append(f"【本章登场实体】{', '.join(str(x) for x in eos)}")
+    return "\n".join(lines).strip()
+
+
 def chapter_title_of(body: str) -> str:
     lines = body.strip().splitlines()
     return lines[0].strip()[:20] if lines and lines[0].strip() else ""
@@ -503,34 +540,13 @@ def run_chapter_stage(
     if stage == "plot":
         # 优先用章前方向卡（work.brief['selected']），这是新工作台（T1-T10）的权威输入；
         # 回退到旧 outline_map 兼容老 Workstation/纯大纲模式。
-        brief_data = work.brief if isinstance(work.brief, dict) else {}
-        selected = brief_data.get("selected") if isinstance(brief_data, dict) else None
-        body = ""
-        if isinstance(selected, dict):
-            parts = []
-            t = selected.get("title")
-            s = selected.get("summary")
-            hooks = selected.get("hooks") or []
-            fsa = selected.get("foreshadow_advance") or selected.get("foreshadow") or []
-            if t:
-                parts.append(f"本章方向：{t}")
-            if s:
-                parts.append(str(s))
-            if hooks and isinstance(hooks, list):
-                parts.append("开场钩子：")
-                for h in hooks:
-                    parts.append(f"- {h}")
-            if fsa and isinstance(fsa, list):
-                parts.append("伏笔推进：")
-                for f in fsa:
-                    parts.append(f"- {f}")
-            body = "\n".join(parts).strip()
+        body = _brief_outline_text(work)
         if not body:
             body = o_map.get(chapter, "")
         if not body:
             raise ValueError(f"大纲/方向卡中未找到第 {chapter} 章，请先完成章前方向卡选择")
         x = body
-        source_label = "章前方向卡（本章锁定）" if isinstance(selected, dict) and selected else f"第{chapter}章大纲"
+        source_label = "章前方向卡（本章锁定）" if _brief_outline_text(work) else f"第{chapter}章大纲"
         materials.append(Material(source_id=f"outline:ch{chapter}", family=MaterialFamily.FINALIZED,
                                   content=body, title=source_label))
         intro = project_store.current(pid, "intro")
@@ -542,12 +558,9 @@ def run_chapter_stage(
         if not x:
             raise ValueError("本章还没有剧情，请先生成剧情")
         body = o_map.get(chapter, "")
-        # draft 阶段也可以附上方向卡供参考
-        brief_data = work.brief if isinstance(work.brief, dict) else {}
-        sel = brief_data.get("selected") if isinstance(brief_data, dict) else None
-        if not body and isinstance(sel, dict):
-            t = sel.get("title"); s = sel.get("summary")
-            body = f"{t}\n{s}" if t or s else ""
+        # draft 阶段也附上方向卡供参考
+        if not body:
+            body = _brief_outline_text(work)
         if body:
             materials.append(Material(source_id=f"outline:ch{chapter}", family=MaterialFamily.FINALIZED,
                                       content=body, title="本章方向/大纲"))
@@ -572,9 +585,22 @@ def run_chapter_stage(
             pass
     checklist_injected = False
     if entity_store is not None and stage in ("plot", "draft"):
+        # 解析当前卷：优先用传入的 volume_store（单个 Volume 对象）/ 或从 volume_store 仓库按 field_no 找
+        cur_vol = None
+        if volume_store is not None:
+            if hasattr(volume_store, "volume_no"):
+                cur_vol = volume_store
+            elif hasattr(volume_store, "get") and getattr(work, "field_no", None) is not None:
+                try:
+                    cur_vol = volume_store.get(int(work.field_no))
+                except Exception:
+                    cur_vol = None
         checklist = build_chapter_checklist(
             entity_store, desk, chapter, max(o_map) if o_map else 0,
-            book_store=book_store, field_store=field_store)
+            book_store=book_store, field_store=field_store,
+            volume_store=volume_store if hasattr(volume_store, "all_list") else None,
+            current_volume=cur_vol,
+        )
         if checklist is not None:
             materials.append(checklist)
             checklist_injected = True

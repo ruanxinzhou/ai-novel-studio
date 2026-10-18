@@ -1,12 +1,16 @@
 """《第七日的亡者》书专属审稿检查（纯数据推导，不走 LLM）。
 
-六条书规硬检：
-1. 七日锚：章节标注 Day=N 时，上下文/字里不能出现 Day=N+1 及以上的事件
+七条书规硬检：
+1. 唐迟入戏日号锚：章节标注 day=N（指唐迟入戏第 N 天 / T-(7-N)）时，正文不能出现「第N+1天」及之后的入戏日号
 2. 8:2 间章脊柱：is_interlude 的章节必须出现暗线（残页/其他选中者/下一场暗示）关键词
 3. 执念代价延迟：同场使用执念金手指后 1-2 章内必须有副作用迹象
 4. 唐迟 POV 泄漏：非间章正文不能出现唐迟视角以外的全知叙述（软检：点名检查"他不知道/他没发现"类叙述者越界词）
 5. 终局种子审计：每场至少埋一颗对应层级的终局种子（按 endgame 锚点 pending 数）
 6. 力量升级克制：侵蚀度 ≥40 后不能再出现唐迟单方面轻松碾压的描写（强金手指必有代价描写）
+7. 伏笔兑现兜底：章前方向卡声明的 foreshadow_advance 子串命中 <50% → 软提醒（不阻断交稿）
+
+注：副本原剧本时间线（小时/天/月/年自由跨度）与此锚无关——"入戏第 N 天"是唐迟自己的倒计时，
+   不是原剧本的日历天；原剧本事件可按自身节奏在任何入戏日推进。
 
 所有检查返回 string | None：None=通过，string=报警内容。与 rhythm_hunger/strand_warnings 同构。
 """
@@ -72,7 +76,7 @@ def _chapter_text(desk, chapter: int) -> str:
 # ---- 具体检查函数 ----
 
 def check_seven_day_anchor(desk, chapter: int, book_store=None, field_store=None) -> str | None:
-    """检查1：七日锚——本章标 Day=N 时，正文不应出现"第N+1天"之后的明确日号。"""
+    """检查1：唐迟倒计时锚——本章标入戏Day=N时，正文不应出现唐迟视角下"第N+1天"之后的未来日号（不限制副本原剧本事件的并行出现）。"""
     w = desk.get(chapter)
     if w is None:
         return None
@@ -91,8 +95,9 @@ def check_seven_day_anchor(desk, chapter: int, book_store=None, field_store=None
         if n is not None and n > day:
             violations.append(m.group(0))
     if violations:
-        return (f"七日锚违反：本章是 Day{day}，正文出现了未来日号 {sorted(set(violations))}——"
-                "日号必须按 Day1→Day7 顺序推进，不能提前出现未来日的事件")
+        return (f"唐迟入戏日号锚违反：本章是入戏第{day}天（T-{7-day}），正文出现了未来入戏日号 {sorted(set(violations))}——"
+                "唐迟入戏日号必须按入戏第1→7天顺序推进，不能提前出现未来入戏日的事件"
+                "（副本原剧本自身的时间表述如「二十年后」「那天夜里」「第三天凌晨」等不受此限）")
     return None
 
 
@@ -199,7 +204,7 @@ def check_endgame_seeds(desk, chapter: int, book_store=None, field_store=None) -
     field_no = getattr(w, "field_no", None)
     if field_no is None:
         return None
-    # 只在 Day7 章节（场收束）才审计种子
+    # 只在 T-0 章节（入戏第7天 / 场收束）才审计种子
     day = getattr(w, "day", None)
     if day != 7:
         return None
@@ -218,7 +223,7 @@ def check_endgame_seeds(desk, chapter: int, book_store=None, field_store=None) -
     if len(seeds) < required:
         name = layer.get("name", f"第{target_layer_idx+1}层") if isinstance(layer, dict) else f"第{target_layer_idx+1}层"
         misdirection = layer.get("misdirection", "") if isinstance(layer, dict) else ""
-        return (f"终局种子提醒：本场（第{field_no}场）是 Day7 收束场，应对终局「{name}」层埋 1 颗种子"
+        return (f"终局种子提醒：本场（第{field_no}场）是 T-0 收束场（入戏第7天），应对终局「{name}」层埋 1 颗种子"
                 f"（该层要求 {required} 颗，已有 {len(seeds)} 颗）。"
                 + (f" 误导方向参考：{misdirection}" if misdirection else ""))
     return None
@@ -253,13 +258,80 @@ def check_power_escalation(desk, chapter: int, book_store=None) -> str | None:
     return None
 
 
+# ---- 7) 伏笔兑现兜底（基于章前方向卡 foreshadow_advance 子串检测，软提醒） ----
+
+def _brief_foreshadows(work) -> list[str]:
+    """从 work.brief.selected.foreshadow_advance 提取伏笔关键短语列表。"""
+    if work is None:
+        return []
+    brief = getattr(work, "brief", None)
+    if not isinstance(brief, dict):
+        return []
+    sel = brief.get("selected")
+    if not isinstance(sel, dict):
+        return []
+    raw = sel.get("foreshadow_advance") or sel.get("foreshadow") or []
+    out: list[str] = []
+    if isinstance(raw, str):
+        # 支持顿号/逗号分隔的字符串
+        for piece in re.split(r"[、，,；;]+", raw):
+            piece = piece.strip()
+            if piece:
+                out.append(piece)
+    elif isinstance(raw, list):
+        for x in raw:
+            s = str(x).strip() if x is not None else ""
+            if s:
+                out.append(s)
+    return out
+
+
+def check_foreshadow_payoff(desk, chapter: int, book_store=None, field_store=None) -> str | None:
+    """检查7：伏笔兑现兜底——章前方向卡列出的 foreshadow_advance 子串命中 <50% → 提醒。
+
+    这是兜底软提醒（book_review_checks 本身不阻断交稿，review_chapter 的硬阈值独立）：
+    子串法误判率不低（语义改写/同义词替换都会漏判），所以只在字数≥600 的成稿
+    且命中比 <50% 时才提醒，避免半成品误报。
+    """
+    w = desk.get(chapter)
+    if w is None:
+        return None
+    foreshadows = _brief_foreshadows(w)
+    if not foreshadows:
+        return None
+    text = _chapter_text(desk, chapter)
+    if not text or len(text) < 600:
+        return None
+    hit: list[str] = []
+    miss: list[str] = []
+    for kw in foreshadows:
+        # 关键短语长度≥2才做子串匹配，避免单字误判
+        if len(kw) >= 2 and kw in text:
+            hit.append(kw)
+        else:
+            miss.append(kw)
+    if not miss:
+        return None
+    total = len(foreshadows)
+    ratio = len(hit) / total if total else 1.0
+    if ratio >= 0.5:
+        return None
+    return (f"伏笔兑现提醒：章前方向卡列出了 {total} 项本章需推进/埋设的伏笔，"
+            f"子串命中 {len(hit)} 项（{int(ratio*100)}%），低于 50% 阈值。"
+            f"未命中：{'、'.join(miss[:5])}"
+            + ("…" if len(miss) > 5 else "")
+            + "。请检查是否遗漏了伏笔推进；若已通过同义改写/侧面暗示完成兑现，"
+              "可在前端手动标记忽略此提醒。")
+
+
 def book_review_checks(desk, chapter: int,
                        book_store=None, field_store=None) -> list[str]:
-    """运行全部六条书规检查，返回报警列表（空=全部通过）。"""
+    """运行全部七条书规检查，返回报警列表（空=全部通过）。"""
     warnings: list[str] = []
     for fn in (check_seven_day_anchor, check_interlude_spine,
                check_obsession_cost_delay, check_tang_pov,
-               check_endgame_seeds, check_power_escalation):
+               check_endgame_seeds, check_power_escalation,
+               check_foreshadow_payoff):
         try:
             msg = fn(desk, chapter, book_store=book_store, field_store=field_store)
         except Exception:

@@ -14,20 +14,26 @@ log = logging.getLogger("api.rhythm")
 
 _RHYTHM_SYSTEM = """你是一名克苏鲁风格无限流小说的节奏设计师，正在为《第七日的亡者》某一卷做"节奏骨架"推演。
 前序产物（副本核、跑团走向、宿主、魂穿、唐迟七日历、详设 6 卡已锁定的死亡/高潮/线索/核心反转/起点/代价上限）已全部完成，
-你的任务是根据已锁定的 7 天节点分布，给出一份整卷节奏蓝图。
+你的任务是根据已锁定的唐迟入戏第1-7天（T-6→T-0）节点分布，给出一份整卷节奏蓝图。
+
+【双轨时间线提醒】
+- day=1~7 指「唐迟入戏第1-7天」（他自己的T-6→T-0倒计时），不是原剧本的Day1-Day7；
+- 原剧本是独立故事（可能是几小时、几天、几个月、几代人），它有自己的事件流；
+- 做节奏规划时，key_beats_progress 和 chapter_plan 的 day 字段必须指唐迟入戏第几天，
+  并在 beats/chapter focus 里同时标注「原剧本此刻正在哪个事件」，让作者清楚两条时间线并行。
 
 严格以 JSON 返回，不要输出 JSON 之外的任何文字，不要写 Markdown 代码块包裹。返回格式：
 
 {
   "pacing_ratio": {"setup": 0.18, "build": 0.32, "climax": 0.35, "cooldown": 0.15},
   "key_beats_progress": [
-    {"day": 1, "intensity": 2, "label": "入本惊悚"},
-    {"day": 2, "intensity": 3, "label": "第一滴血"},
-    {"day": 3, "intensity": 4, "label": "规则显形"},
-    {"day": 4, "intensity": 3, "label": "喘息/误导"},
-    {"day": 5, "intensity": 5, "label": "中盘反转"},
-    {"day": 6, "intensity": 6, "label": "同伴接连殒落"},
-    {"day": 7, "intensity": 7, "label": "终极高潮"}
+    {"day": 1, "intensity": 2, "label": "入本惊悚", "original_timeline_anchor": "原剧本此刻事件简述（10-30字）"},
+    {"day": 2, "intensity": 3, "label": "第一滴血", "original_timeline_anchor": "..."},
+    {"day": 3, "intensity": 4, "label": "规则显形", "original_timeline_anchor": "..."},
+    {"day": 4, "intensity": 3, "label": "喘息/误导", "original_timeline_anchor": "..."},
+    {"day": 5, "intensity": 5, "label": "中盘反转", "original_timeline_anchor": "..."},
+    {"day": 6, "intensity": 6, "label": "同伴接连殒落", "original_timeline_anchor": "..."},
+    {"day": 7, "intensity": 7, "label": "T-0终极高潮", "original_timeline_anchor": "原剧本此刻可能已过终点/或正在终点"}
   ],
   "warnings": [
     {"type": "dearth", "day": 4, "msg": "第4天无高潮节点，节奏可能塌腰"},
@@ -36,19 +42,19 @@ _RHYTHM_SYSTEM = """你是一名克苏鲁风格无限流小说的节奏设计师
   "suggested_length": 95000,
   "suggested_chapter_range": [12, 16],
   "chapter_plan": [
-    {"chapter": 1, "day": 1, "focus": "入本+第一异常", "words": 6500, "beat_type": "hook"},
-    {"chapter": 2, "day": 1, "focus": "宿管之死+规则建立", "words": 7000, "beat_type": "sell"}
+    {"chapter": 1, "day": 1, "focus": "入本+第一异常（原剧本：xx事件）", "words": 6500, "beat_type": "hook"},
+    {"chapter": 2, "day": 1, "focus": "宿管之死+规则建立（原剧本：xx）", "words": 7000, "beat_type": "sell"}
   ],
   "notes": "整体节奏建议：前3章黄金三章拉满恐怖密度，第4章给主角短暂喘息+误导红鲱鱼..."
 }
 
 字段约束（必须严格遵守）：
 - pacing_ratio 四段 setup/build/climax/cooldown 加起来必须等于 1.0，每段 0.05~0.55。
-- key_beats_progress 长度必须是 7，day=1~7 各一条，intensity 为 1~7 的整数（7=终极高潮），label 4-8 字。
+- key_beats_progress 长度必须是 7，day=1~7 各一条（唐迟入戏第1-7天），intensity 为 1~7 的整数（7=T-0终极高潮），label 4-8 字；每条必须带 original_timeline_anchor 标注原剧本此刻事件。
 - warnings 是数组，可以为空。每条必须带 type（dearth=真空日，cluster=过载日，front_load=前重后轻，back_load=前轻后重）、day（除 front_load/back_load 外必填）、msg（中文一句话描述问题）。
 - suggested_length：整卷总字数（整数，50000~150000）。
 - suggested_chapter_range：[min, max] 两个整数，10~25 之间，min<=max。
-- chapter_plan：章节分配数组，长度必须在 [min, max] 之间。每条包含 chapter（从 1 开始递增）、day（1~7）、focus（一句话 10-30 字本章焦点）、words（本章预估字数，整数 4000~9000）、beat_type（hook/sell/engine/climax/cooldown 之一）。
+- chapter_plan：章节分配数组，长度必须在 [min, max] 之间。每条包含 chapter（从 1 开始递增）、day（1~7，指唐迟入戏第几天）、focus（一句话 10-30 字本章焦点，必须在括号里标注原剧本此刻事件）、words（本章预估字数，整数 4000~9000）、beat_type（hook/sell/engine/climax/cooldown 之一）。
 - notes：一段 100-200 字的整体节奏建议，克苏鲁阴冷基调。
 
 注意：节点密度图会由服务端本地计算，你无需重复统计，但要基于这些密度信息给出合理的 warnings、intensity 曲线与章节分配。
@@ -227,10 +233,10 @@ def register_rhythm_routes(
 
             tso = vol.tangchi_story_outline
             if isinstance(tso, dict):
-                parts.append("\n===== 唐迟七日历（简要）=====")
+                parts.append("\n===== 唐迟七天求生大纲（入戏第1-7天 / T-6→T-0，含原剧本时间锚点）=====")
                 parts.append(tso.get("outline_text") or json.dumps(tso, ensure_ascii=False)[:1500])
             elif isinstance(tso, str) and tso:
-                parts.append(f"\n===== 唐迟七日历 =====\n{tso[:1500]}")
+                parts.append(f"\n===== 唐迟七天求生大纲 =====\n{tso[:1500]}")
 
             parts.append("\n===== 已选定死亡节点 =====")
             parts.append(json.dumps(vol.death_nodes or [], ensure_ascii=False))

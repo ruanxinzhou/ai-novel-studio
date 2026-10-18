@@ -18,6 +18,7 @@ import {
   type SkillModule,
 } from '../api'
 import { activeTab, currentChapterNo, currentProjectId, currentVolumeNo } from '../state'
+import { provideChatContext } from '../chatContext'
 
 const props = defineProps<{
   /** 指定章节号；不传则自动选 todayNo */
@@ -54,6 +55,49 @@ const lastFinalize = ref<FinalizeResult | null>(null)
 const endChapterOverride = ref<boolean | null>(null)
 /** 上一次 advance 返回（展示 at_end/force_state） */
 const lastAdvance = ref<{ at_end?: boolean; auto_at_end?: boolean; force_state?: string; next_chapter?: number; phase?: string } | null>(null)
+
+// 注册章台聊天上下文
+provideChatContext(() => {
+  const ch = detail.value
+  const rev = review.value
+  return {
+    phase: '✍️ 章台写作',
+    system_hint:
+      '作者在章台写作：plot（剧情提纲）→draft（正文）→polish（润色）→review（九项审稿）→finalize（定稿）。'
+      + '当前正在写的章节可能只完成了部分阶段。回答时先看 context 里各阶段文本长度/状态定位问题，'
+      + '如果作者在吐槽白描/逻辑/伏笔/能力长线复用，直接给可替换的段落/句子，不要空泛建议。'
+      + '九项审稿结果已在 context.review 里，不稳项就是作者最需要改的地方；cliche_hits 列出白描锁命中的空泛词。',
+    context: {
+      volume_no: currentVolumeNo.value,
+      chapter_no: currentNo.value || currentChapterNo.value,
+      finalized_at: ch?.finalized_at || null,
+      is_finalized: !!ch?.finalized_at,
+      tab: activeTab.value || null,
+      text_length: {
+        plot: text.plot?.length || 0,
+        draft: text.draft?.length || 0,
+        polish: text.polish?.length || 0,
+      },
+      // 避免超长：正文只截最近 2000 字（作者通常在吐槽最近写的部分）
+      plot_tail: (text.plot || '').slice(-2000),
+      draft_tail: (text.draft || '').slice(-2000),
+      polish_tail: (text.polish || '').slice(-2000),
+      directive: { plot: directive.plot, draft: directive.draft, polish: directive.polish },
+      review: rev ? {
+        blocked: rev.blocked,
+        summary: rev.summary,
+        items: rev.items || [],
+        cliche_hits: rev.cliche_hits || [],
+        overall_assessment: rev.overall_assessment,
+      } : null,
+      chapter: ch ? {
+        title: ch.title || null,
+        chapter_title: (ch as any).chapter_title || null,
+        word_count: (ch as any).word_count || null,
+      } : null,
+    },
+  }
+})
 
 const autoAtEnd = computed(() => {
   // 前端近似：当前章号已是本卷最后一章
@@ -512,6 +556,30 @@ async function doFinalize() {
   }
 }
 
+async function doUnfinalize() {
+  if (busy.value) return
+  try {
+    await ElMessageBox.confirm(
+      `确定要把第 ${currentNo.value} 章从定稿状态撤回吗？正文/润色/审稿结果都会保留，只是退出定稿态，允许修改后重新定稿。`,
+      '反定稿确认',
+      { confirmButtonText: '反定稿', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  busy.value = 'unfinalize'
+  try {
+    await deskApi.unfinalize(currentProjectId.value, currentNo.value)
+    ElMessage.success(`第 ${currentNo.value} 章已退出定稿态，可以继续修改`)
+    await loadOverview()
+    if (currentNo.value) await selectChapter(currentNo.value)
+  } catch (e) {
+    ElMessage.error(`反定稿失败：${(e as Error).message}`)
+  } finally {
+    busy.value = ''
+  }
+}
+
 onMounted(async () => {
   await loadOverview(false)
   loadRefProjects()
@@ -813,7 +881,7 @@ watch(activeTab, (tab) => {
           <template #header>
             <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap">
               <b>审稿</b>
-              <span style="color: #999; font-size: 12px">七项一致性检查：情节逻辑 / 人物目标 / 情感关系 / 物理信息 / 场景过渡 / 章尾钩子 / 跨章联结</span>
+              <span style="color: #999; font-size: 12px">九项一致性检查：情节逻辑 / 人物目标 / 情感关系 / 物理信息 / 场景过渡 / 章尾钩子 / 跨章联结 / 信息揭露节奏 / 克苏鲁白描（空泛套话锁）</span>
               <span style="flex: 1" />
               <el-button
                 v-if="review && review.verdict !== 'pass' && !review.fix_applied"
@@ -843,6 +911,17 @@ watch(activeTab, (tab) => {
               <span style="margin-left: 8px; color: #666">{{ it.problem }}</span>
             </div>
             <el-alert
+              v-if="(review.cliche_hits?.length ?? 0) > 0"
+              type="error"
+              :closable="false"
+              style="margin-top: 6px"
+              title="白描锁命中空泛克苏鲁套话（强制不稳）——需改为温度/触觉、气味、解剖错位、光影声延迟、程序员量化观察之一"
+            >
+              <div v-for="(h, i) in review.cliche_hits" :key="i" style="margin-top: 4px; font-size: 12px; font-family: monospace">
+                <b style="color: #f56c6c">{{ h.word }}</b>：{{ h.context }}
+              </div>
+            </el-alert>
+            <el-alert
               v-if="review.fix_applied"
               type="success"
               :closable="false"
@@ -869,6 +948,17 @@ watch(activeTab, (tab) => {
               <b>定稿</b>
               <span style="color: #999; font-size: 12px">定稿后进入保鲜飞轮：抽取实体 → 伏笔兑现问询 → 核验必现标记 → 整本合成采纳</span>
               <span style="flex: 1" />
+              <el-button
+                v-if="detail.chapter.finalized_at"
+                type="warning"
+                plain
+                size="small"
+                :loading="busy === 'unfinalize'"
+                :disabled="!!busy"
+                @click="doUnfinalize"
+              >
+                反定稿
+              </el-button>
               <el-button type="success" :loading="busy === 'finalize'" :disabled="!!detail.chapter.finalized_at" @click="doFinalize">
                 {{ detail.chapter.finalized_at ? '已定稿' : `定稿第 ${currentNo} 章` }}
               </el-button>

@@ -456,17 +456,23 @@ class _Outline5In(BaseModel):
 
 _OUTLINE5_SYSTEM = (
     "你是《第七日的亡者》长篇小说专职大纲写手。基于给定的副本骨架+选定的跑团走向+唐迟替换角色，"
-    "产出一版唐迟视角 Day1-Day7 大纲。大纲是成品可读的梗概，不是分点清单，要能让作者直接按它写章节细纲。\n\n"
+    "产出一版唐迟视角的七天求生追查死因破局大纲。大纲是成品可读的梗概，不是分点清单，要能让作者直接按它写章节细纲。\n\n"
+    "【双轨时间线·铁律】\n"
+    "- 副本原剧本是独立故事，有自己的时间跨度（几小时/几天/几个月/几代人均可），不要求七日结构；\n"
+    "- day_breakdown 的 day=1..7 指唐迟入戏第1-7天（他自己的T-6→T-0倒计时），不是原剧本的Day1-Day7；\n"
+    "- 两条时间线并行，每天要写清「原剧本此刻正在哪个事件」。\n\n"
     "大纲必须包含：\n"
     "①title：12 字内标题，定这一版的节奏/气质；\n"
     "②one_liner：一句话梗概（40 字内）；\n"
     "③pacing：节奏标签（慢热铺陈/反转密集/开场高能/先甜后刀/步步紧逼 等，可自造）；\n"
-    "④tangchi_entry：唐迟在这版里替换谁、开场身份是什么、何时/如何发现身份问题（若是诡计副本）、第七日死法如何破/被破；\n"
-    "⑤day_breakdown：[Day1..Day7] 每天 80-150 字梗概，写清当天关键行动/转折/死人/线索揭示/代价；\n"
-    "⑥climax：Day7 高潮 100-200 字（怎么破局/死不死/谁活下来/代价是什么）；\n"
-    "⑦blue_star_hook：杀青后带回什么/蓝星小钩子 50 字；\n"
-    "⑧foreshadow_planted：本场埋下的长线伏笔列表（3-5 条，供卷规划参考）。\n\n"
-    "输出严格 JSON：{title,one_liner,pacing,tangchi_entry,day_breakdown:[{day,summary}],climax,blue_star_hook,foreshadow_planted:[str]}。"
+    "④original_module_timeline_note：原剧本时间跨度与入戏点说明（30-80字）；\n"
+    "⑤tangchi_entry：唐迟在这版里替换谁、开场身份是什么、T-0死法如何破/被破、此刻原剧本在哪个事件；\n"
+    "⑥day_breakdown：[入戏第1-7天] 每天 80-150 字梗概（含original_timeline_anchor字段说明原剧本此刻事件），写清当天关键行动/转折/死人/线索揭示/代价；\n"
+    "⑦climax：T-0 高潮 100-200 字（怎么破局/死不死/谁活下来/代价是什么）；\n"
+    "⑧blue_star_hook：杀青后带回什么/蓝星小钩子 50 字；\n"
+    "⑨foreshadow_planted：本场埋下的长线伏笔列表（3-5 条，供卷规划参考）。\n\n"
+    "输出严格 JSON：{title,one_liner,pacing,original_module_timeline_note,tangchi_entry,"
+    "day_breakdown:[{day,summary,original_timeline_anchor}],climax,blue_star_hook,foreshadow_planted:[str]}。"
     "不要输出 JSON 之外的任何文字。"
 )
 
@@ -511,7 +517,7 @@ def _start_outline5(pid: str, sid: str, body: _Outline5In) -> dict:
         db = sel_coc.get("day_breakdown") or []
         for d_entry in db:
             if isinstance(d_entry, dict):
-                context_parts.append(f"Day{d_entry.get('day','?')}：{d_entry.get('summary','')}")
+                context_parts.append(f"原剧本时点{d_entry.get('day','?')}：{d_entry.get('summary','')}")
         if sel_coc.get("final_summary"):
             context_parts.append(f"\n结局：{sel_coc['final_summary'][:600]}")
     if body.tangchi_role:
@@ -538,7 +544,7 @@ def _start_outline5(pid: str, sid: str, body: _Outline5In) -> dict:
             flavor = pacing_seeds[i % len(pacing_seeds)]
             messages = [
                 {"role": "system", "content": _OUTLINE5_SYSTEM},
-                {"role": "user", "content": context_text + f"\n\n【本版节奏定向】请按「{flavor}」的节奏风格来写，让这一版和其他版有明显差别。注意：唐迟可以替换任意角色（PL/NPC/Boss/幕后），允许诡计副本/身份错配/虚假记忆；七日锚必须清晰。"},
+                {"role": "user", "content": context_text + f"\n\n【本版节奏定向】请按「{flavor}」的节奏风格来写，让这一版和其他版有明显差别。注意：唐迟可以替换任意角色（PL/NPC/Boss/幕后），允许诡计副本/身份错配/虚假记忆；唐迟个人T-7→T-0倒计时锚必须清晰，同时写清原剧本时间线并行进展。"},
             ]
             try:
                 def _call():

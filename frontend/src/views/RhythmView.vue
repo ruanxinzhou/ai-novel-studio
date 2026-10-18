@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import { rhythmApi } from '../api'
 import type { RhythmBlueprint, DensityMap, RhythmBeat } from '../api'
 import { currentProjectId } from '../state'
+import { provideChatContext } from '../chatContext'
 
 const props = defineProps<{
   volNo: number
@@ -20,6 +21,50 @@ const loading = ref(false)
 const finalizing = ref(false)
 const isMock = ref(false)
 const rhythmDirective = ref('')
+
+// 注册节奏骨架聊天上下文
+provideChatContext(() => {
+  const bp = blueprint.value as any
+  const dm = densityMap.value as any
+  return {
+    phase: '📅 节奏骨架',
+    system_hint:
+      '作者在唐迟入戏第1-7天（T-6→T-0，这是唐迟个人七天求生倒计时，不是原剧本的Day1-Day7）上排事件、气氛曲线、密度、必现标记。'
+      + '【双轨时间线】每条 day_beat 要同时标注「原剧本此刻正在哪个事件」，让作者清楚原剧本事件流和唐迟倒计时并行。'
+      + '回答时注意三折死因节奏：'
+      + '入戏前3天假死因红鲱鱼误导→第4-5天核心反转（真死因揭穿）→第6-7天（T-1→T-0）规则利用破局。'
+      + '气氛曲线要缓慢攀升、必现标记（白胎会/缝胎客/墨胆珠/湿红线/七格帖/订书钉）分布要均匀。',
+    context: {
+      project_id: currentProjectId.value,
+      volume_no: props.volNo,
+      user_directive: rhythmDirective.value || null,
+      is_mock: isMock.value,
+      blueprint: bp ? {
+        title: bp.title || null,
+        premise: (bp.premise || '').slice(0, 800),
+        day_beats: Array.isArray(bp.day_beats) ? bp.day_beats.map((d: any) => ({
+          day: d.day || d.day_no,
+          title: d.title,
+          mood: d.mood,
+          summary: (d.summary || d.events_text || '').slice(0, 400),
+          beats: Array.isArray(d.beats) ? d.beats.slice(0, 8).map((b: any) => ({
+            label: b.label || b.name, description: (b.description || '').slice(0, 200),
+          })) : [],
+        })) : [],
+        pacing: bp.pacing || null,
+        suggested_chapters: bp.suggested_chapters || null,
+      } : null,
+      density_map: dm ? {
+        total_words: dm.total_words,
+        chapter_count: dm.chapter_count,
+        days: Array.isArray(dm.days) ? dm.days.map((d: any) => ({
+          day: d.day || d.day_no, chapters: d.chapters, words: d.words,
+          tension: d.tension, density: d.density,
+        })) : [],
+      } : null,
+    },
+  }
+})
 
 // ---- Blueprint edit dialog ----
 const editVisible = ref(false)
@@ -230,8 +275,8 @@ const chapterColumns = [
     <!-- 顶部标题 -->
     <div class="rhythm-header">
       <div class="rhythm-title">
-        <h2>节奏骨架 · 第七日</h2>
-        <p class="sub">基于死亡/高潮/线索分布推演整卷节奏，给出章节分配建议</p>
+        <h2>节奏骨架 · 双轨时间线</h2>
+        <p class="sub">按唐迟入戏第1-7天（T-6→T-0）推演整卷节奏，同时标注原剧本事件并行</p>
       </div>
       <div class="rhythm-actions">
         <el-input

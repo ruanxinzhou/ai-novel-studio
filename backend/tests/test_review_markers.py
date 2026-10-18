@@ -9,6 +9,7 @@ from app.pipeline import PromptStore
 from app.review import (
     MarkerStore,
     extract_markers,
+    find_cliche_horror_hits,
     markers_material,
     review_chapter,
 )
@@ -16,6 +17,10 @@ from app.providers.base import LLMResponse, Provider, Usage
 
 
 # ---- 审稿器 ----
+
+_ALL9 = ["剧情逻辑", "人物目标", "情绪关系", "身体信息", "场景转场",
+         "章末承接", "跨章联结", "信息揭露节奏", "克苏鲁白描"]
+
 
 def _review_json(items: list[tuple[str, str, str]], summary: str = "总评") -> str:
     return '{"items": [' + ",".join(
@@ -42,15 +47,15 @@ class JsonProvider(Provider):
 
 
 def _items(all_stable: bool = True) -> list[tuple[str, str, str]]:
-    names = ["剧情逻辑", "人物目标", "情绪关系", "身体信息", "场景转场", "章末承接", "跨章联结"]
-    return [(n, "稳" if all_stable else "不稳", "" if all_stable else f"{n}有问题") for n in names]
+    return [(n, "稳" if all_stable else "不稳", "" if all_stable else f"{n}有问题") for n in _ALL9]
 
 
 def test_review_all_stable_passes():
     p = JsonProvider([_review_json(_items(True), "可以交稿")])
     r = review_chapter(p, PromptStore(), "大纲", "正文")
-    assert r.verdict == "pass" and len(r.items) == 7
+    assert r.verdict == "pass" and len(r.items) == 9
     assert r.summary == "可以交稿"
+    assert r.cliche_hits == []
 
 
 def test_review_one_unstable_still_passes():
@@ -69,20 +74,19 @@ def test_review_two_unstable_blocks():
 
 
 def test_review_missing_item_counts_as_unstable():
-    # 模型只回了 6 项：缺的第 7 项必须判不稳，防静默放水（1 项不稳仍放行）
-    items = _items(True)[:6]
+    # 模型只回了 7 项：缺两项必须判不稳 → blocked
+    items = _items(True)[:7]
     r = review_chapter(JsonProvider([_review_json(items)]), PromptStore(), "o", "p")
-    missing = [i for i in r.items if i.name == "跨章联结"][0]
-    assert missing.status == "不稳"
-    assert r.verdict == "pass"
-    # 缺两项 → 两项不稳 → blocked
-    r2 = review_chapter(JsonProvider([_review_json(_items(True)[:5])]), PromptStore(), "o", "p")
-    assert r2.verdict == "blocked"
+    missing_names = {i.name for i in r.items if i.status == "不稳"}
+    assert "信息揭露节奏" in missing_names
+    assert "克苏鲁白描" in missing_names
+    assert r.verdict == "blocked"
 
 
 def test_review_repairs_truncated_json():
     good = _review_json(_items(True))
-    truncated = good[: len(good) // 2]  # 截断（可词法修复：补闭合）
+    # 半截字符串 → 词法无法修复为合法 JSON → complete_structured 会重试第二次，拿到 good 即通过
+    truncated = '{"items": [{"name": "剧情逻辑", "status": "稳", "problem'  # 明显不闭合
     r = review_chapter(JsonProvider([truncated, good]), PromptStore(), "o", "p")
     assert r.verdict == "pass" and r.attempts == 2
 
@@ -91,24 +95,23 @@ def test_review_uses_store_instruction_and_review_system():
     p = JsonProvider([_review_json(_items(True))])
     review_chapter(p, PromptStore(), "本章大纲文", "正文文")
     assert "终审编辑" in p.calls[0][0]["content"]
-    assert "七项清单" in p.calls[0][1]["content"]
-    assert "跨章联结" in p.calls[0][0]["content"]
+    assert "九项清单" in p.calls[0][0]["content"]
+    assert "克苏鲁白描" in p.calls[0][0]["content"]
     assert "本章大纲文" in p.calls[0][1]["content"]
 
 
 def test_review_prev_tail_injected():
-    """prev_tail 给定时作为第七项对照材料注入；不给时不硬造。
-    注意：review 指令文本自身含两处「【上一章结尾】」字样，故用计数断言。"""
+    """prev_tail 给定时作为第七项对照材料注入；不给时不硬造。"""
     p = JsonProvider([_review_json(_items(True))])
     review_chapter(p, PromptStore(), "o", "p", prev_tail="上一章结尾五百字。")
     user = p.calls[0][1]["content"]
-    assert user.count("【上一章结尾】") == 3      # 指令 2 处 + 注入块 1 处
     assert "上一章结尾五百字" in user
-    assert user.rindex("【上一章结尾】") < user.rindex("【待审正文】")
+    assert user.rindex("【上一章结尾】") < user.rindex("【白描锁命中清单】") < user.rindex("【待审正文】")
 
     p2 = JsonProvider([_review_json(_items(True))])
     review_chapter(p2, PromptStore(), "o", "p", prev_tail="   ")
-    assert p2.calls[0][1]["content"].count("【上一章结尾】") == 2   # 只剩指令里那两处
+    # 空 prev_tail 不应该插入【上一章结尾】块；user 里的 REVIEW_SYSTEM 本身不含该标签
+    assert "上一章结尾" not in p2.calls[0][1]["content"] or "上一章结尾五百字" not in p2.calls[0][1]["content"]
 
 
 def test_review_store_layer_editable():
@@ -116,6 +119,52 @@ def test_review_store_layer_editable():
     store.set_override("review", "审查重点改为动作戏", "测试")
     assert "动作戏" in store.effective("review")
     store.reset("review")
+
+
+# ---- 克苏鲁白描锁 ----
+
+def test_find_cliche_horror_hits_basic():
+    prose = "走廊尽头传来不可名状的低语，他只觉毛骨悚然，san值狂掉。"
+    hits = find_cliche_horror_hits(prose)
+    words = [h["word"] for h in hits]
+    assert words == ["不可名状", "毛骨悚然", "san值狂掉"]
+    for h in hits:
+        assert "context" in h and h["context"].startswith("…") and h["context"].endswith("…")
+
+
+def test_find_cliche_horror_hits_clean():
+    assert find_cliche_horror_hits("海风咸湿，指缝结了半透明的盐晶，他数着自己的心跳，每秒一次。") == []
+    assert find_cliche_horror_hits("") == []
+
+
+def test_review_cliche_lock_forces_unstable():
+    """白描锁命中 → 即使 LLM 九项全判稳，第九项「克苏鲁白描」也必须被强制覆写为不稳，
+    并且 cliche_hits 要在结果里带出来。"""
+    prose = "他推开木门，一股令人窒息的恐惧扑面而来。"
+    p = JsonProvider([_review_json(_items(True))])
+    r = review_chapter(p, PromptStore(), "o", prose)
+    coc = [i for i in r.items if i.name == "克苏鲁白描"][0]
+    assert coc.status == "不稳"
+    assert "令人窒息的恐惧" in coc.problem
+    assert any(h["word"] == "令人窒息的恐惧" for h in r.cliche_hits)
+    # 只命中 1 处白描 → 其他 8 项稳 → 总共 1 项不稳 → 仍 pass（阈值是 2）
+    assert r.verdict == "pass"
+    # 白描锁命中清单必须注入 user prompt，强制模型按此清单判
+    user_msg = p.calls[0][1]["content"]
+    assert "【白描锁命中清单（强制不稳项" in user_msg
+    assert "令人窒息的恐惧" in user_msg
+
+
+def test_review_cliche_lock_two_hits_blocks():
+    """两处白描锁命中 + 无其他不稳 → 仍只有 1 个 item 不稳（第九项），verdict=pass；
+    但若再加一项其他不稳，就 blocked。"""
+    prose = "不可名状的黑影让他倒吸一口凉气，毛骨悚然。"
+    items = _items(True)
+    items[3] = ("身体信息", "不稳", "手部异化前后矛盾")  # 身体信息也不稳
+    p = JsonProvider([_review_json(items)])
+    r = review_chapter(p, PromptStore(), "o", prose)
+    assert r.verdict == "blocked"
+    assert len(r.cliche_hits) >= 2
 
 
 # ---- 必现标记 ----
@@ -191,8 +240,7 @@ def test_api_review_endpoint(client, monkeypatch):
     class FakeRouter:
         def chat(self, step, messages, model=None, max_tokens=None):
             assert step == "review"
-            names = ["剧情逻辑", "人物目标", "情绪关系", "身体信息", "场景转场", "章末承接", "跨章联结"]
-            items = ",".join(f'{{"name": "{n}", "status": "稳", "problem": ""}}' for n in names)
+            items = ",".join(f'{{"name": "{n}", "status": "稳", "problem": ""}}' for n in _ALL9)
             return LLMResponse(text=f'{{"items": [{items}], "summary": "ok"}}',
                                usage=Usage(input_tokens=1, output_tokens=1))
 
@@ -202,7 +250,8 @@ def test_api_review_endpoint(client, monkeypatch):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["verdict"] == "pass" and body["unstable_count"] == 0
-    assert len(body["items"]) == 7 and body["items"][-1]["name"] == "跨章联结"
+    assert len(body["items"]) == 9 and body["items"][-1]["name"] == "克苏鲁白描"
+    assert "cliche_hits" in body
 
 
 def test_api_run_injects_pending_markers(client, monkeypatch):
