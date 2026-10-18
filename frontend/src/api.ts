@@ -1100,6 +1100,15 @@ export const PHASE_TITLES: Record<string, string> = {
   desk: '日更',
   settle: '杀青归账',
   interlude: '蓝星间章',
+  // 旧卷回看（只读）
+  adapt_review: '回看·剧本改编',
+  simulate_review: '回看·模拟跑团',
+  embody_review: '回看·魂穿设计',
+  scaffold_review: '回看·卷内详设',
+  rhythm_review: '回看·节奏骨架',
+  desk_review: '回看·日更',
+  settle_review: '回看·杀青',
+  interlude_review: '回看·蓝星间章',
 }
 export const AI_MODE_LABELS: Record<string, string> = {
   review: '列账',
@@ -1333,6 +1342,12 @@ export const deskApi = {
       method: 'POST',
       body: JSON.stringify({ auto_entities: autoEntities, payoff: payoff ?? null }),
     }),
+  // 反定稿：清 finalized_at，保留正文/审稿结果，允许改完再定稿
+  unfinalize: (pid: string, chapter: number) =>
+    req<{ chapter: number; finalized_at: string; ok: boolean }>(
+      `/api/projects/${pid}/desk/${chapter}/unfinalize`,
+      { method: 'POST' },
+    ),
 }
 
 // ---- 工作台 adapt 阶段：PDF 上传 → 5 版并行改编 → 选版 ----
@@ -2070,3 +2085,22 @@ export const volumesApi = {
   createDungeon: (pid: string, title = '') => adaptApi.createVolume(pid, title),
 }
 
+
+// ---- 全局 AI 聊天（悬浮窗） ----
+export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string }
+export interface ChatReq {
+  messages: ChatMessage[]
+  model?: string | null
+  max_tokens?: number | null
+  phase?: string | null
+  system_hint?: string | null
+  progress?: Record<string, any> | null
+  context?: Record<string, any> | null
+}
+export interface ChatResp { text: string; model?: string | null }
+
+export const chatApi = {
+  send(body: ChatReq) {
+    return req<ChatResp>('/api/chat', { method: 'POST', body: JSON.stringify(body) })
+  },
+}
