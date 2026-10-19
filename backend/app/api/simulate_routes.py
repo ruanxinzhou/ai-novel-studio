@@ -617,13 +617,19 @@ def _collage(pid: str, vol_no: int, body: _CollageIn) -> dict:
     lines.append(f"基调：{base.get('one_liner', '')}")
     lines.append("")
 
+    # 默认段落标签（兼容旧前端固定 6 段）；新前端允许作者自定义增删/重命名段落，
+    # 会在 sel 里带 label 字段，下面会优先用它覆盖这里的标签。
     SECTION_LABELS = {
         "opening": "开场",
-        "climax": "高潮",
-        "death_1": "第一个死亡",
-        "death_2": "第二个死亡",
+        "hook": "钩子 / 异兆初现",
+        "clue_gather": "线索汇集",
+        "first_death": "第一起死亡 / 第一个牺牲",
+        "mid_reveal": "中段反转",
+        "climax": "高潮 / 真相揭露",
+        "escape": "逃出生天 / 代价结算",
         "ending": "结局",
-        "npc_fates": "NPC 命运",
+        "npc_fates": "NPC 命运总览",
+        "aftermath": "余波 / 尾声",
     }
     for sel in selections:
         if not isinstance(sel, dict):
@@ -631,10 +637,11 @@ def _collage(pid: str, vol_no: int, body: _CollageIn) -> dict:
         sec = sel.get("section", "")
         fi = int(sel.get("from_index", 0) or 0)
         note = sel.get("note", "") or ""
+        # 作者自定义段落名优先；没有则查预设字典；都没有就直接用 sec key
+        sec_label = sel.get("label") or SECTION_LABELS.get(sec, sec) or sec or "段落"
         if fi < 0 or fi >= len(variants):
             continue
         vv = variants[fi]
-        sec_label = SECTION_LABELS.get(sec, sec)
         lines.append(f"----- {sec_label}（取自 {vv.get('label', f'第{fi+1}场')}）-----")
         if note:
             lines.append(f"备注：{note}")

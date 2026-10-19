@@ -71,19 +71,84 @@ const optionsOpen = ref(false)
 
 // ---- 拼贴参数 ----
 const collageBase = ref(0)
-const SECTIONS = [
-  { key: 'opening', label: '开场' },
-  { key: 'death_1', label: '第一个死亡' },
-  { key: 'death_2', label: '第二个死亡' },
-  { key: 'climax', label: '高潮' },
+// 段落预设建议（不是硬锁——作者可以改 label、增删任意段）
+const SECTION_PRESETS: { key: string; label: string }[] = [
+  { key: 'opening', label: '开场 / 入局' },
+  { key: 'hook', label: '钩子 / 异兆初现' },
+  { key: 'clue_gather', label: '线索汇集 / 第一次探查' },
+  { key: 'first_death', label: '第一起死亡 / 第一个牺牲' },
+  { key: 'mid_reveal', label: '中段反转 / 认知崩塌' },
+  { key: 'climax', label: '高潮 / 真相揭露' },
+  { key: 'escape', label: '逃出生天 / 代价结算' },
   { key: 'ending', label: '结局' },
-  { key: 'npc_fates', label: 'NPC 命运' },
+  { key: 'npc_fates', label: 'NPC 命运总览' },
+  { key: 'aftermath', label: '余波 / 尾声' },
 ]
+// 拼贴段落：[{ id, key, label, from, note }]——可自由增删/改名
+type CollageRow = { id: string; key: string; label: string; from: number; note: string }
+const _cid = () => `s_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+const collageRows = ref<CollageRow[]>([])
+const addSecMenuVisible = ref(false)
+function initCollageRows() {
+  if (collageRows.value.length > 0) return
+  // 默认放 4 段最通用的：开场 / 中段反转 / 高潮 / 结局；作者可自由改
+  const defaultKeys = ['opening', 'climax', 'ending', 'npc_fates']
+  collageRows.value = defaultKeys.map((k) => {
+    const preset = SECTION_PRESETS.find((p) => p.key === k)
+    return { id: _cid(), key: k, label: preset?.label || k, from: collageBase.value, note: '' }
+  })
+}
+function addPresetSection(preset: { key: string; label: string }) {
+  collageRows.value.push({ id: _cid(), key: preset.key, label: preset.label, from: collageBase.value, note: '' })
+  addSecMenuVisible.value = false
+}
+function addCustomSection() {
+  addSecMenuVisible.value = false
+  const label = window.prompt('新段落名称（例如「警察介入」「旧信被截」）：', '')
+  if (!label) return
+  collageRows.value.push({ id: _cid(), key: 'custom_' + Date.now(), label: label.trim(), from: collageBase.value, note: '' })
+}
+function removeSection(id: string) {
+  collageRows.value = collageRows.value.filter((r) => r.id !== id)
+}
+function renameSection(id: string) {
+  const row = collageRows.value.find((r) => r.id === id)
+  if (!row) return
+  const label = window.prompt('新段落名：', row.label)
+  if (label && label.trim()) row.label = label.trim()
+}
+
+// 选项标签更丰富：场号 + 风格角标 + one_liner 首句
 const FROM_OPTIONS = computed(() =>
-  allVariants.value.map((v, i) => ({ value: i, label: v.label || `第${i+1}场` })),
+  allVariants.value.map((v, i) => {
+    const num = i + 1
+    const flavor = v.flavor || ''
+    const one = (v.one_liner || '').replace(/\s+/g, ' ').slice(0, 60)
+    const label = `第${num}场${flavor ? ' · ' + flavor : ''}｜${one}`
+    return { value: i, label, shortLabel: `第${num}场${flavor ? '·' + flavor : ''}`, one_liner: v.one_liner || '', flavor }
+  }),
 )
-const collageSelections = ref<Record<string, number>>({})
-const collageNotes = ref<Record<string, string>>({})
+function optionOf(i: number) {
+  return FROM_OPTIONS.value.find((o) => o.value === i) || FROM_OPTIONS.value[0]
+}
+
+// 兼容已完成态回读——把之前保存的 selections 数组转回 rows
+function hydrateCollageFromSaved(saved: any) {
+  if (!saved || collageRows.value.length > 0) return
+  const sel = saved.selections
+  if (Array.isArray(sel) && sel.length) {
+    collageRows.value = sel.map((s: any) => ({
+      id: _cid(),
+      key: s.section || 'custom',
+      label: s.label || SECTION_PRESETS.find((p) => p.key === s.section)?.label || s.section || '段落',
+      from: Number(s.from_index) || 0,
+      note: s.note || '',
+    }))
+    collageBase.value = Number(saved.base_index) || 0
+  } else {
+    initCollageRows()
+  }
+}
 const collageUserNote = ref('')
 
 // ---- 自定义/编辑 dialog ----
@@ -175,6 +240,10 @@ async function loadVolume() {
     volume.value = r.volume
     if (r.volume?.simulated_run) {
       uiState.value = 'completed'
+      // 若是拼贴模式则回读 selections，让「重跑」之前的选择不丢失
+      if (r.volume.simulated_run.mode === 'collage') {
+        hydrateCollageFromSaved(r.volume.simulated_run.collage)
+      }
     } else {
       // 查已有 job
       try {
@@ -226,13 +295,8 @@ function applyJob(j: Job) {
     extraVariants.value = []
     uiState.value = 'result'
     pickedVariantId.value = null
-    // 默认拼贴 base = 0；selections 默认每段从 base
-    if (Object.keys(collageSelections.value).length === 0) {
-      collageBase.value = 0
-      SECTIONS.forEach((s) => {
-        collageSelections.value[s.key] = 0
-      })
-    }
+    // 初始化拼贴段落（只在第一次 done 时初始化，避免覆盖用户已编辑的 rows）
+    if (collageRows.value.length === 0) initCollageRows()
   } else if (j.status === 'error') {
     running.value = false
     uiState.value = 'ready'
@@ -299,10 +363,12 @@ async function onPickOne(id: string | null, idx?: number) {
 async function onCollage() {
   const pid = currentProjectId.value
   if (!pid || !job.value) return
-  const selections = SECTIONS.map((s) => ({
-    section: s.key,
-    from_index: collageSelections.value[s.key] ?? collageBase.value,
-    note: collageNotes.value[s.key] ?? '',
+  if (collageRows.value.length === 0) initCollageRows()
+  const selections = collageRows.value.map((r) => ({
+    section: r.key,
+    label: r.label,
+    from_index: r.from ?? collageBase.value,
+    note: r.note ?? '',
   }))
   try {
     const r = await simulateApi.collage(pid, props.volNo, {
@@ -331,6 +397,7 @@ async function onReset() {
     job.value = null
     pickedVariantId.value = null
     extraVariants.value = []
+    collageRows.value = []
     uiState.value = 'ready'
     ElMessage.success('已清空跑团结果，可以重跑')
   } catch (e: any) {
@@ -549,32 +616,100 @@ watch(() => props.volNo, () => {
       <el-card shadow="never" class="collage-card">
         <h3>🧩 或：拼贴合成主跑团记录</h3>
         <p class="hint">
-          拼贴模式：从 3 场 AI 版本中各挑你喜欢的元素，机械合并为一份主跑团记录（智能 AI 合成后续迭代）。自定义版本请用「单选」。
+          拼贴模式：从几场 AI 版本里挑你喜欢的段落，按你自己命名的节点合并成一份主跑团记录。
+          下方段落不是锁死的——你可以改段落名、加段、删段、换段。自定义版本请用「单选」。
         </p>
-        <div class="collage-row">
-          <label>主线骨架：</label>
-          <el-radio-group v-model="collageBase">
-            <el-radio v-for="o in FROM_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</el-radio>
-          </el-radio-group>
+        <div class="collage-base-row">
+          <label>主线骨架（其他段落未指定时默认跟它）：</label>
+          <el-select v-model="collageBase" class="from-select" popper-class="collage-popper">
+            <el-option
+              v-for="o in FROM_OPTIONS"
+              :key="'base-' + o.value"
+              :value="o.value"
+              :label="o.label"
+            >
+              <div class="opt-row">
+                <span class="opt-num">第{{ o.value + 1 }}场</span>
+                <el-tag v-if="o.flavor" size="small" type="warning" class="opt-flavor">{{ o.flavor }}</el-tag>
+              </div>
+              <div class="opt-one">{{ o.one_liner }}</div>
+            </el-option>
+          </el-select>
         </div>
+        <div class="collage-base-one">
+          <span class="chip">{{ optionOf(collageBase).shortLabel }}</span>
+          <span class="one-liner-txt">{{ optionOf(collageBase).one_liner }}</span>
+        </div>
+
         <div class="section-grid">
-          <div v-for="s in SECTIONS" :key="s.key" class="section-row">
-            <span class="section-label">{{ s.label }}</span>
-            <el-select v-model="collageSelections[s.key]" :placeholder="`从${(FROM_OPTIONS.find(o => o.value === collageBase)?.label) || '主线'}取`">
-              <el-option v-for="o in FROM_OPTIONS" :key="o.value" :label="o.label" :value="o.value" />
+          <div v-for="(row, idx) in collageRows" :key="row.id" class="section-row">
+            <span class="section-idx">{{ idx + 1 }}.</span>
+            <el-input
+              v-model="row.label"
+              class="section-label-input"
+              placeholder="段落名（可改）"
+            />
+            <el-select v-model="row.from" class="from-select" popper-class="collage-popper"
+                       :placeholder="`默认：${optionOf(collageBase).shortLabel}`">
+              <el-option
+                v-for="o in FROM_OPTIONS"
+                :key="row.id + '-' + o.value"
+                :value="o.value"
+                :label="o.label"
+              >
+                <div class="opt-row">
+                  <span class="opt-num">第{{ o.value + 1 }}场</span>
+                  <el-tag v-if="o.flavor" size="small" type="warning" class="opt-flavor">{{ o.flavor }}</el-tag>
+                </div>
+                <div class="opt-one">{{ o.one_liner }}</div>
+              </el-option>
             </el-select>
             <el-input
-              v-model="collageNotes[s.key]"
-              placeholder="备注（可选）"
+              v-model="row.note"
+              placeholder="备注（可选：想保留的细节/要删掉的枝节）"
               size="small"
               class="section-note"
             />
+            <el-button link type="primary" size="small" @click="renameSection(row.id)" title="重命名">✎</el-button>
+            <el-button link type="danger" size="small" @click="removeSection(row.id)" title="删除此段">✕</el-button>
+          </div>
+          <div class="selected-summary" v-for="row in collageRows" :key="'sum-' + row.id">
+            <span class="sum-section">{{ row.label }}</span>
+            <span class="chip chip-sm">{{ optionOf(row.from).shortLabel }}</span>
+            <span class="one-liner-txt one-liner-txt-sm">{{ optionOf(row.from).one_liner }}</span>
           </div>
         </div>
+
+        <div class="add-section-row">
+          <el-popover
+            v-model:visible="addSecMenuVisible"
+            placement="bottom-start"
+            :width="320"
+            trigger="click"
+          >
+            <template #reference>
+              <el-button size="small" plain>+ 添加段落</el-button>
+            </template>
+            <div class="preset-list">
+              <div class="preset-tip">从常用段落里挑：</div>
+              <el-button
+                v-for="p in SECTION_PRESETS"
+                :key="p.key"
+                size="small"
+                text
+                class="preset-btn"
+                @click="addPresetSection(p)"
+              >{{ p.label }}</el-button>
+              <el-divider style="margin: 8px 0" />
+              <el-button size="small" type="primary" link @click="addCustomSection">✎ 自定义段落名…</el-button>
+            </div>
+          </el-popover>
+        </div>
+
         <el-input
           v-model="collageUserNote"
           type="textarea"
-          :rows="3"
+          :rows="2"
           placeholder="作者备注：整体基调、想保留的细节、后续调整说明…"
           class="user-note"
         />
@@ -754,38 +889,136 @@ watch(() => props.volNo, () => {
   font-size: 13px;
   margin: 0 0 16px 0;
 }
-.collage-row {
-  margin-bottom: 16px;
+.collage-base-row {
+  margin-bottom: 8px;
   display: flex;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
 }
-.collage-row label {
+.collage-base-row label {
   font-weight: 600;
+  font-size: 13px;
+}
+.collage-base-one {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  background: #fff;
+  border: 1px dashed #d9e3f0;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
 }
 .section-grid {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   margin-bottom: 12px;
 }
 .section-row {
   display: flex;
   align-items: center;
   gap: 8px;
+  background: #fff;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #eee;
 }
-.section-label {
-  width: 100px;
+.section-idx {
+  color: #999;
   font-size: 13px;
-  color: #444;
+  width: 22px;
+  flex-shrink: 0;
 }
-.section-row .el-select {
-  width: 140px;
+.section-label-input {
+  width: 180px;
+  flex-shrink: 0;
+}
+.section-row .from-select {
+  width: 260px;
+  flex-shrink: 0;
 }
 .section-note {
   flex: 1;
+  min-width: 140px;
 }
+.selected-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 10px 4px 38px;
+  font-size: 12px;
+  color: #666;
+}
+.sum-section {
+  color: #333;
+  font-weight: 600;
+  min-width: 90px;
+}
+.chip {
+  background: #ecf5ff;
+  color: #409eff;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.chip-sm { font-size: 11px; padding: 0 6px; }
+.one-liner-txt {
+  color: #888;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.one-liner-txt-sm { font-size: 11px; -webkit-line-clamp: 1; }
+
+.add-section-row {
+  margin-bottom: 10px;
+}
+.preset-list .preset-tip {
+  font-size: 12px;
+  color: #888;
+  margin-bottom: 6px;
+}
+.preset-list .preset-btn {
+  display: inline-block;
+  margin: 2px 4px 2px 0;
+  font-size: 12px;
+}
+
+/* 下拉选项的两行式展示 */
+:global(.collage-popper) .el-select-dropdown__item {
+  height: auto;
+  line-height: 1.4;
+  padding: 8px 12px;
+}
+.opt-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.opt-num {
+  font-weight: 600;
+  color: #409eff;
+  font-size: 13px;
+}
+.opt-flavor {
+  font-size: 11px;
+}
+.opt-one {
+  color: #888;
+  font-size: 12px;
+  margin-top: 2px;
+  white-space: normal;
+  word-break: break-all;
+}
+
 .user-note {
   margin-top: 8px;
 }
