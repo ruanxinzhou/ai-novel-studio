@@ -39,11 +39,11 @@ _RHYTHM_SYSTEM = """你是一名克苏鲁风格无限流小说的节奏设计师
     {"type": "dearth", "day": 4, "msg": "第4天无高潮节点，节奏可能塌腰"},
     {"type": "cluster", "day": 5, "msg": "第5天同时有死亡+高潮+3条线索，信息过载"}
   ],
-  "suggested_length": 95000,
-  "suggested_chapter_range": [12, 16],
+  "suggested_length": 63000,
+  "suggested_chapter_range": [14, 20],
   "chapter_plan": [
-    {"chapter": 1, "day": 1, "focus": "入本+第一异常（原剧本：xx事件）", "words": 6500, "beat_type": "hook"},
-    {"chapter": 2, "day": 1, "focus": "宿管之死+规则建立（原剧本：xx）", "words": 7000, "beat_type": "sell"}
+    {"chapter": 1, "day": 1, "focus": "入本+第一异常（原剧本：xx事件）", "words": 4500, "beat_type": "hook"},
+    {"chapter": 2, "day": 1, "focus": "宿管之死+规则建立（原剧本：xx）", "words": 4500, "beat_type": "sell"}
   ],
   "notes": "整体节奏建议：前3章黄金三章拉满恐怖密度，第4章给主角短暂喘息+误导红鲱鱼..."
 }
@@ -52,9 +52,10 @@ _RHYTHM_SYSTEM = """你是一名克苏鲁风格无限流小说的节奏设计师
 - pacing_ratio 四段 setup/build/climax/cooldown 加起来必须等于 1.0，每段 0.05~0.55。
 - key_beats_progress 长度必须是 7，day=1~7 各一条（唐迟入戏第1-7天），intensity 为 1~7 的整数（7=T-0终极高潮），label 4-8 字；每条必须带 original_timeline_anchor 标注原剧本此刻事件。
 - warnings 是数组，可以为空。每条必须带 type（dearth=真空日，cluster=过载日，front_load=前重后轻，back_load=前轻后重）、day（除 front_load/back_load 外必填）、msg（中文一句话描述问题）。
-- suggested_length：整卷总字数（整数，50000~150000）。
-- suggested_chapter_range：[min, max] 两个整数，10~25 之间，min<=max。
-- chapter_plan：章节分配数组，长度必须在 [min, max] 之间。每条包含 chapter（从 1 开始递增）、day（1~7，指唐迟入戏第几天）、focus（一句话 10-30 字本章焦点，必须在括号里标注原剧本此刻事件）、words（本章预估字数，整数 4000~9000）、beat_type（hook/sell/engine/climax/cooldown 之一）。
+- suggested_length：整卷总字数（整数，建议 63000~90000，即 14~20 章 × 4500 字）。
+- suggested_chapter_range：[min, max] 两个整数，14~20 之间，min<=max。
+- chapter_plan：章节分配数组，长度必须在 [min, max] 之间；每章 4000-5000 字，不短于 4000、不超过 5000，推荐 4500。每条包含 chapter（从 1 开始递增的卷内相对章号，见下方说明）、day（1~7，指唐迟入戏第几天）、focus（一句话 10-30 字本章焦点，必须在括号里标注原剧本此刻事件）、words（本章预估字数，整数 4000~5000，推荐 4500）、beat_type（hook/sell/engine/climax/cooldown 之一）。
+- 【关于章号】chapter_plan[*].chapter 从 1 开始递增，表示卷内相对章号，不要加全局偏移；后端落盘时会根据 Volume.start_chapter_no 自动转为全书章号。
 - notes：一段 100-200 字的整体节奏建议，克苏鲁阴冷基调。
 
 注意：节点密度图会由服务端本地计算，你无需重复统计，但要基于这些密度信息给出合理的 warnings、intensity 曲线与章节分配。
@@ -137,7 +138,7 @@ def _all_scaffold_locked(vol) -> bool:
 
 
 def _mock_blueprint() -> dict:
-    """克苏鲁基调硬编码 mock 节奏蓝图（14 章在 [12,16] 区间内，含 3 条 warnings）。"""
+    """克苏鲁基调硬编码 mock 节奏蓝图（14 章，每章 4500 字，含 3 条 warnings）。"""
     return {
         "pacing_ratio": {"setup": 0.18, "build": 0.30, "climax": 0.38, "cooldown": 0.14},
         "key_beats_progress": [
@@ -154,25 +155,25 @@ def _mock_blueprint() -> dict:
             {"type": "cluster", "day": 5, "msg": "第5天同时有死亡+高潮+3条线索，信息过载，建议分散线索到第6天"},
             {"type": "front_load", "msg": "前3天死亡/线索密度过高，若不控制字数会让读者审美疲劳"},
         ],
-        "suggested_length": 98000,
-        "suggested_chapter_range": [12, 16],
+        "suggested_length": 63000,
+        "suggested_chapter_range": [14, 20],
         "chapter_plan": [
-            {"chapter": 1,  "day": 1, "focus": "唐迟醒来/宿舍异象/倒计时出现",          "words": 6500, "beat_type": "hook"},
-            {"chapter": 2,  "day": 1, "focus": "宿管缢亡/咸水规则初显",                "words": 7000, "beat_type": "sell"},
-            {"chapter": 3,  "day": 2, "focus": "刘保安溺亡/海水折进校园的认知冲击",    "words": 7200, "beat_type": "engine"},
-            {"chapter": 4,  "day": 2, "focus": "周凯半条微信/轮回疑云",                "words": 6800, "beat_type": "engine"},
-            {"chapter": 5,  "day": 3, "focus": "校史馆报纸睁眼/陈阿妹之名",            "words": 7200, "beat_type": "engine"},
-            {"chapter": 6,  "day": 3, "focus": "盐圈困影/第一次主动求生",              "words": 7000, "beat_type": "engine"},
-            {"chapter": 7,  "day": 4, "focus": "短暂喘息/虚假安全感/红鲱鱼误导",        "words": 6500, "beat_type": "cooldown"},
-            {"chapter": 8,  "day": 4, "focus": "苏雅血字童谣/点名开始",                "words": 7000, "beat_type": "engine"},
-            {"chapter": 9,  "day": 5, "focus": "林薇坠楼/影子真相/中盘反转",           "words": 7500, "beat_type": "climax"},
-            {"chapter": 10, "day": 5, "focus": "无脚合唱/镜中自己/辅导员的鳃",         "words": 7200, "beat_type": "engine"},
-            {"chapter": 11, "day": 6, "focus": "苏雅撞钟失败/队友接连殒落",            "words": 7000, "beat_type": "climax"},
-            {"chapter": 12, "day": 6, "focus": "七次迭代刻名/破局决断",                "words": 7000, "beat_type": "climax"},
-            {"chapter": 13, "day": 7, "focus": "暴雨夜/47亡魂点名/最终合唱",           "words": 8000, "beat_type": "climax"},
-            {"chapter": 14, "day": 7, "focus": "拒绝开口/折痕关闭/余韵",                "words": 6100, "beat_type": "cooldown"},
+            {"chapter": 1,  "day": 1, "focus": "唐迟醒来/宿舍异象/倒计时出现",          "words": 4500, "beat_type": "hook"},
+            {"chapter": 2,  "day": 1, "focus": "宿管缢亡/咸水规则初显",                "words": 4500, "beat_type": "sell"},
+            {"chapter": 3,  "day": 2, "focus": "刘保安溺亡/海水折进校园的认知冲击",    "words": 4500, "beat_type": "engine"},
+            {"chapter": 4,  "day": 2, "focus": "周凯半条微信/轮回疑云",                "words": 4500, "beat_type": "engine"},
+            {"chapter": 5,  "day": 3, "focus": "校史馆报纸睁眼/陈阿妹之名",            "words": 4500, "beat_type": "engine"},
+            {"chapter": 6,  "day": 3, "focus": "盐圈困影/第一次主动求生",              "words": 4500, "beat_type": "engine"},
+            {"chapter": 7,  "day": 4, "focus": "短暂喘息/虚假安全感/红鲱鱼误导",        "words": 4500, "beat_type": "cooldown"},
+            {"chapter": 8,  "day": 4, "focus": "苏雅血字童谣/点名开始",                "words": 4500, "beat_type": "engine"},
+            {"chapter": 9,  "day": 5, "focus": "林薇坠楼/影子真相/中盘反转",           "words": 4500, "beat_type": "climax"},
+            {"chapter": 10, "day": 5, "focus": "无脚合唱/镜中自己/辅导员的鳃",         "words": 4500, "beat_type": "engine"},
+            {"chapter": 11, "day": 6, "focus": "苏雅撞钟失败/队友接连殒落",            "words": 4500, "beat_type": "climax"},
+            {"chapter": 12, "day": 6, "focus": "七次迭代刻名/破局决断",                "words": 4500, "beat_type": "climax"},
+            {"chapter": 13, "day": 7, "focus": "暴雨夜/47亡魂点名/最终合唱",           "words": 4500, "beat_type": "climax"},
+            {"chapter": 14, "day": 7, "focus": "拒绝开口/折痕关闭/余韵",                "words": 4500, "beat_type": "cooldown"},
         ],
-        "notes": "整体节奏呈「陡升-微落-炸尾」的心电图形态：前两章黄金三章拉满惊悚密度（咸水缢亡+空气溺亡），第7章短暂给主角一口喘息但埋童谣钩子，第9章林薇坠楼做中盘反转把强度重新顶起，11-13章连续高潮无喘息；终章 cooldown 段控制在6000字以内，给余韵但不拖沓。建议第4天（第7-8章）用红鲱鱼（合唱队招新海报）制造误导，避免中段塌腰；第5天线索分散两章释放，防止信息过载。",
+        "notes": "整体节奏呈「陡升-微落-炸尾」的心电图形态：前两章黄金三章拉满惊悚密度（咸水缢亡+空气溺亡），第7章短暂给主角一口喘息但埋童谣钩子，第9章林薇坠楼做中盘反转把强度重新顶起，11-13章连续高潮无喘息；终章 cooldown 段同样 4500 字左右，给余韵但不拖沓。建议第4天（第7-8章）用红鲱鱼（合唱队招新海报）制造误导，避免中段塌腰；第5天线索分散两章释放，防止信息过载。",
     }
 
 
@@ -275,6 +276,16 @@ def register_rhythm_routes(
                 log.warning("rhythm LLM 返回缺字段，回退 mock")
                 data = _mock_blueprint()
             blueprint = data
+
+        # 卷内相对章号 → 全局章号偏移（写入 volume 之前）
+        offset = (getattr(vol, "start_chapter_no", None) or 1) - 1
+        if offset and isinstance(blueprint, dict):
+            plan = blueprint.get("chapter_plan")
+            if isinstance(plan, list):
+                for p in plan:
+                    if isinstance(p, dict) and isinstance(p.get("chapter"), int):
+                        p["chapter"] = p["chapter"] + offset
+            # suggested_length / suggested_chapter_range 保持卷内范围，不偏移
 
         # 写入 volume.rhythm_blueprint
         vols.update_planning(vol_no, rhythm_blueprint=blueprint)

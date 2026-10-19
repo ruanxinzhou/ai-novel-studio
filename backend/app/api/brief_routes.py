@@ -164,7 +164,7 @@ def _mock_options(cno: int, plan: dict | None) -> dict:
     day = (plan or {}).get("day") or 1
     beat = (plan or {}).get("beat_type") or "engine"
     focus = (plan or {}).get("focus") or "诡异事件推进"
-    words = (plan or {}).get("words") or 6500
+    words = (plan or {}).get("words") or 4500
     beat_label = {"hook": "黄金钩子", "sell": "卖设定", "engine": "主线推进",
                   "climax": "高潮爆发", "cooldown": "余韵收束"}.get(beat, beat)
     titles = [
@@ -205,7 +205,7 @@ def _mock_options(cno: int, plan: dict | None) -> dict:
             },
         ],
         "day": day,
-        "chapter_words_estimate": int(words) if isinstance(words, (int, float)) else 6500,
+        "chapter_words_estimate": int(words) if isinstance(words, (int, float)) else 4500,
         "is_mock": True,
     }
 
@@ -304,7 +304,7 @@ def _brief_options(
         day = override_day
     else:
         day = int((plan or {}).get("day") or (work.day or 1))
-    words_estimate = int((plan or {}).get("words") or 6500)
+    words_estimate = int((plan or {}).get("words") or 4500)
     beat_type = (plan or {}).get("beat_type") or "engine"
     # 如果是跨日（0），标签特殊处理
     cross_day = (day == 0)
@@ -633,6 +633,51 @@ def _brief_advance(
         sc.pop("end_forced", None)
         # end_suppressed 保留以便跨刷新记忆，但如果当前已到 auto_at_end 且用户未压制，则不清除
 
+    # ---- mainline 卷特殊处理：写完 2 章（或用户手动 force_end）跳到下一卷 ----
+    if getattr(vol, "volume_kind", None) == "mainline":
+        mainline_expected = 2
+        mainline_chs = [n for n in desk.all_nos()
+                        if (ch := desk.get(n)) is not None and getattr(ch, "field_no", None) == vol.volume_no]
+        written_finalized = sum(1 for n in mainline_chs
+                                if desk.get(n) and getattr(desk.get(n), "finalized_at", None))
+        if body.finalized and (written_finalized >= mainline_expected or at_end):
+            # 找第一个已 rhythm 通过的 dungeon 卷
+            dungeon_vols = sorted(
+                [v for v in vs.all_list()
+                 if getattr(v, "volume_kind", None) == "dungeon"
+                 and (getattr(v, "stage_completed", None) or {}).get("rhythm")],
+                key=lambda v: v.volume_no,
+            )
+            sc_upd = dict(getattr(vol, "stage_completed", None) or {})
+            sc_upd["briefing"] = True
+            sc_upd["desk"] = True
+            try:
+                vs.update_planning(vol_no, stage_completed=sc_upd)
+            except Exception:
+                pass
+            if dungeon_vols:
+                nd = dungeon_vols[0]
+                return {"next_chapter": getattr(nd, "start_chapter_no", None),
+                        "phase": "briefing", "volume_no": nd.volume_no,
+                        "at_end": True, "auto_at_end": True, "force_state": "next-volume"}
+            else:
+                return {"next_chapter": None, "phase": "adapt_empty",
+                        "at_end": True, "auto_at_end": True, "force_state": "next-volume"}
+        elif body.finalized:
+            # mainline 还没写完 2 章，继续下一章
+            new_no = cno + 1
+            new_work = desk.ensure(new_no)
+            new_work.field_no = vol.volume_no
+            new_work.chapter_kind = "mainline"
+            new_work.is_interlude = False
+            desk._flush()
+            try:
+                vs.update_planning(vol_no, stage_completed=sc)
+            except Exception:
+                pass
+            return {"next_chapter": new_no, "phase": "briefing",
+                    "at_end": False, "auto_at_end": False, "force_state": "mainline-continue"}
+
     if body.finalized:
         if at_end:
             # 卷末：进入杀青
@@ -652,6 +697,8 @@ def _brief_advance(
                 pass
             new_work = desk.ensure(cno + 1)
             new_work.field_no = vol_no
+            new_work.chapter_kind = "dungeon"
+            new_work.is_interlude = False
             desk._flush()
             return {"next_chapter": cno + 1, "phase": "briefing",
                     "at_end": False, "auto_at_end": auto_at_end, "force_state": force_state}

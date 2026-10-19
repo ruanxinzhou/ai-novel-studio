@@ -802,3 +802,16 @@ class TestDeskStoreChapterManagement:
         d.rename(1, "a2")
         bak = list(tmp_path.glob("desk.json.bak.*"))
         assert len(bak) >= 1
+
+
+def test_mock_blueprint_words():
+    """Task 5: _mock_blueprint 所有 chapter_plan[*].words == 4500, range/length 符合预期。"""
+    from app.api.rhythm_routes import _mock_blueprint
+    bp = _mock_blueprint()
+    assert bp["suggested_chapter_range"] == [14, 20]
+    assert bp["suggested_length"] == 63000
+    assert len(bp["chapter_plan"]) == 14
+    for p in bp["chapter_plan"]:
+        assert p["words"] == 4500, f"chapter {p.get('chapter')} words != 4500"
+    # chapter 为卷内相对号 1..14
+    assert [p["chapter"] for p in bp["chapter_plan"]] == list(range(1, 15))
