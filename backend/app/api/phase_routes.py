@@ -151,6 +151,43 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
             "is_reviewing": False,
         }
 
+    # ---- mainline 判定（蓝星开篇前置）----
+    mainline_vols = [v for v in vols if v.volume_kind == "mainline"]
+    desk = d.desk_for(pid)  # 提前拿 desk，后续逻辑复用
+    if not mainline_vols:
+        return {
+            "phase": "mainline-waiting",
+            "volume_no": None, "volume_kind": None, "chapter_no": None,
+            "is_last_chapter": False, "is_reviewing": False,
+        }
+    mv = mainline_vols[0]  # 只看第一个 mainline 卷
+    ml_ch_nos: list[int] = []
+    for no in sorted(desk.all_nos()):
+        ch = desk.get(no)
+        if ch and ch.field_no == mv.volume_no:
+            ml_ch_nos.append(no)
+    ml_finalized = sum(1 for n in ml_ch_nos if desk.get(n) and desk.get(n).finalized_at)
+    if ml_finalized < 2:
+        # 找第一个未写完的章
+        unfinished = [n for n in ml_ch_nos if not (desk.get(n) and desk.get(n).finalized_at)]
+        if unfinished:
+            cno = min(unfinished)
+        elif ml_ch_nos:
+            cno = max(ml_ch_nos) + 1
+        else:
+            cno = mv.start_chapter_no
+        if not desk.get(cno):
+            desk.ensure(cno, title="", field_no=mv.volume_no, chapter_kind="mainline")
+        return {
+            "phase": "mainline-brief",
+            "volume_no": mv.volume_no,
+            "volume_kind": "mainline",
+            "chapter_no": cno,
+            "is_last_chapter": (cno == mv.start_chapter_no + 1),
+            "is_reviewing": False,
+        }
+    # mainline 已写完 2 章：继续走后续（dungeon 卷判定），让 last_vol = max(vols) 选择最新卷推进
+
     last_vol = max(vols, key=lambda v: v.volume_no)
 
     # ---- 判定 target_vol 是否"真正完结"（进入只读回看）----
@@ -190,6 +227,7 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
         "rhythm": "rhythm",
         "briefing": "briefing",
         "desk": "desk",
+        "writing-desk": "writing-desk",
     }
     if isinstance(view_override, str) and view_override in _VIEW_TO_PHASE:
         return {
@@ -200,8 +238,6 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
             "is_last_chapter": False,
             "is_reviewing": False,
         }
-
-    desk = d.desk_for(pid)
 
     # 过滤出属于该卷的章节：优先 field_no == vol_no；is_interlude 且未正确绑 field_no 的老数据归到最近 interlude 卷
     all_chapter_nos = sorted(desk.all_nos())
