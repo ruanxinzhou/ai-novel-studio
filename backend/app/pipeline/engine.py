@@ -49,11 +49,12 @@ SPECS: dict[str, PipelineSpec] = {
     "intro": PipelineSpec("intro", x_chunk_length=200, y_chunk_length=800, target_chars=400),
     # 大纲分段生成必须滚动衔接：否则每段只看简介自说自话，跨段事件重复、情节断裂
     "outline": PipelineSpec("outline", x_chunk_length=40, y_chunk_length=4_000, target_chars=1_500, anchor_enabled=True),
-    # 目标字数即输出预算来源（×2.4 tok/字）：作者要求「不做最长字数限制」，
-    # 目标给足一章常见上限，宁可模型提前收笔也不在预算侧截断
-    "plot": PipelineSpec("plot", x_chunk_length=2_000, y_chunk_length=6_000, target_chars=2_500),
-    "draft": PipelineSpec("draft", x_chunk_length=4_000, y_chunk_length=10_000, target_chars=8_000, anchor_enabled=True),
-    "polish": PipelineSpec("polish", x_chunk_length=6_000, y_chunk_length=12_000, target_chars=8_000),
+    # 作者统一字数要求：每章正文 4000-5000 字。
+    # plot（剧情骨架）给 1800 字目标，draft（正文）给 4800 字目标（±400 浮动正好落在 4000-5000 区间），
+    # polish 跟 draft 同长做全量润色，不缩不扩。
+    "plot": PipelineSpec("plot", x_chunk_length=2_000, y_chunk_length=5_000, target_chars=1_800),
+    "draft": PipelineSpec("draft", x_chunk_length=4_500, y_chunk_length=12_000, target_chars=4_800, anchor_enabled=True),
+    "polish": PipelineSpec("polish", x_chunk_length=6_000, y_chunk_length=12_000, target_chars=5_000),
     # 《第七日的亡者》场工作流步骤（Phase 1 书化）
     "adapt_scenario":     PipelineSpec("adapt_scenario",     x_chunk_length=3_000, y_chunk_length=6_000, target_chars=2_500),
     "coc_keeper":         PipelineSpec("coc_keeper",         x_chunk_length=3_000, y_chunk_length=4_000, target_chars=1_500),
