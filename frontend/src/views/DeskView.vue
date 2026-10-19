@@ -39,6 +39,16 @@ const currentNo = ref(0)
 const detail = ref<DeskChapterDetail | null>(null)
 const curVolume = ref<any>(null)
 
+function wordStatus(chars: number | null | undefined): { cls: string; tip: string } {
+  const n = Number(chars) || 0
+  if (!n) return { cls: 'wc-none', tip: '' }
+  if (n < 3500) return { cls: 'wc-short', tip: `过短（<3500）` }
+  if (n > 5500) return { cls: 'wc-long', tip: `过长（>5500）` }
+  if (n >= 4000 && n <= 5000) return { cls: 'wc-ok', tip: '达标（4000-5000）' }
+  if (n < 4000) return { cls: 'wc-near-low', tip: '略短（3500-3999）' }
+  return { cls: 'wc-near-high', tip: '略长（5001-5500）' }
+}
+
 async function loadCurVolume() {
   const pid = currentProjectId.value
   const vn = currentVolumeNo.value
@@ -697,7 +707,12 @@ watch(activeTab, (tab) => {
                   >卷高潮</el-tag>
                 <el-tag v-else-if="c.payoff === 'medium'" type="warning" size="small" effect="plain">中兑现</el-tag>
                 <el-tag v-else-if="c.payoff === 'small'" type="success" size="small" effect="plain">爽</el-tag>
-                <span v-if="c.chars" style="font-size: 12px; color: #999">{{ c.chars }} 字</span>
+                <span
+                  v-if="c.chars"
+                  class="wc-tag"
+                  :class="wordStatus(c.chars).cls"
+                  :title="wordStatus(c.chars).tip"
+                >{{ c.chars }} 字</span>
               </div>
             </div>
           </template>
@@ -1143,4 +1158,16 @@ watch(activeTab, (tab) => {
   font-size: 12px;
   color: #909399;
 }
+.wc-tag {
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+.wc-none { color: #c0c4cc; }
+.wc-short { color: #b88230; background: #fdf6ec; }   /* 过短 <3500 — 黄 */
+.wc-near-low { color: #b88230; }                     /* 略短 3500-3999 */
+.wc-ok { color: #67c23a; background: #f0f9eb; }      /* 达标 4000-5000 — 绿 */
+.wc-near-high { color: #b88230; }                    /* 略长 5001-5500 */
+.wc-long { color: #ff8c00; background: #fff3e6; }    /* 过长 >5500 — 橙 */
 </style>

@@ -133,6 +133,25 @@ function deltaSign(delta: any): string {
   if (!Number.isFinite(n) || n === 0) return ''
   return n > 0 ? '+' : ''
 }
+
+function wordClass(chars: number | null | undefined): string {
+  const n = Number(chars) || 0
+  if (!n) return 'vr-wc-none'
+  if (n < 3500) return 'vr-wc-short'
+  if (n > 5500) return 'vr-wc-long'
+  if (n >= 4000 && n <= 5000) return 'vr-wc-ok'
+  return 'vr-wc-near'
+}
+
+function wordTip(chars: number | null | undefined): string {
+  const n = Number(chars) || 0
+  if (!n) return ''
+  if (n < 3500) return '过短（<3500）'
+  if (n > 5500) return '过长（>5500）'
+  if (n >= 4000 && n <= 5000) return '达标（4000-5000）'
+  if (n < 4000) return '略短（3500-3999）'
+  return '略长（5001-5500）'
+}
 </script>
 
 <template>
@@ -216,7 +235,13 @@ function deltaSign(delta: any): string {
             </template>
           </el-table-column>
           <el-table-column label="字数" width="100">
-            <template #default="{row}">{{ row.word_count || (row.draft ? row.draft.length : 0) }}</template>
+            <template #default="{row}">
+              <span
+                class="vr-wc-tag"
+                :class="wordClass(row.word_count || (row.draft ? row.draft.length : 0))"
+                :title="wordTip(row.word_count || (row.draft ? row.draft.length : 0))"
+              >{{ row.word_count || (row.draft ? row.draft.length : 0) }}</span>
+            </template>
           </el-table-column>
         </el-table>
       </el-card>
@@ -291,4 +316,15 @@ function deltaSign(delta: any): string {
   line-height: 1.7;
 }
 .vr-kv b { color: #303133; margin-right: 4px; }
+.vr-wc-tag {
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+.vr-wc-none { color: #c0c4cc; }
+.vr-wc-short { color: #b88230; background: #fdf6ec; }   /* 过短 <3500 黄 */
+.vr-wc-near  { color: #b88230; }                      /* 临界 3500-3999 / 5001-5500 */
+.vr-wc-ok    { color: #67c23a; background: #f0f9eb; } /* 达标 4000-5000 绿 */
+.vr-wc-long  { color: #ff8c00; background: #fff3e6; } /* 过长 >5500 橙 */
 </style>
