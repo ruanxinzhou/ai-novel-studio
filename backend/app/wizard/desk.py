@@ -281,6 +281,186 @@ def _direction_material(wizard: WizardStore) -> Material | None:
                     content=d.direction, title=f"故事方向·{source}")
 
 
+def _inject_mainline_context(materials: list, vol, chapter: int, work, entity_store, desk, stage: str):
+    """蓝星主线章注入：主角状态 + 上一章尾 + 未回收伏笔前10。不注入任何副本相关材料。"""
+    try:
+        lines: list[str] = []
+        lines.append("【本卷类型】蓝星开篇卷（day=0，尚未进入任何副本）")
+        try:
+            title = getattr(work, "title", "") or ""
+        except Exception:
+            title = ""
+        lines.append(f"【本章定位】第{chapter}章（全书第{chapter}章）——{title}")
+        lines.append("【写作红线】")
+        lines.append("- 场景限定在蓝星现代都市（写字楼/出租屋/地铁/便利店/医院/街道等），不许出现任何副本/克苏鲁神明/魂穿宿主/NPC")
+        lines.append("- 主角唐迟：理性、冷静、善归纳、对规则边界敏感的程序员；但禁止出现任何编程职业黑话（debug/Bug/栈/日志/变量/指针/越权/溢出/短路/重定向/死锁/卡bug 等）")
+        lines.append("- 第1章不许穿越；第2章末才穿越坠落")
+
+        # 主角状态（唐迟）
+        if entity_store is not None:
+            try:
+                proto = getattr(entity_store, "protagonist", None)
+                if proto is not None:
+                    state_bits = []
+                    loc = getattr(proto, "current_location", "") or ""
+                    if loc:
+                        state_bits.append(f"当前位置：{loc}")
+                    try:
+                        contam = getattr(proto, "contamination_level", 0) or 0
+                    except Exception:
+                        contam = 0
+                    if contam:
+                        state_bits.append(f"累积污染度：{contam}")
+                    bb = getattr(proto, "blue_star_bonds", None) or []
+                    if bb:
+                        try:
+                            bond_lines = [
+                                f"- {b.get('name','?')}（{b.get('relation','')}，深度{b.get('depth','')}）{b.get('note','')}"
+                                for b in bb[:5] if isinstance(b, dict)
+                            ]
+                            if bond_lines:
+                                state_bits.append("蓝星羁绊：\n" + "\n".join(bond_lines))
+                        except Exception:
+                            pass
+                    if state_bits:
+                        lines.append("【唐迟当前状态】\n" + "\n".join(state_bits))
+            except Exception:
+                pass
+
+        # 上一章尾
+        try:
+            if chapter > 1 and desk is not None:
+                tail = previous_tail(desk, chapter - 1)
+                if tail:
+                    lines.append(f"【上一章末尾（第{chapter-1}章，供衔接）】\n{tail}")
+        except Exception:
+            pass
+
+        # 未回收伏笔前 10 条
+        if entity_store is not None:
+            try:
+                ents = getattr(entity_store, "entities", None)
+                if ents is None and hasattr(entity_store, "list"):
+                    try:
+                        ents = entity_store.list(type="foreshadow", status="planted")
+                    except Exception:
+                        ents = []
+                unpaids = []
+                if ents:
+                    for e in ents:
+                        try:
+                            if getattr(e, "type", None) == "foreshadow" and getattr(e, "status", None) == "planted":
+                                unpaids.append(e)
+                        except Exception:
+                            pass
+                if unpaids:
+                    bits = []
+                    for e in unpaids[:10]:
+                        try:
+                            sa = getattr(e, "state_attrs", None) or {}
+                            plant = sa.get("plant_chapter", "?") if isinstance(sa, dict) else "?"
+                            ename = getattr(e, "name", "?")
+                            esum = getattr(e, "summary", "") or ""
+                            bits.append(f"- {ename}（埋于第{plant}章）：{esum}")
+                        except Exception:
+                            pass
+                    if bits:
+                        lines.append("【未回收伏笔（前10）】\n" + "\n".join(bits))
+            except Exception:
+                pass
+
+        content = "\n\n".join(l for l in lines if l and l.strip())
+        if content:
+            try:
+                vno = getattr(vol, "volume_no", "?")
+            except Exception:
+                vno = "?"
+            try:
+                vtitle = getattr(vol, "title", None) or ""
+            except Exception:
+                vtitle = ""
+            title_str = f"蓝星主线·第{vno}卷" + (f"（{vtitle}）" if vtitle else "")
+            materials.append(Material(
+                source_id=f"volume:v{vno}:mainline",
+                family=MaterialFamily.FINALIZED,
+                content=content,
+                title=title_str,
+            ))
+    except Exception:
+        pass
+
+
+def _inject_interlude_context(materials: list, vol, entity_store, stage: str):
+    """蓝星间章注入：杀青残页 + 侵蚀度 + 蓝星钩子。"""
+    try:
+        lines: list[str] = []
+        lines.append("【本卷类型】蓝星间章（两场副本之间的现实缓冲）")
+        # 上一场杀青归账
+        try:
+            settle = getattr(vol, "settle", None) or getattr(vol, "post_field_settle", None) or {}
+        except Exception:
+            settle = {}
+        if isinstance(settle, dict) and settle:
+            summary = settle.get("summary") or settle.get("text") or ""
+            if not summary:
+                try:
+                    kills = settle.get("kill_record_line") or ""
+                    contam_delta = settle.get("contamination_delta")
+                    if kills or contam_delta is not None:
+                        summary = f"污染+{contam_delta or 0}；杀青账：{kills}"
+                except Exception:
+                    pass
+            if summary:
+                lines.append(f"【上一场杀青归账摘要】\n{str(summary)[:800]}")
+        # 唐迟状态
+        if entity_store is not None:
+            try:
+                proto = getattr(entity_store, "protagonist", None)
+                if proto is not None:
+                    bits = []
+                    try:
+                        contam = getattr(proto, "contamination_level", 0) or 0
+                    except Exception:
+                        contam = 0
+                    bits.append(f"累积污染度：{contam}")
+                    loc = getattr(proto, "current_location", "") or ""
+                    if loc:
+                        bits.append(f"当前位置：{loc}")
+                    bb = getattr(proto, "blue_star_bonds", None) or []
+                    if bb:
+                        try:
+                            names = [b.get("name", "?") for b in bb[:3] if isinstance(b, dict)]
+                            if names:
+                                bits.append("蓝星羁绊：" + "、".join(names))
+                        except Exception:
+                            pass
+                    bi = getattr(proto, "brought_items", None) or []
+                    if bi:
+                        try:
+                            names = [i.get("name", "?") for i in bi[:5] if isinstance(i, dict)]
+                            if names:
+                                bits.append("带回复本物品：" + "、".join(names))
+                        except Exception:
+                            pass
+                    lines.append("【唐迟状态】\n" + "\n".join(f"- {b}" for b in bits))
+            except Exception:
+                pass
+        content = "\n\n".join(l for l in lines if l and l.strip())
+        if content:
+            try:
+                vno = getattr(vol, "volume_no", "?")
+            except Exception:
+                vno = "?"
+            materials.append(Material(
+                source_id=f"volume:v{vno}:interlude",
+                family=MaterialFamily.FINALIZED,
+                content=content,
+                title=f"蓝星间章·第{vno}卷",
+            ))
+    except Exception:
+        pass
+
+
 def run_chapter_stage(
     provider: Provider,
     prompt_store: PromptStore,
@@ -323,10 +503,17 @@ def run_chapter_stage(
     # 书化项目：根据章节类型自动追加书专属模块（摘要版，不挤爆上下文）
     if book_store is not None:
         auto_modules: list[str] = ["obsession_cost"]  # 所有章节都要代价意识
-        if getattr(work, "is_interlude", False):
+        ch_kind = getattr(work, "chapter_kind", None) or (
+            "interlude" if getattr(work, "is_interlude", False) else "dungeon"
+        )
+        if ch_kind == "interlude":
             auto_modules.append("interlude_relief")
-        elif getattr(work, "field_no", None) is not None:
+        elif ch_kind == "dungeon":
             auto_modules.append("coc_horror")
+            if stage == "plot":
+                auto_modules.append("infinite_loop_unit")
+        elif ch_kind == "mainline":
+            # 蓝星章：无 coc_horror，但 plot 阶段保留无限循环单元（唐迟理性/规则敏感）
             if stage == "plot":
                 auto_modules.append("infinite_loop_unit")
         # 去重（用户若显式点名了同模块，摘要版会让位给完整版——这里通过
@@ -345,203 +532,214 @@ def run_chapter_stage(
                 title=f"写作模块[{am}]" + ("（摘要）" if use_digest else ""),
             ))
     # Volume 本场设定注入：魂穿宿主/信息差/核心诡计/本场死亡-线索-高潮节点
+    # 分支：dungeon（副本章）保留原竞技场拼装；mainline/interlude（蓝星章/间章）注入主线/间章材料
+    ch_kind = getattr(work, "chapter_kind", None) or (
+        "interlude" if getattr(work, "is_interlude", False) else "dungeon"
+    )
     if volume_store is not None and getattr(work, "field_no", None) is not None:
         try:
             vol = volume_store.get(int(work.field_no))
-            arena_lines: list[str] = []
-            # 副本改编
-            from ..book.volume import adapted_premise_of, adapted_cast_of
-            premise = adapted_premise_of(vol.adapted_module)
-            if premise:
-                arena_lines.append(f"【副本核文本】\n{premise}")
-            cast_cards = adapted_cast_of(vol.adapted_module)
-            if cast_cards:
-                cast_lines = []
-                for c in cast_cards:
-                    cast_lines.append(f"- {c.get('name','?')}（{c.get('role','')}；{c.get('occupation','')}）｜秘密：{c.get('secret','')}")
-                arena_lines.append("【剧本 NPC/KPC 卡司】\n" + "\n".join(cast_lines))
-            # 魂穿宿主
-            hc = vol.host_character or {}
-            if isinstance(hc, dict) and hc:
-                hc_name = hc.get("name") or hc.get("body_name") or "宿主"
-                hc_role = hc.get("role") or hc.get("identity") or ""
-                hc_know = hc.get("known_info") or hc.get("memory") or hc.get("backstory") or ""
-                arena_lines.append(f"【魂穿宿主·{hc_name}】\n身份：{hc_role}\n已知信息：{hc_know}")
-            # 入本点
-            ep = vol.entry_point or {}
-            if isinstance(ep, dict) and ep:
-                arena_lines.append(f"【入本点】{ep.get('title') or ''}\n{ep.get('summary') or ep.get('description') or ''}")
-            # 信息差
-            if vol.info_gap:
-                arena_lines.append(f"【信息差（唐迟 vs 读者/宿主）】\n{vol.info_gap}")
-            # 立场
-            st = vol.stance or {}
-            if isinstance(st, dict) and st:
-                arena_lines.append(f"【本场立场/抉择骨架】\n{st.get('summary') or st.get('choice') or ''}")
-            # 核心诡计
-            tso = vol.tangchi_story_outline or {}
-            if isinstance(tso, dict) and tso:
-                arena_lines.append(f"【唐迟诡计·主线规划】\n{tso.get('summary') or ''}")
-            # 节奏蓝图 - 本章对应 day 的节点
-            bp = vol.rhythm_blueprint or {}
-            if isinstance(bp, dict):
-                ch_no_local = None
-                plan = bp.get("chapter_plan") or []
-                try:
-                    # 找当前全局章号对应的 day
-                    ch_global = chapter
-                    field_no = int(work.field_no)
-                    offset = 0
-                    for pv in volume_store.all_list():
-                        if pv.volume_no == field_no:
-                            break
-                        pbp = pv.rhythm_blueprint or {}
-                        prng = pbp.get("suggested_chapter_range") or [0, 15]
-                        offset += int(prng[1]) if len(prng) >= 2 else 15
-                    ch_no_local = ch_global - offset
-                except Exception:
+            if vol is None:
+                pass  # 卷不存在，跳过
+            elif ch_kind == "dungeon":
+                arena_lines: list[str] = []
+                # 副本改编
+                from ..book.volume import adapted_premise_of, adapted_cast_of
+                premise = adapted_premise_of(vol.adapted_module)
+                if premise:
+                    arena_lines.append(f"【副本核文本】\n{premise}")
+                cast_cards = adapted_cast_of(vol.adapted_module)
+                if cast_cards:
+                    cast_lines = []
+                    for c in cast_cards:
+                        cast_lines.append(f"- {c.get('name','?')}（{c.get('role','')}；{c.get('occupation','')}）｜秘密：{c.get('secret','')}")
+                    arena_lines.append("【剧本 NPC/KPC 卡司】\n" + "\n".join(cast_lines))
+                # 魂穿宿主
+                hc = vol.host_character or {}
+                if isinstance(hc, dict) and hc:
+                    hc_name = hc.get("name") or hc.get("body_name") or "宿主"
+                    hc_role = hc.get("role") or hc.get("identity") or ""
+                    hc_know = hc.get("known_info") or hc.get("memory") or hc.get("backstory") or ""
+                    arena_lines.append(f"【魂穿宿主·{hc_name}】\n身份：{hc_role}\n已知信息：{hc_know}")
+                # 入本点
+                ep = vol.entry_point or {}
+                if isinstance(ep, dict) and ep:
+                    arena_lines.append(f"【入本点】{ep.get('title') or ''}\n{ep.get('summary') or ep.get('description') or ''}")
+                # 信息差
+                if vol.info_gap:
+                    arena_lines.append(f"【信息差（唐迟 vs 读者/宿主）】\n{vol.info_gap}")
+                # 立场
+                st = vol.stance or {}
+                if isinstance(st, dict) and st:
+                    arena_lines.append(f"【本场立场/抉择骨架】\n{st.get('summary') or st.get('choice') or ''}")
+                # 核心诡计
+                tso = vol.tangchi_story_outline or {}
+                if isinstance(tso, dict) and tso:
+                    arena_lines.append(f"【唐迟诡计·主线规划】\n{tso.get('summary') or ''}")
+                # 节奏蓝图 - 本章对应 day 的节点
+                bp = vol.rhythm_blueprint or {}
+                if isinstance(bp, dict):
                     ch_no_local = None
-                if ch_no_local is not None:
-                    day_spec = None
-                    for p in plan:
-                        if isinstance(p, dict) and int(p.get("chapter") or -1) == ch_no_local:
-                            day_spec = p; break
-                    if day_spec:
-                        arena_lines.append(f"【第{day_spec.get('day')}天·节奏卡】强度={day_spec.get('intensity') or ''}；事件：{day_spec.get('event') or ''}；死亡/高潮/线索：{day_spec.get('beat') or ''}")
-                # 6 卡详设（死亡/高潮按 fate_layer 分组，突出原剧本死劫/改命/反噬三层因果）
-                def _fmt_node(n):
-                    t = n.get("title") or n.get("name") or n.get("who") or ""
-                    d = n.get("description") or n.get("summary") or n.get("detail") or n.get("how") or n.get("beat") or ""
-                    tease = n.get("tease") or ""
-                    cost = n.get("cost") or ""
-                    bits = []
-                    if t:
-                        bits.append(t)
-                    if d:
-                        bits.append(d)
-                    if tease:
-                        bits.append("（伏笔：" + tease + "）")
-                    if cost:
-                        bits.append("（代价：" + cost + "）")
-                    layer = (n.get("fate_layer") or "").strip().lower()
-                    prefix = {"doomed": "[原剧本死劫·DOOMED]", "diverted": "[唐迟改命·DIVERTED]",
-                              "escalated": "[改命反噬·ESCALATED]"}.get(layer, "")
-                    line = " ".join(bits).strip()
-                    return ("- " + prefix + " " + line) if prefix else ("- " + line)
+                    plan = bp.get("chapter_plan") or []
+                    try:
+                        # 找当前全局章号对应的 day
+                        ch_global = chapter
+                        field_no = int(work.field_no)
+                        offset = 0
+                        for pv in volume_store.all_list():
+                            if pv.volume_no == field_no:
+                                break
+                            pbp = pv.rhythm_blueprint or {}
+                            prng = pbp.get("suggested_chapter_range") or [0, 15]
+                            offset += int(prng[1]) if len(prng) >= 2 else 15
+                        ch_no_local = ch_global - offset
+                    except Exception:
+                        ch_no_local = None
+                    if ch_no_local is not None:
+                        day_spec = None
+                        for p in plan:
+                            if isinstance(p, dict) and int(p.get("chapter") or -1) == ch_no_local:
+                                day_spec = p; break
+                        if day_spec:
+                            arena_lines.append(f"【第{day_spec.get('day')}天·节奏卡】强度={day_spec.get('intensity') or ''}；事件：{day_spec.get('event') or ''}；死亡/高潮/线索：{day_spec.get('beat') or ''}")
+                    # 6 卡详设（死亡/高潮按 fate_layer 分组，突出原剧本死劫/改命/反噬三层因果）
+                    def _fmt_node(n):
+                        t = n.get("title") or n.get("name") or n.get("who") or ""
+                        d = n.get("description") or n.get("summary") or n.get("detail") or n.get("how") or n.get("beat") or ""
+                        tease = n.get("tease") or ""
+                        cost = n.get("cost") or ""
+                        bits = []
+                        if t:
+                            bits.append(t)
+                        if d:
+                            bits.append(d)
+                        if tease:
+                            bits.append("（伏笔：" + tease + "）")
+                        if cost:
+                            bits.append("（代价：" + cost + "）")
+                        layer = (n.get("fate_layer") or "").strip().lower()
+                        prefix = {"doomed": "[原剧本死劫·DOOMED]", "diverted": "[唐迟改命·DIVERTED]",
+                                  "escalated": "[改命反噬·ESCALATED]"}.get(layer, "")
+                        line = " ".join(bits).strip()
+                        return ("- " + prefix + " " + line) if prefix else ("- " + line)
 
-                def _join_node_list(lst, label):
-                    if not lst: return
-                    bits = []
-                    for n in lst:
-                        if not isinstance(n, dict): continue
-                        n_day = n.get("day") or n.get("chapter")
-                        if ch_no_local is not None and n_day is not None:
-                            try:
-                                if int(n_day) != ch_no_local:
-                                    continue
-                            except Exception:
-                                pass
-                        td = n.get("title") or n.get("name") or n.get("where") or ""
-                        wh = n.get("what") or n.get("description") or n.get("summary") or n.get("detail") or ""
-                        if td or wh:
-                            bits.append(("- " + td + "：" + wh) if (td and wh) else ("- " + (td or wh)))
-                    if bits:
-                        arena_lines.append("【本场" + label + "】\n" + "\n".join(bits))
+                    def _join_node_list(lst, label):
+                        if not lst: return
+                        bits = []
+                        for n in lst:
+                            if not isinstance(n, dict): continue
+                            n_day = n.get("day") or n.get("chapter")
+                            if ch_no_local is not None and n_day is not None:
+                                try:
+                                    if int(n_day) != ch_no_local:
+                                        continue
+                                except Exception:
+                                    pass
+                            td = n.get("title") or n.get("name") or n.get("where") or ""
+                            wh = n.get("what") or n.get("description") or n.get("summary") or n.get("detail") or ""
+                            if td or wh:
+                                bits.append(("- " + td + "：" + wh) if (td and wh) else ("- " + (td or wh)))
+                        if bits:
+                            arena_lines.append("【本场" + label + "】\n" + "\n".join(bits))
 
-                def _join_by_layer(lst, label_main):
-                    if not lst:
-                        return
-                    todays = []
-                    future_near = []
-                    for n in lst:
-                        if not isinstance(n, dict):
-                            continue
-                        n_day = n.get("day") or n.get("chapter")
-                        bucket = None
-                        if ch_no_local is not None and n_day is not None:
-                            try:
-                                nd = int(n_day)
-                                if nd == ch_no_local:
-                                    bucket = todays
-                                elif 0 < nd - ch_no_local <= 2:
-                                    bucket = future_near
-                            except Exception:
-                                bucket = todays
-                        else:
-                            bucket = todays
-                        if bucket is not None:
-                            bucket.append(n)
-                    if not todays and not future_near:
-                        return
-                    rendered = []
-                    if label_main in ("死亡节点", "高潮节点"):
-                        groups = [
-                            ("原剧本死劫（唐迟已从跑团/讣告中预见，本章信息差/先知感的核心来源——他带着预警进场，但大概率救不下来）",
-                             [n for n in todays if (n.get("fate_layer") or "").lower() == "doomed"]),
-                            ("唐迟试图改命（本章他尝试介入救下/转移，要付代价或产生连锁反应）",
-                             [n for n in todays if (n.get("fate_layer") or "").lower() == "diverted"]),
-                            ("改命反噬（介入后反而更糟，触发更严重污染/更多死亡/更难收场）",
-                             [n for n in todays if (n.get("fate_layer") or "").lower() == "escalated"]),
-                            ("（未标 fate_layer 的节点，按默认处理）",
-                             [n for n in todays if (n.get("fate_layer") or "").lower() not in ("doomed", "diverted", "escalated")]),
-                        ]
-                        any_g = False
-                        for gtitle, gitems in groups:
-                            if not gitems:
+                    def _join_by_layer(lst, label_main):
+                        if not lst:
+                            return
+                        todays = []
+                        future_near = []
+                        for n in lst:
+                            if not isinstance(n, dict):
                                 continue
-                            any_g = True
-                            rendered.append("  ▸ " + gtitle)
-                            for n in gitems:
-                                rendered.append("  " + _fmt_node(n))
-                        if not any_g:
+                            n_day = n.get("day") or n.get("chapter")
+                            bucket = None
+                            if ch_no_local is not None and n_day is not None:
+                                try:
+                                    nd = int(n_day)
+                                    if nd == ch_no_local:
+                                        bucket = todays
+                                    elif 0 < nd - ch_no_local <= 2:
+                                        bucket = future_near
+                                except Exception:
+                                    bucket = todays
+                            else:
+                                bucket = todays
+                            if bucket is not None:
+                                bucket.append(n)
+                        if not todays and not future_near:
+                            return
+                        rendered = []
+                        if label_main in ("死亡节点", "高潮节点"):
+                            groups = [
+                                ("原剧本死劫（唐迟已从跑团/讣告中预见，本章信息差/先知感的核心来源——他带着预警进场，但大概率救不下来）",
+                                 [n for n in todays if (n.get("fate_layer") or "").lower() == "doomed"]),
+                                ("唐迟试图改命（本章他尝试介入救下/转移，要付代价或产生连锁反应）",
+                                 [n for n in todays if (n.get("fate_layer") or "").lower() == "diverted"]),
+                                ("改命反噬（介入后反而更糟，触发更严重污染/更多死亡/更难收场）",
+                                 [n for n in todays if (n.get("fate_layer") or "").lower() == "escalated"]),
+                                ("（未标 fate_layer 的节点，按默认处理）",
+                                 [n for n in todays if (n.get("fate_layer") or "").lower() not in ("doomed", "diverted", "escalated")]),
+                            ]
+                            any_g = False
+                            for gtitle, gitems in groups:
+                                if not gitems:
+                                    continue
+                                any_g = True
+                                rendered.append("  ▸ " + gtitle)
+                                for n in gitems:
+                                    rendered.append("  " + _fmt_node(n))
+                            if not any_g:
+                                for n in todays:
+                                    rendered.append(_fmt_node(n))
+                        else:
                             for n in todays:
                                 rendered.append(_fmt_node(n))
-                    else:
-                        for n in todays:
-                            rendered.append(_fmt_node(n))
-                    sec_title = ("【本场" + label_main + "·第" + str(ch_no_local) + "天】") if ch_no_local is not None else ("【本场" + label_main + "】")
-                    block = sec_title + "\n" + "\n".join(rendered)
-                    if future_near:
-                        near_lines = []
-                        for n in future_near[:3]:
-                            nd = n.get("day") or "?"
-                            near_lines.append("  - 第" + str(nd) + "天：" + str(n.get("title") or n.get("who") or ""))
-                        block = block + "\n  ▸ 未来1-2天预告（不要在本章提前写死，但可以埋钩子/伏笔）\n" + "\n".join(near_lines)
-                    arena_lines.append(block)
+                        sec_title = ("【本场" + label_main + "·第" + str(ch_no_local) + "天】") if ch_no_local is not None else ("【本场" + label_main + "】")
+                        block = sec_title + "\n" + "\n".join(rendered)
+                        if future_near:
+                            near_lines = []
+                            for n in future_near[:3]:
+                                nd = n.get("day") or "?"
+                                near_lines.append("  - 第" + str(nd) + "天：" + str(n.get("title") or n.get("who") or ""))
+                            block = block + "\n  ▸ 未来1-2天预告（不要在本章提前写死，但可以埋钩子/伏笔）\n" + "\n".join(near_lines)
+                        arena_lines.append(block)
 
-                _join_by_layer(vol.death_nodes or [], "死亡节点")
-                _join_by_layer(vol.climax_nodes or [], "高潮节点")
-                _join_node_list(vol.clue_nodes or [], "线索节点")
-                _join_node_list(vol.pasted_nodes or [], "贴肤节点")
-            # scaffold 6 卡
-            sc = vol.scaffold_cards or {}
-            if isinstance(sc, dict) and sc:
-                card_summaries = []
-                for cname, cval in sc.items():
-                    if isinstance(cval, dict):
-                        t = cval.get("title") or ""
-                        s = cval.get("summary") or cval.get("content") or ""
-                        if t or s:
-                            card_summaries.append(f"- {cname}：{t} {s}".strip())
-                    elif isinstance(cval, str) and cval.strip():
-                        card_summaries.append(f"- {cname}：{cval}")
-                if card_summaries:
-                    arena_lines.append("【详设 6 卡（本场）】\n" + "\n".join(card_summaries))
-            # 跑团模拟结果
-            sr = vol.simulated_run or {}
-            if isinstance(sr, dict):
-                runs = sr.get("runs") or sr.get("simulations") or []
-                if runs:
-                    picked = runs[0] if isinstance(runs[0], dict) else {}
-                    arena_lines.append(f"【跑团模拟（参考）】\n{picked.get('summary') or picked.get('outcome') or ''}")
-            if arena_lines:
-                content = "\n\n".join(l for l in arena_lines if l and l.strip())
-                materials.append(Material(
-                    source_id=f"volume:v{vol.volume_no}:arena",
-                    family=MaterialFamily.FINALIZED,
-                    content=content,
-                    title=f"本书本场·第{vol.volume_no}卷{('（' + (vol.title or '') + '）') if vol.title else ''}",
-                ))
+                    _join_by_layer(vol.death_nodes or [], "死亡节点")
+                    _join_by_layer(vol.climax_nodes or [], "高潮节点")
+                    _join_node_list(vol.clue_nodes or [], "线索节点")
+                    _join_node_list(vol.pasted_nodes or [], "贴肤节点")
+                # scaffold 6 卡
+                sc = vol.scaffold_cards or {}
+                if isinstance(sc, dict) and sc:
+                    card_summaries = []
+                    for cname, cval in sc.items():
+                        if isinstance(cval, dict):
+                            t = cval.get("title") or ""
+                            s = cval.get("summary") or cval.get("content") or ""
+                            if t or s:
+                                card_summaries.append(f"- {cname}：{t} {s}".strip())
+                        elif isinstance(cval, str) and cval.strip():
+                            card_summaries.append(f"- {cname}：{cval}")
+                    if card_summaries:
+                        arena_lines.append("【详设 6 卡（本场）】\n" + "\n".join(card_summaries))
+                # 跑团模拟结果
+                sr = vol.simulated_run or {}
+                if isinstance(sr, dict):
+                    runs = sr.get("runs") or sr.get("simulations") or []
+                    if runs:
+                        picked = runs[0] if isinstance(runs[0], dict) else {}
+                        arena_lines.append(f"【跑团模拟（参考）】\n{picked.get('summary') or picked.get('outcome') or ''}")
+                if arena_lines:
+                    content = "\n\n".join(l for l in arena_lines if l and l.strip())
+                    materials.append(Material(
+                        source_id=f"volume:v{vol.volume_no}:arena",
+                        family=MaterialFamily.FINALIZED,
+                        content=content,
+                        title=f"本书本场·第{vol.volume_no}卷{('（' + (vol.title or '') + '）') if vol.title else ''}",
+                    ))
+            elif ch_kind == "mainline":
+                _inject_mainline_context(materials, vol, chapter, work, entity_store, desk, stage)
+            elif ch_kind == "interlude":
+                _inject_interlude_context(materials, vol, entity_store, stage)
         except Exception:
             # 本场注入失败不应阻塞主流程
             pass
