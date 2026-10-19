@@ -476,7 +476,7 @@ defineExpose({ refresh: loadPhase })
       </main>
     </div>
 
-    <NewVolumeDialog v-model:visible="newVolumeDlgVisible" @created="onNewVolumeCreated" />
+    <NewVolumeDialog v-model="newVolumeDlgVisible" @created="onNewVolumeCreated" />
     <SettingsDrawer />
     <AIChatFloat @refresh="onChatRefresh" />
   </div>
