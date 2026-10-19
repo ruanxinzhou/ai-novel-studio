@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading, UploadFilled, Document, WarningFilled } from '@element-plus/icons-vue'
 import SushiCards from '../components/SushiCards.vue'
 import { adaptApi } from '../api'
@@ -31,6 +31,7 @@ const adaptations = ref<any[]>([])
 const pickedAdaptId = ref<string | null>(null)
 const errorMsg = ref('')
 const starting = ref(false)
+const unpicking = ref(false)
 let sse: { close: () => void } | null = null
 
 // ---- 自定义/编辑 dialog ----
@@ -286,6 +287,30 @@ async function onDialogSave() {
 
 function onNextStage() {
   emit('done')
+}
+
+async function onUnpick() {
+  try {
+    await ElMessageBox.confirm(
+      '撤销选版会清空改编副本核，并同时清掉后面的跑团/魂穿/详设/节奏产物（需要重做这些阶段）。确定撤销吗？',
+      '撤销选版',
+      { confirmButtonText: '确定撤销', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch { return }
+  const pid = currentProjectId.value
+  if (!pid) return
+  unpicking.value = true
+  try {
+    await adaptApi.unpickAdapt(pid, realVolNo.value)
+    ElMessage.success('已撤销选版，回到改编选版页')
+    // 重新拉取 volume 与 jobs，让 adaptations 还在（重抽/重选可用）
+    volume.value = null
+    await fetchVolume()
+  } catch (e: any) {
+    ElMessage.error('撤销失败：' + (e?.message ?? e))
+  } finally {
+    unpicking.value = false
+  }
 }
 
 // 向悬浮窗 AI 注册当前页上下文（必须在 setup 同步阶段 provide）
@@ -557,6 +582,7 @@ onUnmounted(() => {
         </el-scrollbar>
       </div>
       <div class="adapt-actions">
+        <el-button size="large" :loading="unpicking" @click="onUnpick">← 撤销选版·重新改编</el-button>
         <el-button type="primary" size="large" @click="onNextStage">下一阶段：模拟跑团</el-button>
       </div>
     </div>

@@ -1435,6 +1435,13 @@ export const adaptApi = {
       { method: 'POST', body: JSON.stringify({ adaptation }) },
     ),
 
+  /** 撤销选版：清掉 adapted_module，回到待选版状态（保留 PDF 与 adaptations，可重抽/重选） */
+  unpickAdapt: (pid: string, volNo: number) =>
+    req<{ ok: boolean; volume: any }>(
+      `/api/projects/${pid}/workbench/volumes/${volNo}/adapt/unpick`,
+      { method: 'POST' },
+    ),
+
   /** 通用阶段完成标记 */
   markStageComplete: (pid: string, volNo: number, stage: string) =>
     req<{ ok: boolean; volume: any }>(

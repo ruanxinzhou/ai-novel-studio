@@ -82,6 +82,11 @@ def register_adapt_routes(
         "/api/projects/{pid}/workbench/volumes/{vol_no}/adapt/save-custom",
         _save_custom_adapt, methods=["POST"],
     )
+    # 2f-bis. 撤销选版：清掉 adapted_module + adapt 完成标记，回到待选版状态（不动原 PDF 和 adaptations）
+    router.add_api_route(
+        "/api/projects/{pid}/workbench/volumes/{vol_no}/adapt/unpick",
+        _unpick_adapt, methods=["POST"],
+    )
     # 2g. 阶段完成标记
     router.add_api_route(
         "/api/projects/{pid}/workbench/volumes/{vol_no}/stage-complete",
@@ -186,6 +191,32 @@ def _stage_complete(pid: str, vol_no: int, body: _StageCompleteIn) -> dict:
         raise HTTPException(status_code=422, detail=f"未知阶段：{body.stage}")
     vs, v = _get_volume_or_404(pid, vol_no)
     v.stage_completed[body.stage] = True
+    vs.save(v)
+    return {"ok": True, "volume": v.as_dict()}
+
+
+def _unpick_adapt(pid: str, vol_no: int) -> dict:
+    """POST 撤销选版：清掉 adapted_module 与 adapt 阶段完成标记，回到待选版状态。
+    保留原 PDF 文件和 pdf5 job 产物（adaptations），以便作者重抽或重新挑选。
+    同时清理跑团及之后阶段所有产物。"""
+    vs, v = _get_volume_or_404(pid, vol_no)
+    v.adapted_module = None
+    sc = dict(v.stage_completed or {})
+    sc["adapt"] = False
+    sc.pop("_view", None)
+    for stage in ("simulate", "embody", "scaffold", "rhythm"):
+        sc[stage] = False
+    v.stage_completed = sc
+    for attr in (
+        "simulated_run", "host_character", "entry_point", "info_gap",
+        "stance", "tangchi_story_outline", "deviation_points",
+        "scaffold_cards", "death_nodes", "rhythm_blueprint", "density_map",
+    ):
+        if hasattr(v, attr):
+            try:
+                setattr(v, attr, None)
+            except Exception:
+                pass
     vs.save(v)
     return {"ok": True, "volume": v.as_dict()}
 
