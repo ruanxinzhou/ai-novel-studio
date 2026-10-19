@@ -341,12 +341,13 @@ const outlineCards = computed(() => {
 // ---- 加载候选 ----
 async function loadCandidates() {
   const pid = currentProjectId.value
-  if (!pid) return
+  if (!pid || loadingCandidates.value) return
   loadingCandidates.value = true
   candidates.value = []
   try {
     const r = await embodyApi.candidates(pid, props.volNo)
     candidates.value = r.candidates || []
+    if (!candidates.value.length) ElMessage.warning('打捞完成，但没有返回候选，可点「重新打捞」重试')
   } catch (e: any) {
     ElMessage.error(`加载魂穿候选失败：${e?.message || e}`)
   } finally {
@@ -370,12 +371,13 @@ async function onPickCandidate(id: string) {
 
 async function loadEntryPoints(c: EmbodyCandidate) {
   const pid = currentProjectId.value
-  if (!pid) return
+  if (!pid || loadingEntryPoints.value) return
   loadingEntryPoints.value = true
   entryPoints.value = []
   try {
     const r = await embodyApi.entryPoints(pid, props.volNo, { candidate: c })
     entryPoints.value = r.entry_points || []
+    if (!entryPoints.value.length) ElMessage.warning('切入点推演完成但没有返回结果，可点「重新推演」重试')
   } catch (e: any) {
     ElMessage.error(`加载切入点失败：${e?.message || e}`)
   } finally {
@@ -398,7 +400,7 @@ async function onPickEntryPoint(id: string) {
 
 async function loadStances() {
   const pid = currentProjectId.value
-  if (!pid || !candidate.value || !entryPoint.value) return
+  if (!pid || !candidate.value || !entryPoint.value || loadingStances.value) return
   loadingStances.value = true
   stances.value = []
   try {
@@ -407,6 +409,7 @@ async function loadStances() {
       entry_point: entryPoint.value,
     })
     stances.value = r.stances || []
+    if (!stances.value.length) ElMessage.warning('立场推演完成但没有返回结果，可点「重新推演」重试')
   } catch (e: any) {
     ElMessage.error(`加载立场失败：${e?.message || e}`)
   } finally {
@@ -625,7 +628,16 @@ const activeStep = computed(() => Math.min(step.value, 4))
     <div v-if="step === 0" class="embody-step">
       <h3>Step 1 · 选一具身体</h3>
       <p class="hint">挑一个倒霉蛋——唐迟睁眼进入TA时，距离TA在原剧本里命定的死劫正好还有<strong>七天</strong>（唐迟自己的 T-7→T-0 倒计时从此刻启动）。这时阴谋可能还在酝酿，诅咒可能刚露苗头，也可能死劫的锁链已经悄悄套上脖子；具体发生什么要看TA的命格。可以 reroll 整盘重抽，也可以自定义/编辑某一版。</p>
-      <div v-if="loadingCandidates" class="loading-hint">正在打捞副本里七天后必死的几位倒霉蛋……</div>
+      <div v-if="loadingCandidates" class="loading-hint">
+        正在打捞副本里七天后必死的几位倒霉蛋……
+        <div class="loading-actions">
+          <el-button size="small" type="primary" :loading="loadingCandidates" @click="loadCandidates">🔁 重新打捞</el-button>
+        </div>
+      </div>
+      <div v-else-if="!candidates.length" class="empty-hint">
+        还没捞到候选（可能请求失败或被打断）。
+        <el-button size="small" type="primary" @click="loadCandidates">🔁 手动打捞候选</el-button>
+      </div>
       <SushiCards
         v-else
         mode="ensemble"
@@ -643,6 +655,9 @@ const activeStep = computed(() => Math.min(step.value, 4))
         @custom-write="() => openCustom(0)"
         @edit-card="(idx) => openEdit(0, idx)"
       />
+      <div v-if="candidates.length && !loadingCandidates" class="step-actions">
+        <el-button size="small" plain @click="loadCandidates">🔁 换一批候选</el-button>
+      </div>
     </div>
 
     <!-- Step 1：选切入点 -->
@@ -657,7 +672,16 @@ const activeStep = computed(() => Math.min(step.value, 4))
       <p class="hint">
         切入点决定唐迟开局知道<strong>多少</strong>、不知道<strong>什么</strong>——信息差是他活下来的唯一武器，也是他最大的陷阱。
       </p>
-      <div v-if="loadingEntryPoints" class="loading-hint">正在为 {{ candidate?.name }} 推演 3 个致命瞬间……</div>
+      <div v-if="loadingEntryPoints" class="loading-hint">
+        正在为 {{ candidate?.name }} 推演 3 个致命瞬间……
+        <div class="loading-actions">
+          <el-button size="small" type="primary" :loading="loadingEntryPoints" @click="candidate && loadEntryPoints(candidate)">🔁 重新推演</el-button>
+        </div>
+      </div>
+      <div v-else-if="!entryPoints.length" class="empty-hint">
+        切入点还没出来（可能请求失败或被打断）。
+        <el-button size="small" type="primary" :disabled="!candidate" @click="candidate && loadEntryPoints(candidate)">🔁 手动推演切入点</el-button>
+      </div>
       <SushiCards
         v-else
         mode="ensemble"
@@ -675,6 +699,9 @@ const activeStep = computed(() => Math.min(step.value, 4))
         @custom-write="() => openCustom(1)"
         @edit-card="(idx) => openEdit(1, idx)"
       />
+      <div v-if="entryPoints.length && !loadingEntryPoints && candidate" class="step-actions">
+        <el-button size="small" plain @click="loadEntryPoints(candidate)">🔁 换一批切入点</el-button>
+      </div>
     </div>
 
     <!-- Step 2：选立场 -->
@@ -691,7 +718,16 @@ const activeStep = computed(() => Math.min(step.value, 4))
       <p class="hint">
         立场决定唐迟面对身边人/怪物/真相时的<strong>第一反应</strong>——克苏鲁副本里，选立场就是选 SAN 的掉法、选自己会变成什么样的人。
       </p>
-      <div v-if="loadingStances" class="loading-hint">正在推演 3 种立场的代价……</div>
+      <div v-if="loadingStances" class="loading-hint">
+        正在推演 3 种立场的代价……
+        <div class="loading-actions">
+          <el-button size="small" type="primary" :loading="loadingStances" @click="loadStances">🔁 重新推演</el-button>
+        </div>
+      </div>
+      <div v-else-if="!stances.length" class="empty-hint">
+        立场还没出来（可能请求失败或被打断）。
+        <el-button size="small" type="primary" :disabled="!candidate || !entryPoint" @click="loadStances">🔁 手动推演立场</el-button>
+      </div>
       <template v-else>
         <SushiCards
           mode="ensemble"
@@ -903,6 +939,22 @@ const activeStep = computed(() => Math.min(step.value, 4))
   text-align: center;
   color: #8e8575;
   font-style: italic;
+}
+.loading-actions {
+  margin-top: 14px;
+  font-style: normal;
+}
+.empty-hint {
+  padding: 24px;
+  text-align: center;
+  color: #a08870;
+  background: rgba(30, 26, 22, 0.4);
+  border: 1px dashed #3a332a;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
 }
 
 .step-nav {
