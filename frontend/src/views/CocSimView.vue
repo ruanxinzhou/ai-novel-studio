@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import SushiCards from '../components/SushiCards.vue'
+import PrevStepPanel from '../components/PrevStepPanel.vue'
 import { simulateApi } from '../api'
 import type { Job } from '../api'
 import { currentProjectId } from '../state'
@@ -397,6 +398,15 @@ watch(() => props.volNo, () => {
         <el-button size="small" @click="onReset">重跑</el-button>
       </div>
     </div>
+
+    <!-- 上一步产物：剧本改编稿 -->
+    <PrevStepPanel
+      step-label="COC 并行跑团仿真"
+      prev-step-label="剧本改编（改编后副本核）"
+      :sections="[
+        { title: '改编后副本核 / 模组前提', body: volume?.adapted_module || '', bodyType: 'text' }
+      ]"
+    />
 
     <!-- 准备态 -->
     <div v-if="uiState === 'ready'" class="sim-ready">

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import PrevStepPanel from '../components/PrevStepPanel.vue'
 import { rhythmApi } from '../api'
 import type { RhythmBlueprint, DensityMap, RhythmBeat } from '../api'
 import { currentProjectId } from '../state'
@@ -17,6 +18,7 @@ const emit = defineEmits<{
 // ---- state ----
 const blueprint = ref<RhythmBlueprint | null>(null)
 const densityMap = ref<DensityMap | null>(null)
+const volume = ref<any>(null)
 const loading = ref(false)
 const finalizing = ref(false)
 const isMock = ref(false)
@@ -125,6 +127,7 @@ async function load() {
     const r = await rhythmApi.get(pid, props.volNo)
     blueprint.value = r.blueprint || null
     densityMap.value = r.density_map || null
+    volume.value = r.volume || null
   } catch (e: any) {
     if (e?.status !== 404) {
       // ignore other errors silently
@@ -301,6 +304,34 @@ const chapterColumns = [
         </el-button>
       </div>
     </div>
+
+    <!-- 上一步产物：副本详设6卡 -->
+    <PrevStepPanel
+      step-label="节奏骨架"
+      prev-step-label="副本详设（6 卡）"
+      :sections="[
+        {
+          title: '核心诡计',
+          body: volume?.scaffold_cards?.core_twist?.text || volume?.scaffold_cards?.core_twist || '',
+          bodyType: 'text'
+        },
+        {
+          title: '唐迟第一秒 / 穿入开局',
+          body: volume?.scaffold_cards?.tangchi_start?.text || volume?.scaffold_cards?.tangchi_start || '',
+          bodyType: 'text'
+        },
+        {
+          title: '死亡节点',
+          body: Array.isArray(volume?.death_nodes) ? volume.death_nodes.join('\n') : (volume?.scaffold_cards?.death_nodes?.text || ''),
+          bodyType: 'text'
+        },
+        {
+          title: '代价上限',
+          body: volume?.scaffold_cards?.cost_cap?.text || volume?.scaffold_cards?.cost_cap || '',
+          bodyType: 'text'
+        }
+      ]"
+    />
 
     <!-- 空态 -->
     <div v-if="!blueprint" class="empty-state">

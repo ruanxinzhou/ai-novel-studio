@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   LAYER_LABELS,
   LAYERS,
+  adaptApi,
   briefApi,
   deskApi,
   projectsApi,
@@ -19,6 +20,7 @@ import {
 } from '../api'
 import { activeTab, currentChapterNo, currentProjectId, currentVolumeNo } from '../state'
 import { provideChatContext } from '../chatContext'
+import PrevStepPanel from '../components/PrevStepPanel.vue'
 
 const props = defineProps<{
   /** 指定章节号；不传则自动选 todayNo */
@@ -35,6 +37,17 @@ const loading = ref(false)
 const overview = ref<DeskDetail | null>(null)
 const currentNo = ref(0)
 const detail = ref<DeskChapterDetail | null>(null)
+const curVolume = ref<any>(null)
+
+async function loadCurVolume() {
+  const pid = currentProjectId.value
+  const vn = currentVolumeNo.value
+  if (!pid || !vn) { curVolume.value = null; return }
+  try {
+    const r = await adaptApi.getVolume(pid, vn)
+    curVolume.value = r.volume
+  } catch { curVolume.value = null }
+}
 
 const STAGES = [
   { key: 'plot', label: '剧情', tip: '这一场戏谁要什么、遇到什么阻力' },
@@ -584,6 +597,7 @@ onMounted(async () => {
   await loadOverview(false)
   loadRefProjects()
   loadModules()
+  loadCurVolume()
 })
 
 watch(currentProjectId, () => {
@@ -592,6 +606,11 @@ watch(currentProjectId, () => {
   overview.value = null
   deskPage.value = 1
   loadOverview(false)
+  loadCurVolume()
+})
+
+watch(currentVolumeNo, () => {
+  loadCurVolume()
 })
 
 // tab 用 v-show 常驻：切回章台要重拉总览
@@ -698,6 +717,36 @@ watch(activeTab, (tab) => {
     <!-- 右栏：单章微循环 -->
     <el-col :span="17">
       <template v-if="detail">
+        <!-- 上一步产物：节奏蓝图（本章对应的 day beat + 章前卡） -->
+        <PrevStepPanel
+          step-label="章台（剧情→正文→润色→定稿）"
+          prev-step-label="节奏骨架 + 章前方向卡"
+          :sections="[
+            {
+              title: '本章节奏蓝图（Day beat）',
+              body: (() => {
+                const bp = curVolume?.rhythm_blueprint
+                const dayNo = detail?.chapter?.day_no
+                const beats = (bp?.day_beats || []).find((d: any) => (d.day ?? d.day_no) === dayNo)
+                  || (bp?.day_beats || [])[Math.min(detail?.chapter?.no - 1, 6)]
+                if (!beats) return ''
+                return [
+                  `Day${beats.day || beats.day_no || '?'} · ${beats.title || ''}`,
+                  `气氛：${beats.mood || ''}`,
+                  '',
+                  beats.summary || beats.events_text || ''
+                ].filter(Boolean).join('\n')
+              })(),
+              bodyType: 'text'
+            },
+            {
+              title: '本章大纲（节奏骨架自动生成）',
+              body: detail?.outline || '',
+              bodyType: 'text'
+            }
+          ]"
+        />
+
         <!-- 章前卡摘要条 -->
         <el-card v-if="currentBriefSelected" shadow="never" style="margin-bottom: 14px" class="brief-summary-card">
           <div style="display: flex; align-items: flex-start; gap: 10px">

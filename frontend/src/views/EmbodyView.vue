@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElProgress } from 'element-plus'
 import SushiCards from '../components/SushiCards.vue'
+import PrevStepPanel from '../components/PrevStepPanel.vue'
 import { embodyApi } from '../api'
 import { provideChatContext } from '../chatContext'
 import type {
@@ -21,6 +22,17 @@ const emit = defineEmits<{
   (e: 'done'): void
   (e: 'back-to-simulate'): void
 }>()
+
+// 卷数据：用于展示上一步（跑团）产物
+const volume = ref<any>(null)
+async function loadVolume() {
+  const pid = currentProjectId.value
+  if (!pid || !props.volNo) return
+  try {
+    const r = await embodyApi.getVolume(pid, props.volNo)
+    volume.value = r.volume
+  } catch { /* ignore */ }
+}
 
 // ---- 步骤状态 ----
 // 0 选身体 / 1 选切入点 / 2 选立场 / 3 生成大纲 / 4 完成
@@ -556,6 +568,7 @@ function resetAll() {
 }
 
 onMounted(() => {
+  loadVolume()
   loadCandidates()
 })
 
@@ -581,6 +594,32 @@ const activeStep = computed(() => Math.min(step.value, 4))
         <el-step v-for="(lb, i) in stepLabels" :key="i" :title="lb" />
       </el-steps>
     </div>
+
+    <!-- 上一步产物：跑团结果 -->
+    <PrevStepPanel
+      step-label="唐迟魂穿"
+      prev-step-label="COC 并行跑团（选定主版本）"
+      :sections="[
+        {
+          title: '选定主版本 · 小说化梗概',
+          body: volume?.simulated_run?.selected_variant?.final_summary
+            || (volume?.simulated_run?.variants || []).find((v: any) => v.id === volume?.simulated_run?.picked_variant_id)?.final_summary
+            || volume?.simulated_run?.selected_variant?.summary
+            || '',
+          bodyType: 'text'
+        },
+        {
+          title: '调查员阵容',
+          body: Object.fromEntries(
+            (volume?.simulated_run?.player_cards || []).map((p: any, i: number) => [
+              `调查员${i+1}·${p?.occupation || '?'}`,
+              `${p?.name || '?'}｜${p?.age || '?'}岁｜${p?.gender || ''}`
+            ])
+          ),
+          bodyType: 'kv'
+        }
+      ]"
+    />
 
     <!-- Step 0：选身体 -->
     <div v-if="step === 0" class="embody-step">

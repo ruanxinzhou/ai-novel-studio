@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import SushiCards from '../components/SushiCards.vue'
+import PrevStepPanel from '../components/PrevStepPanel.vue'
 import { scaffoldApi, type Job } from '../api'
 import { currentProjectId } from '../state'
 
@@ -519,6 +520,47 @@ function pickedIdFor(key: string): string | null {
         <el-tag v-else-if="stageDone()" type="success" size="default">✓ 副本详设已完成</el-tag>
       </div>
     </div>
+
+    <!-- 上一步产物：魂穿入戏 -->
+    <PrevStepPanel
+      step-label="副本详设"
+      prev-step-label="唐迟魂穿（宿主+切入点+立场+大纲）"
+      :sections="[
+        {
+          title: '宿主',
+          body: volume?.host_character ? {
+            '姓名': volume.host_character.name,
+            '身份': volume.host_character.role,
+            '年龄': volume.host_character.age,
+            '身体状态': volume.host_character.body_state,
+            '第七日死状': volume.host_character.seventh_day_death,
+            '真实死因（作者预览）': volume.host_character.hidden_death_cause,
+          } : {},
+          bodyType: 'kv'
+        },
+        {
+          title: '切入点',
+          body: volume?.entry_point?.name
+            ? `${volume.entry_point.name}（${volume.entry_point.act || ''}）\n${volume.entry_point.summary || volume.entry_point.description || ''}`
+            : '',
+          bodyType: 'text'
+        },
+        {
+          title: '求生立场',
+          body: volume?.stance?.name
+            ? `${volume.stance.name}\n${volume.stance.description || ''}\n代价：${volume.stance.cost || ''}`
+            : '',
+          bodyType: 'text'
+        },
+        {
+          title: '选定七天大纲',
+          body: volume?.tangchi_story_outline?.outline_text
+            || volume?.tangchi_story_outline?.one_liner
+            || (typeof volume?.tangchi_story_outline === 'string' ? volume.tangchi_story_outline : ''),
+          bodyType: 'text'
+        }
+      ]"
+    />
 
     <!-- 已完成态 -->
     <div v-if="stageDone()" class="scaffold-done">
