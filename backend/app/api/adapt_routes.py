@@ -315,7 +315,21 @@ def _pick_adapt(pid: str, vol_no: int, body: _PickIn) -> dict:
         raise HTTPException(status_code=422, detail="选版结果为空")
 
     v.adapted_module = picked.get("adapted_premise", "")
-    v.stage_completed["adapt"] = True
+    sc = dict(v.stage_completed or {})
+    sc["adapt"] = True
+    # 用户重新选版后，清掉 _view 覆盖，恢复正向阶段推进；同时把后续阶段的完成标记清掉，
+    # 因为改编稿换了之后跑团/魂穿/详设产物都会失效，需要重新走。
+    sc.pop("_view", None)
+    for stage in ("simulate", "embody", "scaffold", "rhythm"):
+        sc[stage] = False
+    v.stage_completed = sc
+    # 清掉跑团及之后的产物
+    for attr in ("simulated_run", "host_character", "entry_point", "info_gap", "stance", "tangchi_story_outline", "deviation_points"):
+        if hasattr(v, attr):
+            try:
+                setattr(v, attr, None)
+            except Exception:
+                pass
     vs.save(v)
     return {"ok": True, "volume": v.as_dict()}
 
@@ -328,6 +342,17 @@ def _save_custom_adapt(pid: str, vol_no: int, body: _SaveCustomAdaptIn) -> dict:
     if not premise:
         raise HTTPException(status_code=422, detail="adaptation.adapted_premise 不能为空")
     v.adapted_module = premise
-    v.stage_completed["adapt"] = True
+    sc = dict(v.stage_completed or {})
+    sc["adapt"] = True
+    sc.pop("_view", None)
+    for stage in ("simulate", "embody", "scaffold", "rhythm"):
+        sc[stage] = False
+    v.stage_completed = sc
+    for attr in ("simulated_run", "host_character", "entry_point", "info_gap", "stance", "tangchi_story_outline", "deviation_points"):
+        if hasattr(v, attr):
+            try:
+                setattr(v, attr, None)
+            except Exception:
+                pass
     vs.save(v)
     return {"ok": True, "volume": v.as_dict()}

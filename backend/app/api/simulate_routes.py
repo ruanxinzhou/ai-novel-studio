@@ -448,11 +448,18 @@ def _save_custom_variant(pid: str, vol_no: int, body: _SaveCustomVariantIn) -> d
 
 
 def _back_to_adapt(pid: str, vol_no: int) -> dict:
-    """从 simulate 阶段回退到 adapt（剧本改编/选版），清空跑团结果并允许重新选版。
+    """从 simulate 阶段回退到 adapt（剧本改编/选版）。
 
-    - 清空 v.simulated_run
-    - 重置 stage_completed 中 simulate 及其后续阶段（embody/scaffold/rhythm）为 False
-    - 把该卷下所有 running/pending 的 coc_batch 任务标记为 aborted
+    语义：用户想回到「剧本改编」页面重新挑一版改编稿、或重新发起改编。
+    为了不破坏已经产出的改编结果与后续阶段的进度标记，这里采用 _view 覆盖
+    机制（与 back-to-simulate 一致）：
+    - 不清空 v.adapted_module（用户可以在 adapt 页看到已有版本做对比）；
+    - 不重置 stage_completed（adapt/simulate/embody/... 标记保持不变）；
+    - 清空 v.simulated_run 与后续魂穿/详设产物（因为换改编稿之后跑团结果必然失效）；
+    - 设置 sc["_view"] = "adapt"，让 /phase 直接返回 adapt 视图；
+    - 标记该卷下 running/pending 的 coc_batch 任务为 cancelled；
+    - 当用户在 adapt 页重新选版 / 保存自定义改编时，adapt_routes 会 pop _view，
+      正常进入 simulate 阶段。
     """
     from ..jobs.store import job_store
     vs, v = _get_volume_or_404(pid, vol_no)
@@ -467,14 +474,20 @@ def _back_to_adapt(pid: str, vol_no: int) -> dict:
                     error="用户返回上一步（重选剧本），任务已取消",
                 )
     except Exception:
-        # 不要因为 job_store 清理失败阻塞回退
         pass
-    # 清空跑团结果
+    # 清空跑团结果以及跑团之后的魂穿产物（换改编稿后这些都失效）
     v.simulated_run = None
     sc = dict(v.stage_completed or {})
-    for stage in ("simulate", "embody", "scaffold", "rhythm"):
-        sc[stage] = False
+    # 用 _view 覆盖让前端回到 adapt 页，不硬重置各阶段完成标记
+    sc["_view"] = "adapt"
     v.stage_completed = sc
+    # 顺带清掉魂穿/详设等后续阶段的 in-memory 产物（若有字段，保持一致性）
+    for attr in ("host_character", "entry_point", "info_gap", "stance", "tangchi_story_outline", "deviation_points"):
+        if hasattr(v, attr):
+            try:
+                setattr(v, attr, None)
+            except Exception:
+                pass
     vs.save(v)
     return {"ok": True, "volume": v.as_dict()}
 
