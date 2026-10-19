@@ -268,32 +268,69 @@ def _start_pdf5(
     def _work(j, update):
         results = [None] * n_val
         errors: list[str] = []
-        flavor_list = ["民俗阴冷向", "规则冷峻向", "诡异日常向", "科幻/未知向", "心理诡计向",
-                       "古风玄幻向", "同人改设向", "黑色幽默向"]
+        # 风格方向池：涵盖中外/古今/虚拟/现实多种方向，供 _run_one 每轮抽取；
+        # 注意这里只是"提示方向"，真正落地以 prompt 里"自主选择"规则为准，不强制按档分。
+        flavor_pool = [
+            "中式乡土民俗阴冷（祠堂/旧俗/水乡/山村/渔港）",
+            "现代都市规则冷峻（明文禁忌/制度恶意/职场/医院/学校/公寓）",
+            "当代诡异日常（平常秩序里长出不对劲：邻居/便利店/通勤/外卖/快递）",
+            "西方哥特维多利亚（古堡/家族/修道院/侦探/雾都/宗教审判）",
+            "美式小镇/西部荒野（偏远小镇/公路/荒野/加油站/汽车旅馆/印第安传说）",
+            "日式怪谈/校园（校园/公寓/邻居/艺伎/武士/昭和/平成都市传说）",
+            "东方古风仙侠志怪（修仙宗门/古国王朝/山泽志怪/江湖/镖局/衙门/古寺）",
+            "科幻深空/未来都市（空间站/外星殖民地/赛博都市/AI/仿生人/时间殖民）",
+            "末日废土/灾变后（辐射区/避难所/废土聚落/幸存者部落/污染区）",
+            "太空歌剧/异星文明（异星神殿/古老星舰/外星考古/星际教会/虚空航行）",
+            "航海/极地/孤岛（鬼船/南极科考站/孤岛灯塔/深海潜艇/北极冰站）",
+            "虚拟世界/游戏（VR MMO/SAO 类死亡游戏/NPC 觉醒/嵌套赛博空间/桌游成精）",
+            "蒸汽朋克/柴油朋克（飞艇/齿轮都市/维多利亚工业/炼金工厂/殖民探险）",
+            "魔法学院/西幻（魔法学校/巫师家族/精灵矮人古国/地下城/龙与神）",
+            "宗教/修道院/审判（古修道院/十字军/异端审判/圣物/沙漠隐修会）",
+            "黑色幽默/荒诞（明明很吓人但人物嘴贱/荒诞规则/喜剧式死亡，骨架仍要是克苏鲁）",
+            "影视/文学/游戏同人克苏鲁化（把某个熟知的童话/童话反转/经典 IP 世界观重写成克苏鲁，但所有专名必须原创化）",
+            "心理诡计/认知层（副本本身是某人的梦境/遗物/脑内世界/虚假记忆，身份错配/时间循环）",
+            "童话反转/寓言（把童话/民间故事/寓言反向克苏鲁化，糖果屋/小红帽/睡美人/桃花源 等外壳，但专名必须换）",
+            "梦境/潜意识层（梦域/清醒梦/集体潜意识/清醒入梦师/梦里的怪物）",
+        ]
 
         def _run_one(i: int) -> tuple[int, Any]:
             if j.status == "cancelled":
                 return i, None
             update(message=f"第 {i+1}/{n_val} 版改编中…", progress=5 + (i / n_val) * 85)
-            flavor = flavor_list[i % len(flavor_list)]
-            this_hint = (hint + f"\n【本次定向：请往「{flavor}」方向偏，但不要生硬，自然融入；和同组其他版拉开差异。】").strip()
+            # 从 flavor_pool 里按 i 轮转抽取，同时避开和原模组背景明显撞车的方向——
+            # 这里不做硬过滤，让 prompt 里"行业去重/风格自主"规则兜底；只负责给一个"本次偏这方向"的锚点。
+            flavor = flavor_pool[i % len(flavor_pool)]
+            # 为每版再加一个"差异化维度"提示，强制拉开职业/地理/时代
+            diff_axis = [
+                "尽量把关键人物的职业与原模组错开，换到与其他版本不同的行业",
+                "换一个与原模组完全不同的地理与时代背景，但保留核心钩子",
+                "把核心反派/异常从「人形/组织」改成「非人存在/空间本身/规则本身」",
+                "把叙事改成多视角/倒叙/嵌套/时间循环，保留同样的事件但打乱呈现顺序",
+                "加入原创禁忌规则侧枝（至少 2 条原模组没有的小规则），让规则体系更厚",
+            ][i % 5]
+            this_hint = (
+                hint
+                + f"\n【本次风格定向·仅作方向提示，可以灵活偏离】请往「{flavor}」方向改编，但要自然融入，不要生硬套壳；同时：{diff_axis}。和同组其他版在题材/时代/地域/职业/文风上都要拉开差异，不要跟其他版本写同一个行业/同一座城市。"
+            ).strip()
             try:
                 prov = d.chore_provider("sushi")
                 r = adapt_pdf_source(prov, ps, pdf_text, user_hint=this_hint)
+                short_label = flavor.split("（", 1)[0]
                 return i, {
                     "index": i,
-                    "title": f"改编第{i+1}版·{flavor}",
+                    "title": f"改编第{i+1}版·{short_label}",
                     "adapted_premise": r.adapted_premise,
                     "player_cards": list(r.player_cards),
                     "renamed_cast": list(r.renamed_cast),
                     "changed_elements": list(r.changed_elements),
                     "risk_flags": list(r.risk_flags),
-                    "flavor": flavor,
+                    "flavor": short_label,
+                    "flavor_full": flavor,
                     "one_liner": r.adapted_premise[:80].replace("\n", " "),
                 }
             except Exception as e:
                 log.warning("adapt pdf5 #%d failed: %s", i, e)
-                return i, {"index": i, "error": str(e), "flavor": flavor}
+                return i, {"index": i, "error": str(e), "flavor": flavor.split("（",1)[0]}
 
         with ThreadPoolExecutor(max_workers=min(n_val, 3)) as ex:
             futures = {ex.submit(_run_one, i): i for i in range(n_val)}

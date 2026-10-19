@@ -250,16 +250,31 @@ def _start_pdf5(pid: str, sid: str, body: _Pdf5In, file: UploadFile = File(...))
         d2 = _must_deps()
         results = [None] * n
         errors = []
+        flavor_pool = [
+            "中式乡土民俗阴冷", "现代都市规则冷峻", "当代诡异日常",
+            "西方哥特维多利亚", "美式小镇/西部荒野", "日式怪谈/校园",
+            "东方古风仙侠志怪", "科幻深空/未来都市", "末日废土/灾变后",
+            "太空歌剧/异星文明", "航海/极地/孤岛", "虚拟世界/游戏",
+            "蒸汽朋克/柴油朋克", "魔法学院/西幻", "宗教/修道院/审判",
+            "黑色幽默/荒诞", "同人克苏鲁化", "心理诡计/认知层",
+            "童话反转/寓言", "梦境/潜意识层",
+        ]
+        diff_axes = [
+            "尽量把关键人物的职业与原模组错开，换到与其他版本不同的行业",
+            "换一个与原模组完全不同的地理与时代背景，但保留核心钩子",
+            "把核心反派/异常从「人形/组织」改成「非人存在/空间本身/规则本身」",
+            "把叙事改成多视角/倒叙/嵌套/时间循环，保留同样的事件但打乱呈现顺序",
+            "加入原创禁忌规则侧枝（至少 2 条原模组没有的小规则），让规则体系更厚",
+        ]
 
         def _run_one(i: int) -> tuple[int, Any]:
             if j.status == "cancelled":
                 return i, None
             update(message=f"第 {i+1}/{n} 版改编中…", progress=5 + (i / n) * 85)
             try:
-                # 每次给 provider 加不同 flavor 提示，让 5 版差异明显
-                flavor = ["民俗阴冷向", "规则冷峻向", "诡异日常向", "科幻/未知向", "心理诡计向", "古风玄幻向", "同人改设向", "黑色幽默向"][i % 8]
-                hint = (user_hint + f"\n【本次定向：请往「{flavor}」方向偏，但不要生硬，自然融入；和同组其他版拉开差异。】").strip()
-                # 每个线程独立 provider 实例
+                flavor = flavor_pool[i % len(flavor_pool)]
+                diff = diff_axes[i % len(diff_axes)]
+                hint = (user_hint + f"\n【本次风格定向·仅作方向提示，可以灵活偏离】请往「{flavor}」方向改编，但要自然融入，不要生硬套壳；同时：{diff}。和同组其他版在题材/时代/地域/职业/文风上都要拉开差异，不要跟其他版本写同一个行业/同一座城市。").strip()
                 prov = d2.chore_provider("sushi")
                 r = adapt_pdf_source(prov, ps, pdf_text, user_hint=hint)
                 return i, {
