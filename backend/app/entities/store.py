@@ -655,6 +655,107 @@ class EntityStore:
             self._flush()
         return e
 
+    def shift_chapter_refs(self, from_no: int, delta: int) -> None:
+        """把所有 >= from_no 的章号引用偏移 +delta（删除章时 delta=-1，插入时 +1）。
+        先备份再写盘。偏移前做 dry-run，若任何结果 <=0 抛 ValueError，绝不修改任何字段。
+        """
+        import shutil, time as _time
+        if self.path.exists():
+            ts = _time.strftime("%Y%m%d-%H%M%S")
+            shutil.copy2(self.path, self.path.with_suffix(self.path.suffix + f".bak.{ts}"))
+
+        def _shift_val(v: int | None) -> int | None:
+            if v is None:
+                return None
+            if not isinstance(v, int):
+                return v
+            if v >= from_no:
+                return v + delta
+            return v
+
+        # ---- dry-run：收集所有待改的新值，任何 <=0 则抛错 ----
+        def _collect_checks():
+            for e in self.entities:
+                for c in e.appearances:
+                    if isinstance(c, int):
+                        nv = _shift_val(c)
+                        if nv is not None and nv <= 0:
+                            raise ValueError(
+                                f"shift_chapter_refs: entity {e.id} appearance "
+                                f"chapter {c} would become {nv} (<=0)")
+                if e.type == "foreshadow":
+                    for k in ("plant_chapter", "due_chapter", "payoff_chapter"):
+                        v = e.state_attrs.get(k)
+                        if v is None or v == "":
+                            continue
+                        try:
+                            iv = int(v)
+                        except (ValueError, TypeError):
+                            continue
+                        nv = _shift_val(iv)
+                        if nv is not None and nv <= 0:
+                            raise ValueError(
+                                f"shift_chapter_refs: foreshadow {e.id} {k} "
+                                f"chapter {iv} would become {nv} (<=0)")
+            for c in self.changes.values():
+                if c.chapter is None:
+                    continue
+                nv = _shift_val(c.chapter)
+                if nv is not None and nv <= 0:
+                    raise ValueError(
+                        f"shift_chapter_refs: change {c.id} chapter "
+                        f"{c.chapter} would become {nv} (<=0)")
+            for r in self.relations:
+                if r.since_chapter is None:
+                    continue
+                nv = _shift_val(r.since_chapter)
+                if nv is not None and nv <= 0:
+                    raise ValueError(
+                        f"shift_chapter_refs: relation {r.id} since_chapter "
+                        f"{r.since_chapter} would become {nv} (<=0)")
+            if self.protagonist is not None and self.protagonist.updated_from_chapter is not None:
+                nv = _shift_val(self.protagonist.updated_from_chapter)
+                if nv is not None and nv <= 0:
+                    raise ValueError(
+                        f"shift_chapter_refs: protagonist updated_from_chapter "
+                        f"{self.protagonist.updated_from_chapter} would become {nv} (<=0)")
+
+        _collect_checks()
+
+        # ---- 真正赋值 ----
+        for e in self.entities:
+            new_apps: list[int] = []
+            for c in e.appearances:
+                if isinstance(c, int):
+                    nv = _shift_val(c)
+                    if isinstance(nv, int):
+                        new_apps.append(nv)
+                # 非 int 值保留原样（防御）
+            e.appearances = sorted(set(new_apps))
+            if e.type == "foreshadow":
+                for k in ("plant_chapter", "due_chapter", "payoff_chapter"):
+                    v = e.state_attrs.get(k)
+                    if v is None or v == "":
+                        continue
+                    try:
+                        iv = int(v)
+                    except (ValueError, TypeError):
+                        continue
+                    nv = _shift_val(iv)
+                    e.state_attrs[k] = "" if nv is None else str(nv)
+
+        for c in self.changes.values():
+            c.chapter = _shift_val(c.chapter)
+
+        for r in self.relations:
+            r.since_chapter = _shift_val(r.since_chapter)
+
+        if self.protagonist is not None:
+            self.protagonist.updated_from_chapter = _shift_val(
+                self.protagonist.updated_from_chapter)
+
+        self._flush()
+
     def add_change(self, change: StateChange) -> StateChange:
         """新增状态变动；confirmed=True 时自动更新 state_attrs 和 appearances。"""
         if not change.id:

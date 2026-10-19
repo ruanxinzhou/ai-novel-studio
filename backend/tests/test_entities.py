@@ -303,3 +303,80 @@ def test_api_entities_extract_bad_output_502(client, monkeypatch):
     monkeypatch.setattr("app.api.main.get_router", lambda: BadRouter())
     r = client.post(f"/api/projects/{pid}/entities/extract", json={"text": "正文"})
     assert r.status_code == 502
+
+
+# ---- shift_chapter_refs ----
+
+from app.entities.store import StateChange, Relation
+
+
+class TestShiftChapterRefs:
+    def test_shift_foreshadow_and_changes_and_appearances(self, tmp_path):
+        from app.entities.store import _new_id
+        s = EntityStore(tmp_path / "e.json")
+        # foreshadow: plant_chapter=1, due_chapter=3, payoff_chapter=""
+        fs = s.add(
+            "foreshadow", "旧照片",
+            summary="照片背面有字",
+            chapter=1,
+            state_attrs={
+                "plant_chapter": "1",
+                "due_chapter": "3",
+                "payoff_chapter": "",
+                "intensity": "中",
+            },
+        )
+        s.record_appearance(fs.id, 3)
+        # character: appearances=[1,2,3]
+        ch = s.add("character", "林姐", chapter=1)
+        s.record_appearance(ch.id, 2)
+        s.record_appearance(ch.id, 3)
+        # StateChange on character, chapter=2
+        s.add_change(StateChange(
+            id="", entity_id=ch.id, attr="location",
+            new_value="旧仓库", chapter=2, confirmed=True,
+        ))
+        # Relation since_chapter=2
+        s.add_relation(Relation(
+            id="", from_id=ch.id, to_id=fs.id,
+            rel_type="knows_about", since_chapter=2,
+        ))
+        # protagonist updated_from_chapter=2
+        s.update_protagonist(updated_from_chapter=2)
+
+        s.shift_chapter_refs(2, +2)
+
+        # 1 不变（< 2），3 → 5
+        assert fs.state_attrs["plant_chapter"] == "1"
+        assert fs.state_attrs["due_chapter"] == "5"
+        assert fs.state_attrs["payoff_chapter"] == ""
+        assert fs.state_attrs["intensity"] == "中"
+        assert fs.appearances == [1, 5]
+
+        # character: 1 不变，2→4，3→5
+        assert ch.appearances == [1, 4, 5]
+
+        # StateChange: chapter 2→4
+        sc = next(c for c in s.changes.values() if c.entity_id == ch.id)
+        assert sc.chapter == 4
+
+        # Relation: since_chapter 2→4
+        rel = s.relations[0]
+        assert rel.since_chapter == 4
+
+        # protagonist: updated_from_chapter 2→4
+        assert s.protagonist.updated_from_chapter == 4
+
+    def test_shift_no_cross_to_zero(self, tmp_path):
+        s = EntityStore(tmp_path / "e.json")
+        ch = s.add("character", "林姐", chapter=1)
+        s.add_change(StateChange(
+            id="", entity_id=ch.id, attr="location",
+            new_value="门口", chapter=1, confirmed=True,
+        ))
+        with pytest.raises(ValueError):
+            s.shift_chapter_refs(1, -1)
+        # 数据不变（dry-run 保证未修改）
+        sc = next(c for c in s.changes.values())
+        assert sc.chapter == 1
+        assert ch.appearances == [1]
