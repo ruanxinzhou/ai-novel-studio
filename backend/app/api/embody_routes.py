@@ -49,6 +49,7 @@ def register_embody_routes(
     router = APIRouter()
     prefix = "/api/projects/{pid}/workbench/volumes/{vol_no}/embody"
     router.add_api_route(f"{prefix}/candidates", _list_candidates, methods=["GET"])
+    router.add_api_route(f"{prefix}/candidates", _list_candidates, methods=["POST"])  # 支持 reroll 传 user_directive
     router.add_api_route(f"{prefix}/entry-points", _gen_entry_points, methods=["POST"])
     router.add_api_route(f"{prefix}/stances", _gen_stances, methods=["POST"])
     router.add_api_route(f"{prefix}/generate-outline", _start_outline5, methods=["POST"])
@@ -361,19 +362,24 @@ def _outline_to_text(o: dict) -> str:
 
 # ---- 1. 魂穿候选 ----
 
-def _list_candidates(pid: str, vol_no: int):
+def _list_candidates(pid: str, vol_no: int, body: dict | None = None):
     vs, v = _get_volume_or_404(pid, vol_no)
     adapted = v.adapted_module or ""
+    user_directive = ""
+    if isinstance(body, dict):
+        user_directive = (body.get("user_directive") or "").strip()
     if _is_mock(adapted, None):
         time.sleep(0.8)
         return {"candidates": _MOCK_CANDIDATES}
 
-    ctx = _build_embody_context(v)
+    ctx = _build_embody_context(v, user_directive=user_directive)
     user_hint = (
         "请基于以上副本骨架与跑团记录，挑出 5 个最具悬疑张力的魂穿宿主候选，"
         "必须混合调查员 PL、关键 NPC、边缘知情者、祭品容器、嫌疑人几类；"
         "每个候选必须有清晰的第七日死状（果）和作者预览的真实死因（因）。"
     )
+    if user_directive:
+        user_hint += f"\n\n===== 作者额外要求（打捞候选时必须优先遵守）=====\n{user_directive}"
     fallback = {"candidates": _MOCK_CANDIDATES}
     data = _call_llm_json(_CANDIDATES_SYSTEM, ctx + "\n\n" + user_hint, fallback, tag="candidates")
     cands = data.get("candidates") if isinstance(data, dict) else None

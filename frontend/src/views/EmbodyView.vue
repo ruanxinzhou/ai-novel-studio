@@ -248,22 +248,41 @@ function onDialogSave() {
 }
 
 // ---- Rerun helpers ----
+// 为前三个「整盘重抽」保留一个临时 directive 输入（SushiCards 的 rerun 会自带 directive，
+// 这里只是给页面下方的「手动打捞/换一批」按钮的弹窗输入用）。
+const rerunDirective = ref('')
+function promptRerun(stepNo: 0 | 1 | 2) {
+  // 前置校验
+  if (stepNo === 1 && !candidate.value) {
+    ElMessage.warning('请先选一个魂穿候选')
+    return
+  }
+  if (stepNo === 2 && (!candidate.value || !entryPoint.value)) {
+    ElMessage.warning('请先选候选和切入点')
+    return
+  }
+  const dir = window.prompt('给这次重抽/重推演写一段提示词（留空则直接重抽，不带约束）：', rerunDirective.value)
+  if (dir === null) return // 用户点了取消
+  rerunDirective.value = (dir || '').trim()
+  onRerunStep(stepNo, null, rerunDirective.value)
+}
 function onRerunStep(stepNo: 0 | 1 | 2 | 3, _idx: number | null, directive: string) {
-  const extra = directive ? `（微调指令：${directive}）` : ''
+  const dir = (directive || '').trim()
+  const extra = dir ? `（微调指令：${dir}）` : ''
   if (stepNo === 0) {
     ElMessage.info(`重新打捞魂穿候选${extra}…`)
-    loadCandidates()
+    loadCandidates(dir)
   } else if (stepNo === 1) {
     if (!candidate.value) return
     ElMessage.info(`重新推演切入点${extra}…`)
-    loadEntryPoints(candidate.value)
+    loadEntryPoints(candidate.value, dir)
   } else if (stepNo === 2) {
     ElMessage.info(`重新推演立场${extra}…`)
-    loadStances()
+    loadStances(dir)
   } else {
     // Outlines - re-run with directive appended
-    const extraDirective = directive
-      ? (userDirective.value ? userDirective.value + '\n' : '') + `【微调要求】${directive}`
+    const extraDirective = dir
+      ? (userDirective.value ? userDirective.value + '\n' : '') + `【微调要求】${dir}`
       : userDirective.value
     userDirective.value = extraDirective
     startGenerate(true)
@@ -339,15 +358,18 @@ const outlineCards = computed(() => {
 })
 
 // ---- 加载候选 ----
-async function loadCandidates() {
+async function loadCandidates(directive: string = '') {
   const pid = currentProjectId.value
   if (!pid || loadingCandidates.value) return
   loadingCandidates.value = true
   candidates.value = []
   try {
-    const r = await embodyApi.candidates(pid, props.volNo)
+    const dir = (directive || rerunDirective.value || '').trim()
+    const body = dir ? { user_directive: dir } : undefined
+    const r = await embodyApi.candidates(pid, props.volNo, body)
     candidates.value = r.candidates || []
     if (!candidates.value.length) ElMessage.warning('打捞完成，但没有返回候选，可点「重新打捞」重试')
+    else if (dir) ElMessage.success(`已按指令重新打捞（${candidates.value.length} 个候选）`)
   } catch (e: any) {
     ElMessage.error(`加载魂穿候选失败：${e?.message || e}`)
   } finally {
@@ -366,18 +388,20 @@ async function onPickCandidate(id: string) {
   pickedOutlineId.value = null
   pickedOutline.value = null
   step.value = 1
-  await loadEntryPoints(c)
+  await loadEntryPoints(c, '')
 }
 
-async function loadEntryPoints(c: EmbodyCandidate) {
+async function loadEntryPoints(c: EmbodyCandidate, directive: string = '') {
   const pid = currentProjectId.value
   if (!pid || loadingEntryPoints.value) return
   loadingEntryPoints.value = true
   entryPoints.value = []
   try {
-    const r = await embodyApi.entryPoints(pid, props.volNo, { candidate: c })
+    const dir = (directive || rerunDirective.value || '').trim()
+    const r = await embodyApi.entryPoints(pid, props.volNo, { candidate: c, user_directive: dir })
     entryPoints.value = r.entry_points || []
     if (!entryPoints.value.length) ElMessage.warning('切入点推演完成但没有返回结果，可点「重新推演」重试')
+    else if (dir) ElMessage.success(`已按指令重新推演切入点（${entryPoints.value.length} 个）`)
   } catch (e: any) {
     ElMessage.error(`加载切入点失败：${e?.message || e}`)
   } finally {
@@ -395,21 +419,24 @@ async function onPickEntryPoint(id: string) {
   pickedOutlineId.value = null
   pickedOutline.value = null
   step.value = 2
-  await loadStances()
+  await loadStances('')
 }
 
-async function loadStances() {
+async function loadStances(directive: string = '') {
   const pid = currentProjectId.value
   if (!pid || !candidate.value || !entryPoint.value || loadingStances.value) return
   loadingStances.value = true
   stances.value = []
   try {
+    const dir = (directive || rerunDirective.value || '').trim()
     const r = await embodyApi.stances(pid, props.volNo, {
       candidate: candidate.value,
       entry_point: entryPoint.value,
+      user_directive: dir,
     })
     stances.value = r.stances || []
     if (!stances.value.length) ElMessage.warning('立场推演完成但没有返回结果，可点「重新推演」重试')
+    else if (dir) ElMessage.success(`已按指令重新推演立场（${stances.value.length} 个）`)
   } catch (e: any) {
     ElMessage.error(`加载立场失败：${e?.message || e}`)
   } finally {
@@ -631,12 +658,12 @@ const activeStep = computed(() => Math.min(step.value, 4))
       <div v-if="loadingCandidates" class="loading-hint">
         正在打捞副本里七天后必死的几位倒霉蛋……
         <div class="loading-actions">
-          <el-button size="small" type="primary" :loading="loadingCandidates" @click="loadCandidates">🔁 重新打捞</el-button>
+          <el-button size="small" type="primary" :loading="loadingCandidates" @click="promptRerun(0)">🔁 重新打捞（可写提示词）</el-button>
         </div>
       </div>
       <div v-else-if="!candidates.length" class="empty-hint">
         还没捞到候选（可能请求失败或被打断）。
-        <el-button size="small" type="primary" @click="loadCandidates">🔁 手动打捞候选</el-button>
+        <el-button size="small" type="primary" @click="promptRerun(0)">🔁 手动打捞候选</el-button>
       </div>
       <SushiCards
         v-else
@@ -656,7 +683,7 @@ const activeStep = computed(() => Math.min(step.value, 4))
         @edit-card="(idx) => openEdit(0, idx)"
       />
       <div v-if="candidates.length && !loadingCandidates" class="step-actions">
-        <el-button size="small" plain @click="loadCandidates">🔁 换一批候选</el-button>
+        <el-button size="small" plain @click="promptRerun(0)">🔁 换一批候选（可写提示词）</el-button>
       </div>
     </div>
 
@@ -675,12 +702,12 @@ const activeStep = computed(() => Math.min(step.value, 4))
       <div v-if="loadingEntryPoints" class="loading-hint">
         正在为 {{ candidate?.name }} 推演 3 个致命瞬间……
         <div class="loading-actions">
-          <el-button size="small" type="primary" :loading="loadingEntryPoints" @click="candidate && loadEntryPoints(candidate)">🔁 重新推演</el-button>
+          <el-button size="small" type="primary" :loading="loadingEntryPoints" @click="promptRerun(1)">🔁 重新推演（可写提示词）</el-button>
         </div>
       </div>
       <div v-else-if="!entryPoints.length" class="empty-hint">
         切入点还没出来（可能请求失败或被打断）。
-        <el-button size="small" type="primary" :disabled="!candidate" @click="candidate && loadEntryPoints(candidate)">🔁 手动推演切入点</el-button>
+        <el-button size="small" type="primary" :disabled="!candidate" @click="promptRerun(1)">🔁 手动推演切入点</el-button>
       </div>
       <SushiCards
         v-else
@@ -700,7 +727,7 @@ const activeStep = computed(() => Math.min(step.value, 4))
         @edit-card="(idx) => openEdit(1, idx)"
       />
       <div v-if="entryPoints.length && !loadingEntryPoints && candidate" class="step-actions">
-        <el-button size="small" plain @click="loadEntryPoints(candidate)">🔁 换一批切入点</el-button>
+        <el-button size="small" plain @click="promptRerun(1)">🔁 换一批切入点（可写提示词）</el-button>
       </div>
     </div>
 
@@ -721,12 +748,12 @@ const activeStep = computed(() => Math.min(step.value, 4))
       <div v-if="loadingStances" class="loading-hint">
         正在推演 3 种立场的代价……
         <div class="loading-actions">
-          <el-button size="small" type="primary" :loading="loadingStances" @click="loadStances">🔁 重新推演</el-button>
+          <el-button size="small" type="primary" :loading="loadingStances" @click="promptRerun(2)">🔁 重新推演（可写提示词）</el-button>
         </div>
       </div>
       <div v-else-if="!stances.length" class="empty-hint">
         立场还没出来（可能请求失败或被打断）。
-        <el-button size="small" type="primary" :disabled="!candidate || !entryPoint" @click="loadStances">🔁 手动推演立场</el-button>
+        <el-button size="small" type="primary" :disabled="!candidate || !entryPoint" @click="promptRerun(2)">🔁 手动推演立场</el-button>
       </div>
       <template v-else>
         <SushiCards

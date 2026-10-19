@@ -1615,21 +1615,36 @@ export const embodyApi = {
   getVolume: adaptApi.getVolume,
   patchVolume: adaptApi.patchVolume,
 
-  /** Step 1：列魂穿候选 */
-  candidates: (pid: string, volNo: number) =>
-    req<{ candidates: EmbodyCandidate[] }>(
-      `/api/projects/${pid}/workbench/volumes/${volNo}/embody/candidates`,
-    ),
+  /** Step 1：列魂穿候选（GET 取默认，POST 可带 user_directive 做 reroll） */
+  candidates: (pid: string, volNo: number, body?: { user_directive?: string }) => {
+    const url = `/api/projects/${pid}/workbench/volumes/${volNo}/embody/candidates`
+    if (body) {
+      return req<{ candidates: EmbodyCandidate[] }>(url, { method: 'POST', body: JSON.stringify(body) })
+    }
+    return req<{ candidates: EmbodyCandidate[] }>(url)
+  },
 
   /** Step 2：根据候选生成 3 个切入点 */
-  entryPoints: (pid: string, volNo: number, body: { candidate_id?: string; candidate?: EmbodyCandidate | null }) =>
+  entryPoints: (
+    pid: string,
+    volNo: number,
+    body: { candidate_id?: string; candidate?: EmbodyCandidate | null; user_directive?: string },
+  ) =>
     req<{ entry_points: EmbodyEntryPoint[] }>(
       `/api/projects/${pid}/workbench/volumes/${volNo}/embody/entry-points`,
       { method: 'POST', body: JSON.stringify(body) },
     ),
 
   /** Step 3：根据候选+切入点生成 3 个立场 */
-  stances: (pid: string, volNo: number, body: { candidate?: EmbodyCandidate | null; entry_point?: EmbodyEntryPoint | null }) =>
+  stances: (
+    pid: string,
+    volNo: number,
+    body: {
+      candidate?: EmbodyCandidate | null
+      entry_point?: EmbodyEntryPoint | null
+      user_directive?: string
+    },
+  ) =>
     req<{ stances: EmbodyStance[] }>(
       `/api/projects/${pid}/workbench/volumes/${volNo}/embody/stances`,
       { method: 'POST', body: JSON.stringify(body) },
