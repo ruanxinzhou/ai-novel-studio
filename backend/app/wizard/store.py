@@ -212,7 +212,8 @@ class ChapterWork:
     # 书化字段（《第七日的亡者》四层结构）
     field_no: int | None = None                  # 所属场号（None = 未分配到具体场）
     day: int | None = None                       # 1-7 唐迟入戏第 N 天（T-6→T-0，写作节拍，非原剧本日历天）；None = 现实间章 / 未分配
-    is_interlude: bool = False                   # 是否现实间章
+    chapter_kind: str = "dungeon"               # 'mainline' | 'dungeon' | 'interlude'
+    is_interlude: bool = False                   # 是否现实间章（由 chapter_kind 同步，保留兼容）
     interlude_kind: str = ""                     # 间章类型：爽点/羁绊/伏笔/污染征兆/杀青账
     # M1 新增
     scenes: list[Scene] = field(default_factory=list)
@@ -230,6 +231,16 @@ class ChapterWork:
         fn = d.get("field_no")
         dy = d.get("day")
         brief_raw = d.get("brief")
+        # chapter_kind 回填：显式有效值 → is_interlude 老数据 → 默认 dungeon
+        _valid_kinds = ("mainline", "dungeon", "interlude")
+        raw_kind = d.get("chapter_kind")
+        if raw_kind in _valid_kinds:
+            chapter_kind = raw_kind
+        elif d.get("is_interlude"):
+            chapter_kind = "interlude"
+        else:
+            chapter_kind = "dungeon"
+        is_interlude = (chapter_kind == "interlude")
         return cls(
             no=int(d["no"]), title=str(d.get("title", "") or ""),
             plot=dict(d.get("plot") or {}), draft=dict(d.get("draft") or {}),
@@ -239,7 +250,8 @@ class ChapterWork:
             strands=[s for s in (d.get("strands") or []) if s in STRANDS],
             field_no=(int(fn) if fn is not None else None),
             day=(int(dy) if dy is not None else None),
-            is_interlude=bool(d.get("is_interlude", False)),
+            chapter_kind=chapter_kind,
+            is_interlude=is_interlude,
             interlude_kind=str(d.get("interlude_kind", "") or ""),
             scenes=[Scene.from_dict(s) for s in (d.get("scenes") or [])],
             state_snapshot_at_lock=dict(d.get("state_snapshot_at_lock") or {}),

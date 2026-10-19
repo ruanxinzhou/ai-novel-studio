@@ -77,7 +77,8 @@ class Volume:
     updated_at: str = ""
 
     # ---- 工作台重构新增 ----
-    volume_kind: str = "dungeon"  # 'dungeon' | 'interlude'
+    volume_kind: str = "dungeon"  # 'mainline' | 'dungeon' | 'interlude'
+    start_chapter_no: int = 1
     # adapted_module 保存的是改编后的「副本原剧本骨架」完整 dict：
     #   { adapted_premise: str, player_cards: list[dict], renamed_cast: list, changed_elements: list, risk_flags: list,
     #     flavor?: str, flavor_full?: str, title?: str, one_liner?: str }
@@ -162,7 +163,8 @@ class Volume:
             created_at=str(d.get("created_at", "") or ""),
             updated_at=str(d.get("updated_at", "") or ""),
             # ---- 工作台重构新增 ----
-            volume_kind=str(d.get("volume_kind", "dungeon") or "dungeon"),
+            volume_kind=(lambda vk: vk if vk in ("mainline", "dungeon", "interlude") else "dungeon")(str(d.get("volume_kind", "dungeon") or "dungeon")),
+            start_chapter_no=int(d.get("start_chapter_no", 1) or 1),
             adapted_module=d.get("adapted_module"),
             simulated_run=d.get("simulated_run"),
             death_nodes=list(d.get("death_nodes", []) or []),
@@ -312,6 +314,7 @@ class VolumeStore:
             "contamination_goal": v.contamination_goal,
             "planned_interludes": v.planned_interludes,
             "volume_kind": v.volume_kind,
+            "start_chapter_no": v.start_chapter_no,
         })
         entries.sort(key=lambda e: e["volume_no"])
         idx["volumes"] = entries
@@ -378,14 +381,21 @@ class VolumeStore:
         self._flush(v)
         return v
 
-    def create_new_volume(self, *, title: str = "", volume_kind: str = "dungeon") -> Volume:
+    def create_new_volume(self, *, title: str = "", volume_kind: str = "dungeon", start_chapter_no: int | None = None) -> Volume:
         """工作台用：取 max volume_no +1 创建新卷，field_no 同 volume_no。
         不做幂等检查（允许连续创建多个卷）。
         """
+        # 校验 volume_kind 合法性，非法回退 dungeon
+        if volume_kind not in ("mainline", "dungeon", "interlude"):
+            volume_kind = "dungeon"
         existing = [v.volume_no for v in self.all_list()]
         next_no = (max(existing) + 1) if existing else 1
+        if start_chapter_no is None:
+            start_chapter_no = 1
         if not title:
-            if volume_kind == "interlude":
+            if volume_kind == "mainline":
+                title = "蓝星开篇"
+            elif volume_kind == "interlude":
                 title = "蓝星间章"
             else:
                 title = f"卷{next_no}"
@@ -394,6 +404,7 @@ class VolumeStore:
             field_no=next_no,
             title=title,
             volume_kind=volume_kind,
+            start_chapter_no=start_chapter_no,
             created_at=_now(),
             updated_at=_now(),
         )

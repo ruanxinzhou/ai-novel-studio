@@ -6,6 +6,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+from app.book.volume import VolumeStore
 from app.entities import EntityStore
 from app.pipeline.prompts import PromptStore
 from app.projects import ProjectStore
@@ -20,6 +21,7 @@ from app.wizard import (
     parse_outline,
     run_chapter_stage,
 )
+from app.wizard.store import ChapterWork
 
 
 class FakeProseProvider:
@@ -669,3 +671,36 @@ class TestDeskApi:
         user2 = captured[1][1]["content"]
         assert user2.count("【上一章结尾】") == 3
         assert "正文" in user2.split("【上一章结尾】", 3)[3]
+
+
+# ---- Task 1：mainline volume_kind + start_chapter_no + ChapterWork.chapter_kind ----
+
+class TestChapterKindAndVolumeStart:
+    def test_volume_default_kind_is_dungeon(self, tmp_path):
+        store = VolumeStore(tmp_path / "volumes")
+        v = store.create_new_volume()
+        assert v.volume_kind == "dungeon"
+        assert v.start_chapter_no == 1
+        assert v.title.startswith("卷")
+
+    def test_create_mainline_volume(self, tmp_path):
+        store = VolumeStore(tmp_path / "volumes")
+        v = store.create_new_volume(volume_kind="mainline", start_chapter_no=1)
+        assert v.volume_kind == "mainline"
+        assert v.start_chapter_no == 1
+        assert v.title == "蓝星开篇"
+
+    def test_chapter_work_default_kind_dungeon(self):
+        w = ChapterWork(no=1)
+        assert w.chapter_kind == "dungeon"
+        assert w.is_interlude is False
+
+    def test_chapter_work_from_dict_backcompat(self):
+        # 老数据只有 is_interlude=True → chapter_kind 回填为 interlude，is_interlude 保持 True
+        w = ChapterWork.from_dict({"no": 1, "title": "x", "is_interlude": True})
+        assert w.chapter_kind == "interlude"
+        assert w.is_interlude is True
+        # 显式 chapter_kind=mainline → chapter_kind=mainline, is_interlude=False
+        w2 = ChapterWork.from_dict({"no": 1, "title": "x", "chapter_kind": "mainline"})
+        assert w2.chapter_kind == "mainline"
+        assert w2.is_interlude is False
