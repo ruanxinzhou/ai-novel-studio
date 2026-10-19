@@ -590,17 +590,20 @@ def _brief_advance(
 
     bp = getattr(vol, "rhythm_blueprint", None) or {}
     rng = (bp.get("suggested_chapter_range") or [0, 0]) if isinstance(bp, dict) else [0, 0]
-    max_chapters = int(rng[1] or 0) if len(rng) >= 2 else 0
+    max_chapters_rel = int(rng[1] or 0) if len(rng) >= 2 else 0
+    start_ch_no = int(getattr(vol, "start_chapter_no", 1) or 1)
+    max_chapters_abs = (start_ch_no + max_chapters_rel - 1) if max_chapters_rel > 0 else 0
 
-    # 当前 desk 中最大章号
+    # 当前 desk 中最大章号（全局）
     all_nos = desk.all_nos()
     cur_max = max(all_nos) if all_nos else 0
 
     # 自动判断是否卷末
     auto_at_end = False
-    if max_chapters > 0 and cur_max >= max_chapters:
+    if max_chapters_abs > 0 and cur_max >= max_chapters_abs:
         auto_at_end = True
     plan_list = bp.get("chapter_plan") if isinstance(bp, dict) else []
+    plan_max = 0
     if isinstance(plan_list, list) and plan_list:
         plan_max = max((int(p.get("chapter") or 0) for p in plan_list if isinstance(p, dict)), default=0)
         if plan_max > 0 and cno >= plan_max:

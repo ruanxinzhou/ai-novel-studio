@@ -138,22 +138,13 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
             "is_reviewing": False,
         }
 
-    # 2. 没有任何 volume → adapt_empty
+    # 2. 拿卷列表与 desk
     vs = d.volumes_for(pid)
     vols = vs.all_list()
-    if not vols:
-        return {
-            "phase": "adapt_empty",
-            "volume_no": None,
-            "volume_kind": None,
-            "chapter_no": None,
-            "is_last_chapter": False,
-            "is_reviewing": False,
-        }
+    desk = d.desk_for(pid)
 
-    # ---- mainline 判定（蓝星开篇前置）----
+    # 3. mainline 判定（蓝星开篇前置）—— 没有任何卷或没有 mainline 卷时，都是 mainline-waiting
     mainline_vols = [v for v in vols if v.volume_kind == "mainline"]
-    desk = d.desk_for(pid)  # 提前拿 desk，后续逻辑复用
     if not mainline_vols:
         return {
             "phase": "mainline-waiting",
@@ -403,7 +394,9 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
         plan_list = bp.get('chapter_plan') if isinstance(bp, dict) else []
         plan_max = max((int(p.get('chapter') or 0) for p in (plan_list or []) if isinstance(p, dict)), default=0)
         rng = (bp.get('suggested_chapter_range') or [0, 0]) if isinstance(bp, dict) else [0, 0]
-        range_max = int(rng[1] or 0) if len(rng) >= 2 else 0
+        range_max_rel = int(rng[1] or 0) if len(rng) >= 2 else 0
+        start_ch_no = int(getattr(target_vol, 'start_chapter_no', 1) or 1)
+        range_max_abs = (start_ch_no + range_max_rel - 1) if range_max_rel > 0 else 0
         cur_max_ch = max(all_chapter_nos) if all_chapter_nos else 0
         interlude_plan = target_vol.interlude_plan or {}
         interlude_expected = 0
@@ -413,7 +406,7 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
         reached_plan_end = (
             bool(sc.get('briefing') and sc.get('desk'))
             or (plan_max > 0 and cur_max_ch >= plan_max)
-            or (range_max > 0 and cur_max_ch >= range_max)
+            or (range_max_abs > 0 and cur_max_ch >= range_max_abs)
             or (target_vol.volume_kind == 'interlude' and interlude_expected > 0 and len(all_chapter_nos) >= interlude_expected)
         )
         end_forced = bool(sc.get('end_forced'))
@@ -556,8 +549,9 @@ def _create_dungeon_volume(pid: str, body: _DungeonVolumeIn) -> dict:
     d = _must_deps()
     d.require_project(pid)
     vs = d.volumes_for(pid)
+    desk = d.desk_for(pid)
     title = body.title.strip() if body.title else ""
-    v = vs.create_new_volume(title=title, volume_kind="dungeon")
+    v = vs.create_new_volume(title=title, volume_kind="dungeon", start_chapter_no=desk.next_available_no())
     return {"ok": True, "volume_no": v.volume_no, "volume": v.as_dict()}
 
 
@@ -566,7 +560,8 @@ def _create_interlude_volume(pid: str) -> dict:
     d = _must_deps()
     d.require_project(pid)
     vs = d.volumes_for(pid)
-    v = vs.create_new_volume(title="蓝星间章", volume_kind="interlude")
+    desk = d.desk_for(pid)
+    v = vs.create_new_volume(title="蓝星间章", volume_kind="interlude", start_chapter_no=desk.next_available_no())
     return {"ok": True, "volume_no": v.volume_no, "volume": v.as_dict()}
 
 

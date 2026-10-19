@@ -132,24 +132,40 @@ def test_happy_path_mock(client):
     pid = r.json()["id"]
     assert pid
 
-    # 初始：新建项目自动写入 8 张默认书卡 → phase=adapt_empty（等创建第一卷）
+    # 初始：新建项目后未创建 mainline 卷 → phase=mainline-waiting（蓝星开篇前置）
     ph = _phase(client, pid)
-    assert ph["phase"] == "adapt_empty", ph
+    assert ph["phase"] == "mainline-waiting", ph
 
-    # Step 2: 主角名含「林薇」触发 mock
+    # Step 3: 主角名含「林薇」触发 mock
     r = client.patch(f"/api/projects/{pid}/protagonist", json={
         "current_body_name": "林薇（测试）",
         "contamination_level": 12,
     })
     assert r.status_code == 200, r.text
 
-    # Step 4: 创建 dungeon 卷（vol_no=1）
+    # Step 3.5: 直接在 store 层塞一个"已完结"的 mainline 卷（2 章定稿），绕过蓝星开篇
+    #           这样后续 dungeon 流程才能正常推进（phase 判定要求 mainline 先有 2 章定稿）
+    import app.api.main as main
+    vs = main._volumes_for(pid)
+    ds = main._desk_for(pid)
+    mv = vs.create_new_volume(title="蓝星开篇", volume_kind="mainline", start_chapter_no=1)
+    vs.save(mv)
+    from datetime import datetime
+    for n in (1, 2):
+        ch = ds.ensure(n, title=f"第{n}章", field_no=mv.volume_no, chapter_kind="mainline")
+        ch.plot_text = f"第{n}章骨架"
+        ch.draft_text = f"第{n}章正文"
+        ch.polish_text = f"第{n}章润色版"
+        ch.finalized_at = datetime.now().isoformat()
+    ds._flush()
+
+    # Step 4: 创建 dungeon 卷（此时为第 2 卷，第3章开始）
     r = client.post(f"/api/projects/{pid}/workbench/volumes", json={"title": "青山镇副本"})
     assert r.status_code == 200, r.text
     vol_no = r.json()["volume_no"]
-    assert vol_no == 1
+    assert vol_no == 2
 
-    # 新卷未开始改编 → phase=adapt
+    # 新卷未开始改编 → phase=adapt（蓝星已完结，落到 dungeon 判定）
     ph = _phase(client, pid)
     assert ph["phase"] == "adapt", ph
 
@@ -249,10 +265,17 @@ def test_happy_path_mock(client):
     assert r.status_code == 200, r.text
     bp = r.json()["blueprint"]
     assert "suggested_chapter_range" in bp
-    # 用 chapter_plan 的最大章号作为循环上界（advance 按 plan_max 判断卷末），若无则回退 range[1]
+    # chapter_plan 使用绝对章号（已含 start_chapter_no 偏移）；以 plan 里最后一章的章号作为卷末，
+    # 没有 chapter_plan 时回退到 range[1]（此时视作 in-volume 相对章数，需要 + start_chapter_no - 1）
     plan_list = bp.get("chapter_plan") if isinstance(bp, dict) else []
     plan_max = max((int(p.get("chapter") or 0) for p in plan_list if isinstance(p, dict)), default=0)
-    max_chapters = plan_max if plan_max > 0 else int(bp["suggested_chapter_range"][1])
+    v_d = vs.get(vol_no)
+    ch_start = int(getattr(v_d, "start_chapter_no", 1) or 1)
+    if plan_max > 0:
+        ch_end = plan_max
+    else:
+        ch_end = ch_start + int(bp["suggested_chapter_range"][1]) - 1
+    max_chapters = ch_end - ch_start + 1
     assert max_chapters >= 1
     r = client.post(f"/api/projects/{pid}/workbench/volumes/{vol_no}/rhythm/finalize", json={})
     assert r.status_code == 200, r.text
@@ -261,8 +284,8 @@ def test_happy_path_mock(client):
     ph = _phase(client, pid)
     assert ph["phase"] == "briefing", ph
 
-    desk = main._desk_for(pid)
-    for cno in range(1, max_chapters + 1):
+    # dungeon 卷章号从 start_chapter_no 开始（mainline 已占用前 2 章）
+    for cno in range(ch_start, ch_end + 1):
         ph = _phase(client, pid)
         assert ph["phase"] in ("briefing", "desk"), f"ch{cno}: {ph}"
         if ph["phase"] == "briefing":
@@ -290,7 +313,7 @@ def test_happy_path_mock(client):
         assert r.status_code == 200, f"finalize ch{cno}: {r.text}"
 
         # advance（非卷末）：应创建下一章并回到 briefing
-        is_last = (cno == max_chapters)
+        is_last = (cno == ch_end)
         r = client.post(
             f"/api/projects/{pid}/workbench/volumes/{vol_no}/chapters/{cno}/brief/advance",
             json={"finalized": True},
@@ -377,6 +400,7 @@ def test_happy_path_mock(client):
     assert ph["phase"] == "desk", ph
 
     # 写完所有 interlude 章
+    desk = main._desk_for(pid)
     existing_chs = sorted(desk.all_nos())
     interlude_chs = [c for c in existing_chs if desk.get(c) and desk.get(c).is_interlude]
     assert interlude_chs, "应有间章章节"
