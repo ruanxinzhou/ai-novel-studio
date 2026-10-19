@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +39,10 @@ from app.context.ledger import STRANDS, STRAND_LABELS  # noqa: E402
 
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _now_ts() -> str:
+    return time.strftime("%Y%m%d-%H%M%S")
 
 
 # ---- 向导状态 ----
@@ -286,13 +292,35 @@ class DeskStore:
     def get(self, no: int) -> ChapterWork | None:
         return self._load().get(no)
 
-    def ensure(self, no: int, title: str = "") -> ChapterWork:
+    def ensure(self, no: int, title: str = "", *, field_no: int | None = None,
+               chapter_kind: str | None = None) -> ChapterWork:
         chapters = self._load()
+        _valid_kinds = ("mainline", "dungeon", "interlude")
+        created = False
         if no not in chapters:
-            chapters[no] = ChapterWork(no=no)
-        if title and not chapters[no].title:
-            chapters[no].title = title
-        return chapters[no]
+            init_kind = chapter_kind if chapter_kind in _valid_kinds else "dungeon"
+            chapters[no] = ChapterWork(
+                no=no,
+                field_no=field_no,
+                chapter_kind=init_kind,
+                is_interlude=(init_kind == "interlude"),
+            )
+            created = True
+        work = chapters[no]
+        mutated = created
+        if title and not work.title:
+            work.title = title
+            mutated = True
+        if field_no is not None and work.field_no != field_no:
+            work.field_no = field_no
+            mutated = True
+        if chapter_kind is not None and chapter_kind in _valid_kinds and work.chapter_kind != chapter_kind:
+            work.chapter_kind = chapter_kind
+            work.is_interlude = (chapter_kind == "interlude")
+            mutated = True
+        if mutated:
+            self._flush()
+        return work
 
     def all_nos(self) -> list[int]:
         return sorted(self._load())
@@ -372,10 +400,12 @@ class DeskStore:
         work.field_no = field_no
         if is_interlude:
             work.is_interlude = True
+            work.chapter_kind = "interlude"
             work.day = None
             work.interlude_kind = interlude_kind or work.interlude_kind
         else:
             work.is_interlude = False
+            work.chapter_kind = "dungeon"
             work.interlude_kind = ""
             work.day = day if day is not None and 1 <= day <= 7 else None
         self._flush()
@@ -428,5 +458,109 @@ class DeskStore:
     def save_snapshot(self, no: int, snapshot: dict) -> ChapterWork:
         work = self.ensure(no)
         work.state_snapshot_at_lock = dict(snapshot)
+        self._flush()
+        return work
+
+    # ---- Task 2：章节管理 ----
+
+    def _backup(self) -> None:
+        """在写操作前将当前 desk.json 复制一份为 .bak.YYYYMMDD-HHMMSS；全新项目无文件则跳过。"""
+        if not self.path.exists():
+            return
+        bak_path = self.path.with_suffix(self.path.suffix + f".bak.{_now_ts()}")
+        shutil.copy2(self.path, bak_path)
+
+    def max_no(self) -> int:
+        chapters = self._load()
+        return max(chapters.keys()) if chapters else 0
+
+    def next_available_no(self) -> int:
+        return self.max_no() + 1
+
+    def all_sorted(self) -> list[ChapterWork]:
+        chapters = self._load()
+        return [chapters[n] for n in sorted(chapters)]
+
+    def list_by_field(self, field_no: int | None) -> list[ChapterWork]:
+        chapters = self._load()
+        return [chapters[n] for n in sorted(chapters) if chapters[n].field_no == field_no]
+
+    def rename(self, no: int, title: str) -> ChapterWork:
+        chapters = self._load()
+        if no not in chapters:
+            raise ValueError(f"第 {no} 章不存在")
+        self._backup()
+        chapters[no].title = title
+        self._flush()
+        return chapters[no]
+
+    def renumber(self, from_no: int, delta: int) -> None:
+        """把 no >= from_no 的章号整体偏移 delta（仅改内存，不写盘）。delta>0 从大到小改键，delta<0 从小到大。"""
+        chapters = self._load()
+        if delta > 0:
+            order = sorted((n for n in chapters if n >= from_no), reverse=True)
+        else:
+            order = sorted(n for n in chapters if n >= from_no)
+        for old in order:
+            work = chapters.pop(old)
+            new = old + delta
+            if new <= 0:
+                # 把刚才 pop 掉的放回去再抛错，避免破坏 dict
+                chapters[old] = work
+                raise ValueError(f"renumber 后章号 {new} <= 0，非法")
+            work.no = new
+            chapters[new] = work
+
+    def insert_after(self, after_no: int, *, title: str, field_no: int | None = None,
+                     chapter_kind: str = "dungeon") -> int:
+        _valid_kinds = ("mainline", "dungeon", "interlude")
+        kind = chapter_kind if chapter_kind in _valid_kinds else "dungeon"
+        self._backup()
+        if after_no == 0:
+            self.renumber(1, +1)
+            new_no = 1
+        else:
+            self.renumber(after_no + 1, +1)
+            new_no = after_no + 1
+        chapters = self._load()
+        chapters[new_no] = ChapterWork(
+            no=new_no, title=title, field_no=field_no,
+            chapter_kind=kind, is_interlude=(kind == "interlude"),
+        )
+        self._flush()
+        return new_no
+
+    def delete(self, no: int, *, force: bool = False) -> None:
+        chapters = self._load()
+        if no not in chapters:
+            raise ValueError(f"第 {no} 章不存在")
+        work = chapters[no]
+        if work.finalized_at and not force:
+            raise ValueError(f"第 {no} 章已定稿，需 force=True 才能删除")
+        self._backup()
+        del chapters[no]
+        self._flush()
+
+    def move(self, no: int, *, new_field_no: int | None = None,
+             new_chapter_kind: str | None = None,
+             new_day: int | None = None) -> ChapterWork:
+        chapters = self._load()
+        if no not in chapters:
+            raise ValueError(f"第 {no} 章不存在")
+        _valid_kinds = ("mainline", "dungeon", "interlude")
+        if new_chapter_kind is not None and new_chapter_kind not in _valid_kinds:
+            raise ValueError(f"未知章节类型：{new_chapter_kind}（可选 {_valid_kinds}）")
+        self._backup()
+        work = chapters[no]
+        if new_field_no is not None:
+            work.field_no = new_field_no
+        if new_chapter_kind is not None:
+            work.chapter_kind = new_chapter_kind
+            work.is_interlude = (new_chapter_kind == "interlude")
+            if new_chapter_kind == "interlude":
+                work.day = None
+        # new_day 显式传入才覆盖；interlude 模式已在上面清 day
+        if new_day is not None and work.chapter_kind != "interlude":
+            work.day = new_day if 1 <= new_day <= 7 else None
         self._flush()
         return work

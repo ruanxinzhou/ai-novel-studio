@@ -704,3 +704,101 @@ class TestChapterKindAndVolumeStart:
         w2 = ChapterWork.from_dict({"no": 1, "title": "x", "chapter_kind": "mainline"})
         assert w2.chapter_kind == "mainline"
         assert w2.is_interlude is False
+
+
+# ---- Task 2：DeskStore 章节管理 ----
+
+class TestDeskStoreChapterManagement:
+    def _make(self, tmp_path):
+        return DeskStore(tmp_path / "desk.json")
+
+    def test_ensure_sets_field_no_and_kind(self, tmp_path):
+        d = self._make(tmp_path)
+        c = d.ensure(1, "第1章", field_no=1, chapter_kind="mainline")
+        assert c.field_no == 1
+        assert c.chapter_kind == "mainline"
+        assert c.is_interlude is False
+        # 再次 ensure 传 dungeon 默认值不应覆盖已设置的 mainline
+        c2 = d.ensure(1, "第1章", field_no=1)
+        assert c2.chapter_kind == "mainline"
+
+    def test_insert_after_basic(self, tmp_path):
+        d = self._make(tmp_path)
+        d.ensure(1, "a", field_no=1)
+        d.ensure(2, "c", field_no=1)
+        new_no = d.insert_after(1, title="b", field_no=1, chapter_kind="dungeon")
+        assert new_no == 2
+        nos = d.all_nos()
+        assert nos == [1, 2, 3]
+        assert [d.get(n).title for n in nos] == ["a", "b", "c"]
+        assert d.get(3).field_no == 1  # 原 2 章被 renumber 到 3，field_no 保留
+
+    def test_insert_at_beginning(self, tmp_path):
+        d = self._make(tmp_path)
+        d.ensure(1, "a", field_no=1)
+        new_no = d.insert_after(0, title="zero", field_no=1, chapter_kind="mainline")
+        assert new_no == 1
+        assert [d.get(n).title for n in d.all_nos()] == ["zero", "a"]
+        assert d.get(1).chapter_kind == "mainline"
+
+    def test_delete_shifts_nothing_in_this_version(self, tmp_path):
+        # 本版 delete 不压缩空洞
+        d = self._make(tmp_path)
+        d.ensure(1, "a")
+        d.ensure(2, "b")
+        d.record(2, "plot", "some plot text")
+        d.ensure(3, "c")
+        d.delete(2)
+        assert d.get(2) is None
+        assert d.all_nos() == [1, 3]
+
+    def test_rename(self, tmp_path):
+        d = self._make(tmp_path)
+        d.ensure(1, "原标题")
+        d.rename(1, "新标题")
+        assert d.get(1).title == "新标题"
+
+    def test_move_change_field_and_kind(self, tmp_path):
+        d = self._make(tmp_path)
+        d.ensure(1, "x")
+        d.assign_field(1, field_no=1, day=2)
+        d.move(1, new_field_no=2, new_chapter_kind="interlude")
+        c = d.get(1)
+        assert c.field_no == 2
+        assert c.chapter_kind == "interlude"
+        assert c.is_interlude is True
+        assert c.day is None  # interlude 自动清 day
+
+    def test_list_by_field(self, tmp_path):
+        d = self._make(tmp_path)
+        d.ensure(1, "a", field_no=1)
+        d.ensure(2, "b", field_no=2)
+        d.ensure(3, "c", field_no=1)
+        assert [c.no for c in d.list_by_field(1)] == [1, 3]
+        assert [c.no for c in d.list_by_field(2)] == [2]
+
+    def test_max_no_and_next_available(self, tmp_path):
+        d = self._make(tmp_path)
+        assert d.max_no() == 0
+        assert d.next_available_no() == 1
+        d.ensure(5, "x")
+        assert d.max_no() == 5
+        assert d.next_available_no() == 6
+
+    def test_delete_finalized_requires_force(self, tmp_path):
+        d = self._make(tmp_path)
+        d.ensure(1, "x")
+        d.record(1, "draft", "正文内容")
+        d.mark_finalized(1)
+        with pytest.raises(ValueError):
+            d.delete(1)
+        d.delete(1, force=True)
+        assert d.get(1) is None
+
+    def test_backup_created_on_mutation(self, tmp_path):
+        # insert_after/delete/rename/move 都会 _backup；验证备份文件存在
+        d = self._make(tmp_path)
+        d.ensure(1, "a")
+        d.rename(1, "a2")
+        bak = list(tmp_path.glob("desk.json.bak.*"))
+        assert len(bak) >= 1
