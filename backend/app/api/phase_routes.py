@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 from pydantic import BaseModel
 
 # ---- 依赖注入容器（由 main.py 注册时传入）----
@@ -65,6 +65,10 @@ def register_phase_routes(
         "/api/projects/{pid}/workbench/volumes/interlude",
         _create_interlude_volume, methods=["POST"],
     )
+    router.add_api_route(
+        "/api/projects/{pid}/volumes",
+        _create_volume, methods=["POST"],
+    )
 
     app.include_router(router)
 
@@ -79,6 +83,12 @@ def _must_deps() -> _Deps:
 
 class _DungeonVolumeIn(BaseModel):
     title: str = ""
+
+
+class _CreateVolumeIn(BaseModel):
+    kind: str = "dungeon"   # mainline | dungeon | interlude
+    title: str = ""
+    start_chapter_no: int | None = None
 
 
 # ---- 阶段判定核心逻辑 ----
@@ -522,3 +532,32 @@ def _create_interlude_volume(pid: str) -> dict:
     vs = d.volumes_for(pid)
     v = vs.create_new_volume(title="蓝星间章", volume_kind="interlude")
     return {"ok": True, "volume_no": v.volume_no, "volume": v.as_dict()}
+
+
+def _create_volume(pid: str, body: _CreateVolumeIn = Body(...)) -> dict:
+    """统一建卷接口：支持 mainline / dungeon / interlude 三种 kind。"""
+    d = _must_deps()
+    d.require_project(pid)
+    kind = (body.kind or "dungeon").strip().lower()
+    if kind not in ("mainline", "dungeon", "interlude"):
+        raise HTTPException(400, f"非法的卷 kind：{kind}（只支持 mainline/dungeon/interlude）")
+    vs = d.volumes_for(pid)
+    desk = d.desk_for(pid)
+    title = (body.title or "").strip()
+    if not title:
+        if kind == "mainline":
+            title = "蓝星开篇"
+        elif kind == "interlude":
+            title = "蓝星间章"
+        else:
+            title = ""
+    start_chapter_no = body.start_chapter_no
+    if start_chapter_no is None:
+        start_chapter_no = desk.next_available_no()
+    v = vs.create_new_volume(title=title, volume_kind=kind, start_chapter_no=start_chapter_no)
+    return {
+        "ok": True,
+        "volume_no": v.volume_no,
+        "volume": v.as_dict(),
+        "phase": _determine_phase(pid),
+    }

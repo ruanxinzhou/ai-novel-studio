@@ -4328,6 +4328,30 @@ register_phase_routes(
 )
 
 # ============================================================
+# 章台管理（desk）REST：insert/delete/patch/reorder/spine
+# ============================================================
+from .desk_routes import register_desk_routes
+register_desk_routes(
+    app,
+    require_project=_require_project,
+    volumes_for=_volumes_for,
+    desk_for=_desk_for,
+    entities_for=_entities_for,
+)
+
+# ============================================================
+# 主线开篇卷章纲（mainline-outline）
+# ============================================================
+from .mainline_routes import register_mainline_routes
+register_mainline_routes(
+    app,
+    require_project=_require_project,
+    volumes_for=_volumes_for,
+    project_dir=_project_dir,
+    chore_provider=_chore_provider,
+)
+
+# ============================================================
 # 杀青归账（settle）+ 章前卡（brief）路由
 # ============================================================
 from .settle_routes import register_settle_routes
