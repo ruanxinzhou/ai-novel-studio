@@ -26,6 +26,7 @@ const emit = defineEmits<{
   (e: 'selectChapter', vn: number, cn: number): void
   (e: 'addVolume'): void
   (e: 'goSetup'): void
+  (e: 'openDesk'): void
 }>()
 
 const totalVolumes = computed(() => props.volumes.length)
@@ -38,6 +39,11 @@ const totalVolumes = computed(() => props.volumes.length)
     <div class="spine-setup" @click="emit('goSetup')">
       <span class="spine-icon">📖</span>
       <span class="spine-label">书设定</span>
+    </div>
+
+    <div class="spine-setup" @click="emit('openDesk')">
+      <span class="spine-icon">✎</span>
+      <span class="spine-label">写作台</span>
     </div>
 
     <div class="spine-divider" v-if="totalVolumes > 0">

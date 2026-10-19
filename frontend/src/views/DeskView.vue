@@ -25,7 +25,18 @@ import PrevStepPanel from '../components/PrevStepPanel.vue'
 const props = defineProps<{
   /** 指定章节号；不传则自动选 todayNo */
   chapterNo?: number
+  /** 中台/自由编辑模式：不写入全局 currentChapterNo/currentVolumeNo，避免污染 phase 流程 */
+  freeStanding?: boolean
 }>()
+
+/** 当前卷号（中台模式从章节详情取 field_no，流程模式走全局 currentVolumeNo） */
+const activeVolumeNo = computed(() => {
+  if (props.freeStanding) {
+    const fn = (detail.value?.chapter as any)?.field_no
+    if (fn != null) return fn
+  }
+  return currentVolumeNo.value
+})
 
 const emit = defineEmits<{
   (e: 'reopen-brief'): void
@@ -51,7 +62,7 @@ function wordStatus(chars: number | null | undefined): { cls: string; tip: strin
 
 async function loadCurVolume() {
   const pid = currentProjectId.value
-  const vn = currentVolumeNo.value
+  const vn = activeVolumeNo.value
   if (!pid || !vn) { curVolume.value = null; return }
   try {
     const r = await adaptApi.getVolume(pid, vn)
@@ -91,7 +102,7 @@ provideChatContext(() => {
       + '如果作者在吐槽白描/逻辑/伏笔/能力长线复用，直接给可替换的段落/句子，不要空泛建议。'
       + '九项审稿结果已在 context.review 里，不稳项就是作者最需要改的地方；cliche_hits 列出白描锁命中的空泛词。',
     context: {
-      volume_no: currentVolumeNo.value,
+      volume_no: activeVolumeNo.value,
       chapter_no: currentNo.value || currentChapterNo.value,
       finalized_at: ch?.finalized_at || null,
       is_finalized: !!ch?.finalized_at,
@@ -245,11 +256,14 @@ async function loadOverview(keepSelection = true) {
   loading.value = true
   try {
     overview.value = await deskApi.detail(currentProjectId.value)
+    const fallbackChapter = props.freeStanding
+      ? (todayNo.value || overview.value.chapters[0]?.no || 0)
+      : (currentChapterNo.value || todayNo.value || overview.value.chapters[0]?.no || 0)
     if (!keepSelection || !currentNo.value) {
-      currentNo.value = props.chapterNo || currentChapterNo.value || todayNo.value || overview.value.chapters[0]?.no || 0
+      currentNo.value = props.chapterNo || fallbackChapter
     }
     if (currentNo.value && !overview.value.chapters.some((c) => c.no === currentNo.value)) {
-      currentNo.value = props.chapterNo || currentChapterNo.value || overview.value.chapters[0]?.no || 0
+      currentNo.value = props.chapterNo || fallbackChapter
     }
   } catch (e) {
     ElMessage.error(`章台加载失败：${(e as Error).message}`)
@@ -283,6 +297,8 @@ async function selectChapter(no: number) {
     lastFinalize.value = null
     lastAdvance.value = null
     endChapterOverride.value = null
+    // 中台模式下章节详情加载后根据 field_no 重取卷信息
+    if (props.freeStanding) loadCurVolume()
   } catch (e) {
     ElMessage.error(`章节加载失败：${(e as Error).message}`)
   }
@@ -556,13 +572,13 @@ async function doFinalize() {
       const advBody: any = { finalized: true }
       if (forceEnd === true) advBody.force_volume_end = true
       else if (forceEnd === false) advBody.force_volume_end = false
-      const adv = await briefApi.advance(currentProjectId.value, currentVolumeNo.value, currentNo.value, advBody)
+      const adv = await briefApi.advance(currentProjectId.value, activeVolumeNo.value, currentNo.value, advBody)
       lastAdvance.value = adv
       await loadOverview()
       if (adv.phase === 'settle' || adv.at_end) {
         emit('to-settle')
       } else if (adv.next_chapter != null) {
-        currentChapterNo.value = adv.next_chapter
+        if (!props.freeStanding) currentChapterNo.value = adv.next_chapter
         emit('next-chapter', adv.next_chapter)
       } else {
         const next = overview.value?.chapters.find((c) => !c.finalized_at)

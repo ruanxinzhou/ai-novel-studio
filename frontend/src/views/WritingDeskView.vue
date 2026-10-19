@@ -271,6 +271,7 @@ onMounted(loadSpine)
           <DeskView
             :key="deskKey"
             :chapter-no="selectedNo"
+            :free-standing="true"
             @reopen-brief="onReopenBrief"
             @next-chapter="onNextChapter"
             @to-settle="onToSettle"

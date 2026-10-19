@@ -15,8 +15,11 @@ import RhythmView from './RhythmView.vue'
 import DeskView from './DeskView.vue'
 import SettleView from './SettleView.vue'
 import InterludeView from './InterludeView.vue'
+import MainlineLandingView from './MainlineLandingView.vue'
+import WritingDeskView from './WritingDeskView.vue'
 import ChapterBriefModal from '../components/ChapterBriefModal.vue'
 import VolumeReviewPanel from '../components/VolumeReviewPanel.vue'
+import NewVolumeDialog from '../components/NewVolumeDialog.vue'
 import { deskApi, volumesApi, adaptApi } from '../api'
 import {
   currentProjectId,
@@ -37,9 +40,12 @@ const PHASE_LABELS: Record<string, string> = {
   scaffold: '卷内详设',
   rhythm: '节奏骨架',
   briefing: '章前规划',
+  'mainline-brief': '蓝星 · 章前规划',
   desk: '日更',
   settle: '杀青',
   interlude: '蓝星间章',
+  'mainline-waiting': '蓝星开篇',
+  'writing-desk': '全局写作台',
 }
 
 const bookTitle = ref('')
@@ -97,11 +103,30 @@ function onToSettle() {
   loadPhase()
 }
 
-// phase 切到 briefing 时自动弹 brief modal
+// ---- 新建卷 Dialog ----
+const newVolumeDlgVisible = ref(false)
+function onNewVolumeCreated(no: number) {
+  newVolumeDlgVisible.value = false
+  ElMessage.success(`已创建第 ${no} 卷`)
+  spineVolumesRefreshKey.value += 1
+  loadPhase()
+}
+
+// ---- 自由视图（非 phase 推进，手动覆盖当前面板） ----
+const freeView = ref<'writing-desk' | null>(null)
+function enterWritingDesk() {
+  freeView.value = 'writing-desk'
+}
+function exitFreeView() {
+  freeView.value = null
+  loadPhase() // 回到当前 phase
+}
+
+// phase 切到 briefing / mainline-brief 时自动弹 brief modal
 watch(
   () => currentPhase.value,
   (p) => {
-    if (p === 'briefing') {
+    if (p === 'briefing' || p === 'mainline-brief') {
       existingBrief.value = null
       briefModalVisible.value = true
     } else if (p === 'desk') {
@@ -234,15 +259,7 @@ async function loadSpine() {
 watch(spineVolumesRefreshKey, loadSpine)
 
 async function onAddVolume() {
-  const pid = currentProjectId.value
-  if (!pid) return
-  try {
-    const d = await volumesApi.createDungeon(pid, '')
-    ElMessage.success(`已创建第 ${d.volume_no} 卷`)
-    await loadPhase()
-  } catch (e: any) {
-    ElMessage.error('创建新卷失败：' + (e?.message ?? e))
-  }
+  newVolumeDlgVisible.value = true
 }
 
 function onGoSetup() {
@@ -329,8 +346,18 @@ defineExpose({ refresh: loadPhase })
         @select-chapter="onSelectChapter"
         @add-volume="onAddVolume"
         @go-setup="onGoSetup"
+        @open-desk="enterWritingDesk"
       />
       <main class="home-main">
+        <!-- 自由视图覆盖：手动进入（如写作台），顶部带返回按钮 -->
+        <div v-if="freeView === 'writing-desk'" class="free-view-wrap">
+          <div class="free-view-bar">
+            <el-button size="small" @click="exitFreeView">⬅ 返回工作流</el-button>
+            <span class="free-view-title">全局写作台</span>
+          </div>
+          <WritingDeskView />
+        </div>
+        <template v-else>
         <div v-if="loading" class="home-loading">
           <el-icon class="is-loading"><Loading /></el-icon>
           <span>加载中…</span>
@@ -338,6 +365,12 @@ defineExpose({ refresh: loadPhase })
         <template v-else>
           <!-- setup 阶段：开书设定面板 -->
           <BookSetupView v-if="phase === 'setup'" @done="loadPhase" />
+
+          <!-- mainline-waiting: 蓝星开篇引导页 -->
+          <MainlineLandingView v-else-if="phase === 'mainline-waiting'" @done="loadPhase" />
+
+          <!-- writing-desk: 全局写作台（phase 推进进入） -->
+          <WritingDeskView v-else-if="phase === 'writing-desk'" />
 
           <!-- adapt / adapt_empty 阶段：上传 PDF + 并行改编 + 选版 -->
           <ModuleAdaptView
@@ -376,9 +409,9 @@ defineExpose({ refresh: loadPhase })
             @done="loadPhase"
           />
 
-          <!-- briefing / desk 阶段：章前 5 分钟卡 Modal + 章台 -->
-          <div v-else-if="phase === 'briefing' || phase === 'desk'" class="desk-container">
-            <div v-if="phase === 'briefing' && !briefModalVisible" class="briefing-placeholder">
+          <!-- briefing / desk / mainline-brief 阶段：章前 5 分钟卡 Modal + 章台 -->
+          <div v-else-if="phase === 'briefing' || phase === 'desk' || phase === 'mainline-brief'" class="desk-container">
+            <div v-if="(phase === 'briefing' || phase === 'mainline-brief') && !briefModalVisible" class="briefing-placeholder">
               <div class="briefing-placeholder-icon">📝</div>
               <h2>章前 5 分钟</h2>
               <p>开写前花 5 分钟选一张方向卡，本章会更稳</p>
@@ -439,9 +472,11 @@ defineExpose({ refresh: loadPhase })
             <p>该阶段视图正在开发中，敬请期待。</p>
           </div>
         </template>
+        </template>
       </main>
     </div>
 
+    <NewVolumeDialog v-model:visible="newVolumeDlgVisible" @created="onNewVolumeCreated" />
     <SettingsDrawer />
     <AIChatFloat @refresh="onChatRefresh" />
   </div>
@@ -525,5 +560,23 @@ defineExpose({ refresh: loadPhase })
 .briefing-placeholder p {
   color: #909399;
   margin: 0 0 20px;
+}
+.free-view-wrap {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.free-view-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 12px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid #ebeef5;
+}
+.free-view-title {
+  font-weight: 600;
+  font-size: 15px;
+  color: #303133;
 }
 </style>
