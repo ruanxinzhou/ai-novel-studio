@@ -1348,6 +1348,34 @@ export const deskApi = {
       `/api/projects/${pid}/desk/${chapter}/unfinalize`,
       { method: 'POST' },
     ),
+  // 书脊全量树（卷 + 章节一次性返回，用于全局写作台）
+  spine: (pid: string) =>
+    req<{ volumes: any[]; chapters: any[] }>(`/api/projects/${pid}/desk/spine`),
+  insertChapter: (
+    pid: string,
+    body: { after_no: number; title?: string; field_no: number; chapter_kind?: string; day?: number },
+  ) =>
+    req<{ ok: boolean; no: number }>(`/api/projects/${pid}/desk/insert`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  deleteChapter: (pid: string, no: number, opts?: { force?: boolean }) => {
+    const q = new URLSearchParams()
+    if (opts?.force) q.set('force', '1')
+    const s = q.toString()
+    return req<{ ok: boolean }>(`/api/projects/${pid}/desk/${no}${s ? '?' + s : ''}`, {
+      method: 'DELETE',
+    })
+  },
+  patchChapter: (
+    pid: string,
+    no: number,
+    body: { title?: string; field_no?: number; chapter_kind?: string; day?: number | null },
+  ) =>
+    req<{ ok: boolean; chapter: any }>(`/api/projects/${pid}/desk/${no}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
 }
 
 // ---- 工作台 adapt 阶段：PDF 上传 → 5 版并行改编 → 选版 ----
@@ -2105,6 +2133,39 @@ export const volumesApi = {
   latest: (pid: string) => req<{ volume: any | null }>(`/api/projects/${pid}/volumes/latest`),
   get: (pid: string, volNo: number) => adaptApi.getVolume(pid, volNo),
   createDungeon: (pid: string, title = '') => adaptApi.createVolume(pid, title),
+  create: (
+    pid: string,
+    body: { kind: 'mainline' | 'dungeon' | 'interlude'; title?: string; start_chapter_no?: number },
+  ) =>
+    req<{ ok: boolean; volume_no: number; volume: any; phase: any }>(
+      `/api/projects/${pid}/volumes`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+}
+
+// ---- 蓝星开篇卷（mainline） ----
+export const mainlineApi = {
+  outline: (
+    pid: string,
+    volNo: number,
+    body: { directive?: string; chapter_count?: number },
+  ) =>
+    req<{
+      ok: boolean
+      outlines: Array<{
+        chapter: number
+        title: string
+        day: number
+        summary: string
+        hooks: string[]
+      }>
+    }>(`/api/projects/${pid}/volumes/${volNo}/mainline-outline`, {
+      method: 'POST',
+      body: JSON.stringify({
+        directive: body.directive ?? '',
+        chapter_count: body.chapter_count ?? 2,
+      }),
+    }),
 }
 
 

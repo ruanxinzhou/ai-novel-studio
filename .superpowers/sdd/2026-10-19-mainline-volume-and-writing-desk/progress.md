@@ -18,7 +18,7 @@
 | 6 | 写作材料按 chapter_kind 分支注入 | ✅ | c30f559 | - |
 | 7 | phase 判定 + writing-desk + 迁移脚本 | ✅ | (合入 Task 4-6) | - |
 | 8 | 字数全链路扫尾 | ✅ | 03196c6 | 后端无残留默认章节字数；engine SPECS plot=1800/draft=4800/polish=5000；prompts draft 要求 4000-5000；前端 DeskView/VolumeReviewPanel 字数阈值 <3500 黄 / 4000-5000 绿 / >5500 橙；pytest 175 核心用例全绿 |
-| 9 | 前端 ChapterEditor + WritingDeskView + MainlineLanding + NewVolumeDialog | ⏳ pending | - | - |
+| 9 | 前端 ChapterEditor + WritingDeskView + MainlineLanding + NewVolumeDialog | ✅ | 77e6947 | api.ts 扩展 deskApi.spine/insertChapter/deleteChapter/patchChapter + volumesApi.create + mainlineApi；新建 WritingDeskView（左栏树+DeskView 嵌入）/MainlineLandingView（蓝星开篇引导）/NewVolumeDialog（新建卷对话框）；vite build 通过 |
 | 10 | SpineNav + HomeView 接入 | ⏳ pending | - | - |
 | 11 | 重启 + e2e + push | ⏳ pending | - | - |
 
