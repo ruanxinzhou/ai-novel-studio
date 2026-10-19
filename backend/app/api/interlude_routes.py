@@ -109,10 +109,11 @@ def _is_mock(pid: str, vs, v) -> bool:
     except Exception:
         pass
     try:
+        from ..book.volume import adapted_premise_of
         prev = _find_prev_dungeon(vs)
         if prev is not None:
-            am = getattr(prev, "adapted_module", None) or ""
-            if isinstance(am, str) and am.startswith("测试副本核文本"):
+            premise = adapted_premise_of(getattr(prev, "adapted_module", None))
+            if isinstance(premise, str) and premise.startswith("测试副本核文本"):
                 return True
     except Exception:
         pass

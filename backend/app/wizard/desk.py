@@ -350,8 +350,16 @@ def run_chapter_stage(
             vol = volume_store.get(int(work.field_no))
             arena_lines: list[str] = []
             # 副本改编
-            if vol.adapted_module:
-                arena_lines.append(f"【副本核文本】\n{vol.adapted_module}")
+            from ..book.volume import adapted_premise_of, adapted_cast_of
+            premise = adapted_premise_of(vol.adapted_module)
+            if premise:
+                arena_lines.append(f"【副本核文本】\n{premise}")
+            cast_cards = adapted_cast_of(vol.adapted_module)
+            if cast_cards:
+                cast_lines = []
+                for c in cast_cards:
+                    cast_lines.append(f"- {c.get('name','?')}（{c.get('role','')}；{c.get('occupation','')}）｜秘密：{c.get('secret','')}")
+                arena_lines.append("【剧本 NPC/KPC 卡司】\n" + "\n".join(cast_lines))
             # 魂穿宿主
             hc = vol.host_character or {}
             if isinstance(hc, dict) and hc:

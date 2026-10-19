@@ -4123,7 +4123,7 @@ class VolumeUpdateIn(BaseModel):
     contamination_goal: int | None = None
     satisfaction_beats: list[str] | None = None
     endgame_layer_hints: dict | None = None
-    adapted_module: str | None = None
+    adapted_module: dict | str | None = None
     simulated_run: dict | None = None
     host_character: dict | None = None
     entry_point: dict | None = None

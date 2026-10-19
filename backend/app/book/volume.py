@@ -78,7 +78,11 @@ class Volume:
 
     # ---- 工作台重构新增 ----
     volume_kind: str = "dungeon"  # 'dungeon' | 'interlude'
-    adapted_module: str | None = None
+    # adapted_module 保存的是改编后的「副本原剧本骨架」完整 dict：
+    #   { adapted_premise: str, player_cards: list[dict], renamed_cast: list, changed_elements: list, risk_flags: list,
+    #     flavor?: str, flavor_full?: str, title?: str, one_liner?: str }
+    # 历史兼容：早期版本存的是 premise 字符串，读取时用 adapted_premise_of() / adapted_player_cards_of() 兼容。
+    adapted_module: dict | str | None = None
     simulated_run: dict | None = None
     death_nodes: list = field(default_factory=list)
     climax_nodes: list = field(default_factory=list)
@@ -180,6 +184,75 @@ class Volume:
                 "embody": False, "scaffold": False, "rhythm": False,
             }),
         )
+
+
+# ============================================================
+# adapted_module 访问 helper（兼容历史字符串格式）
+# ============================================================
+# 历史上 adapted_module 曾只存 adapted_premise 字符串；新版本存 dict：
+# { adapted_premise, cast (原 player_cards), renamed_cast, changed_elements,
+#   risk_flags, flavor?, flavor_full?, title?, one_liner? }
+#
+# cast 即模组 NPC/KPC 卡司（剧本人物），不包含 PL 调查员——PL 调查员在 simulate
+# 阶段基于副本核生成，见 sushi_generator.generate_investigators。
+
+def adapted_premise_of(am: dict | str | None) -> str:
+    """从 adapted_module 取出副本核文本（600-900 字小说化段落）。"""
+    if am is None:
+        return ""
+    if isinstance(am, str):
+        return am
+    if isinstance(am, dict):
+        return str(am.get("adapted_premise") or "")
+    return str(am)
+
+
+def adapted_cast_of(am: dict | str | None) -> list[dict]:
+    """从 adapted_module 取出剧本 NPC/KPC 卡司列表。
+
+    返回 list[dict]，每个 dict 至少含 name/role/occupation 等字段。
+    历史字符串格式没有人物卡，返回空 list。
+    """
+    if not isinstance(am, dict):
+        return []
+    # 新版字段叫 cast，兼容旧字段名 player_cards
+    cards = am.get("cast")
+    if not cards:
+        cards = am.get("player_cards")
+    if not isinstance(cards, list):
+        return []
+    return [c for c in cards if isinstance(c, dict)]
+
+
+def adapted_meta_of(am: dict | str | None) -> dict:
+    """取出改名/风险/风格差异等元信息（选版/后续阶段可能用到）。"""
+    if not isinstance(am, dict):
+        return {}
+    return {
+        "renamed_cast": list(am.get("renamed_cast") or []),
+        "changed_elements": list(am.get("changed_elements") or []),
+        "risk_flags": list(am.get("risk_flags") or []),
+        "flavor": am.get("flavor") or "",
+        "flavor_full": am.get("flavor_full") or "",
+        "title": am.get("title") or "",
+    }
+
+
+def adapted_module_normalize(am: dict | str | None) -> dict:
+    """把任意格式的 adapted_module 规整为 dict 形式（用于向前端返回/序列化）。"""
+    if am is None:
+        return {}
+    if isinstance(am, str):
+        return {"adapted_premise": am, "cast": []}
+    if isinstance(am, dict):
+        out = dict(am)
+        # 保证 cast 字段存在且为 list
+        if "cast" not in out and "player_cards" in out:
+            out["cast"] = out.get("player_cards") or []
+        out.setdefault("cast", [])
+        out.setdefault("adapted_premise", "")
+        return out
+    return {"adapted_premise": str(am), "cast": []}
 
 
 class VolumeStore:

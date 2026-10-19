@@ -184,6 +184,57 @@ def _keeper_materials_and_x(state: CocRunState, adapt_parsed: dict | None,
             content=json.dumps(adapt_parsed, ensure_ascii=False, indent=2),
             title="选定 COC 模组方案",
         ))
+        # 把 NPC 卡司格式化成人读文本，单独塞一份材料，强化 KP "只能使用这些命名人物" 的约束
+        cast_list = adapt_parsed.get("cast") or []
+        if isinstance(cast_list, list) and cast_list:
+            from ..pipeline.sushi_generator import _cast_to_text
+            cast_text = _cast_to_text(cast_list)
+            mats.append(Material(
+                source_id="coc:cast", family=MaterialFamily.REQUIRED,
+                content=(
+                    "【剧本已命名人物（NPC/KPC 卡司）——KP 必须严格使用这些人物的姓名/身份/秘密/动机/关系来扮演，"
+                    "不得为他们改名，不得新增其他有姓名、有戏份的核心人物。】\n\n"
+                    + cast_text
+                    + "\n\n【硬性要求】\n"
+                    "- 上面这份名单是本副本里所有「有姓名的人物」。所有有名有姓的出场角色，必须来自这份名单；"
+                    "姓名必须原样使用（含姓氏，不得简称/换名/谐音）。\n"
+                    "- 你可以让他们提前登场、延后登场、以不同侧面出场，但不要改写他们的核心动机/秘密/未了执念/当前状态——"
+                    "这些是这个故事能成立的骨架。\n"
+                    "- 允许出现无姓名的背景路人（例如「便利店的另一个客人」「穿雨衣的过路人」「楼道里咳嗽的老人」），"
+                    "但路人不得开口透露关键线索、不得抢走 NPC 卡司人物的戏份、不要给路人起名字。\n"
+                    "- 绝对不允许从其他模组/影视/文学里借用知名人物，也不要用「林觉/赵魁/唐迟」等预设姓名。"
+                ),
+                title="剧本 NPC 卡司（KP 必须严格遵守）",
+            ))
+        # PL 调查员列表（本场玩家角色）
+        player_meta = (state.variant_seed or {}).get("player_meta") or {}
+        invs = player_meta.get("investigators") if isinstance(player_meta, dict) else []
+        if isinstance(invs, list) and invs:
+            pl_lines = []
+            for i, c in enumerate(invs, 1):
+                pl_lines.append(
+                    f"{i}. {c.get('name','?')}（{c.get('occupation','')}，{c.get('gender','')}，{c.get('age','')}岁，"
+                    f"{c.get('origin','外来')}）\n"
+                    f"   - 外貌/气质：{c.get('appearance','')}\n"
+                    f"   - 性格：{c.get('personality','')}\n"
+                    f"   - 卷入理由：{c.get('reason_here','')}\n"
+                    f"   - 个人秘密：{c.get('personal_secret','')}"
+                )
+            team_note = player_meta.get("team_composition_note", "") if isinstance(player_meta, dict) else ""
+            mats.append(Material(
+                source_id="coc:players_cards", family=MaterialFamily.REQUIRED,
+                content=(
+                    "【本场 PL 调查员（玩家角色）——这些是即将被卷入事件的人，KP 开场必须让他们以自己的理由"
+                    "自然进入场景；所有 PL 的姓名/职业/性别/性格必须严格按下面写，不得改名/换身份】\n\n"
+                    + "\n".join(pl_lines)
+                    + (f"\n\n本场组合特点：{team_note}" if team_note else "")
+                    + "\n\n【硬性要求】\n"
+                    "- PL 是玩家角色，不是副本 NPC；他们原本不在 NPC 卡司里，是被事件卷入的外来者/路人。\n"
+                    "- 开场 KP 必须安排每个 PL 以符合他们「卷入理由」的方式登场（不是所有人都从天而降，也不是所有人都互相认识）。\n"
+                    "- 不要提前告诉 PL 事件真相，也不要让他们的个人秘密在开场就被其他人知道。"
+                ),
+                title="本场 PL 调查员卡（玩家角色，必须按此姓名/职业登场）",
+            ))
     seed_text = render_variant_seed(state.variant_seed or {})
     if seed_text:
         mats.append(Material(
@@ -203,6 +254,13 @@ def _keeper_materials_and_x(state: CocRunState, adapt_parsed: dict | None,
         x = (
             f"# 当前进度\n\n{_players_status_line(state)}\n\n"
             f"# 最近情节\n\n{transcript}\n\n"
+            f"# 【人物纪律（最高优先级，违反即输出作废）】\n"
+            f"- 所有「有姓名的出场人物」**必须**使用材料「剧本 NPC 卡司（KP 必须严格遵守）」中列出的姓名/身份/秘密/动机/关系，"
+            f"姓名原样使用（含姓氏），不得改名/换姓/谐音/简称，不得杜撰新的命名人物。\n"
+            f"- PL（调查员）的姓名/职业/外貌/性格/卷入理由/个人秘密**必须**严格使用材料「本场 PL 调查员卡」中的设定，"
+            f"不得替他们换身份/换职业/换名字；PL 不是副本 NPC，他们按各自的卷入理由自然登场。\n"
+            f"- 无姓名的背景路人可以出现，但路人不得开口透露关键线索、不要给路人起名字、不要让路人抢走卡司人物的戏份。\n"
+            f"- 禁止出现「林觉/赵魁/唐迟」等预设姓名；禁止魂穿/穿越/重生/七天倒计时/T-0。\n\n"
             f"# KP 本轮任务\n"
             f"你以第三人称限知视角推进第{state.current_day}阶段的情节：\n"
             f"- 描写环境氛围、NPC 的动作与言语、诡异征兆的自然浮现；\n"
@@ -220,6 +278,10 @@ def _keeper_materials_and_x(state: CocRunState, adapt_parsed: dict | None,
         x = (
             f"# 当前进度\n\n阶段{state.current_day}/7   SAN {state.san}   HP {state.hp}\n\n"
             f"# 最近回合\n\n{transcript}\n\n"
+            f"# 【人物纪律（最高优先级）】\n"
+            f"- 所有有姓名的人物必须来自材料「剧本 NPC 卡司」，姓名原样使用，不得杜撰命名人物；\n"
+            f"- PL 的姓名/职业/秘密必须严格遵循材料「本场 PL 调查员卡」，不得改名换身份；\n"
+            f"- 路人无名无姓、不得透露关键线索；禁止林觉/赵魁/唐迟等预设名，禁止魂穿/七天/T-0。\n\n"
             f"# KP 本轮任务\n"
             f"请扮演守密人，推进第{state.current_day}阶段的情节：\n"
             f"- 用第三人称小说笔调描写环境、NPC 行动、诡异征兆；\n"
@@ -237,8 +299,15 @@ def _investigator_x(state: CocRunState, last_keeper_text: str,
                     user_directive: str | None, *, novelized: bool) -> str:
     """PL 回合的 x_block。"""
     pname = state.current_player_name()
-    pcard = state.current_player_card()
+    pcard = state.current_player_card() or {}
     occ = pcard.get("occupation", "")
+    gender = pcard.get("gender", "")
+    age = pcard.get("age", "")
+    appearance = pcard.get("appearance", "")
+    personality = pcard.get("personality", "")
+    reason_here = pcard.get("reason_here", "")
+    personal_secret = pcard.get("personal_secret", "")
+    origin = pcard.get("origin", "")
     skills = pcard.get("skills") or {}
     sk_str = "、".join(f"{k}{v}" for k, v in skills.items())
     mates = [ps.get("name", "") for i, ps in enumerate(state.players_state) if i != state.active_player_idx]
@@ -246,12 +315,26 @@ def _investigator_x(state: CocRunState, last_keeper_text: str,
     if mates:
         mates_line = f"同行伙伴：{'、'.join(m for m in mates if m)}。"
 
+    # 为 PL LLM 提供完整的「我是谁」卡，包括外貌/性格/卷入理由/个人秘密——
+    # 这是角色能演出「我自己的算盘」的关键；否则 PL 只会用通用调查员口吻反应。
+    identity_block = (
+        f"姓名：{pname}    身份：{occ}    "
+        f"{'性别：' + gender + '    ' if gender else ''}"
+        f"{'年龄：' + str(age) if age else ''}\n"
+        f"出身/来历：{origin or '（未指定）'}\n"
+        f"外貌/气质：{appearance or '（未指定，请按普通人印象补充）'}\n"
+        f"性格：{personality or '（未指定，请按身份合理演绎）'}\n"
+        f"你为什么会在这里：{reason_here or '（未指定，请按身份合理补一个合理理由）'}\n"
+        f"你的个人秘密（此刻只有你自己知道）：{personal_secret or '（未指定，你可以临时给一个不破坏模组基调的小秘密）'}\n"
+        f"关键技能：{sk_str or '通用技能'}\n"
+    )
+
     if novelized:
         return (
             f"# 你的人物\n\n"
-            f"姓名：{pname}    身份：{occ}\n"
-            f"关键技能：{sk_str}\n"
-            f"你是一个有自己缺点和算盘的普通人，不是英雄。{mates_line}\n\n"
+            f"{identity_block}\n"
+            f"你是一个有自己缺点、算盘和秘密的普通人，不是英雄。{mates_line}\n"
+            f"你此刻的选择应当符合你的性格、你的卷入理由和你藏着的秘密——你不是全知的，你会害怕、会犹豫、会自私。\n\n"
             f"# 刚才发生的事\n\n{last_keeper_text}\n\n"
             + (f"# 作者本节特别指示\n{user_directive}\n\n" if user_directive else "")
             + f"# 此刻轮到你（{pname}）行动\n"
@@ -259,11 +342,11 @@ def _investigator_x(state: CocRunState, last_keeper_text: str,
               f"{MODULE_STAGE_NEGATIVE_CONSTRAINT}"
         )
     return (
-        f"# 当前行动调查员人物卡\n\n{state.player_card_render()}\n\n"
+        f"# 当前行动调查员人物卡\n\n{identity_block}\n{state.player_card_render()}\n\n"
         f"# KP 本轮描述\n\n{last_keeper_text}\n\n"
         + (f"# 作者本节特别指示\n{user_directive}\n\n" if user_directive else "")
         + f"# 扮演 {pname}（{occ}）做出反应\n"
-          "他/她是有自己缺点和算盘的普通人，不是英雄。输出：先写内心判断（观察到什么/怕什么），"
+          "你是有自己缺点、算盘和秘密的普通人，不是英雄。输出：先写内心判断（观察到什么/怕什么/你藏着的秘密此刻是否被触动），"
           "再写具体行动（动作+对白+刻意避开什么），最后留一处破绽。控制 300-600 字。"
           f"{MODULE_STAGE_NEGATIVE_CONSTRAINT}"
     )
@@ -1052,6 +1135,7 @@ def _run_one_session(
     field_no: int,
     adapt_parsed: dict,
     player_cards: list[dict],
+    player_meta: dict | None = None,
     variant_config: dict,
     max_pairs_per_session: int,
     max_turns_per_session: int,
@@ -1090,6 +1174,10 @@ def _run_one_session(
         seed["ending_label"] = variant_config["ending_label"]
     if variant_config.get("ending_bias"):
         seed["ending_bias"] = variant_config["ending_bias"]
+    # 把本场 PL 组合元信息（team_composition_note + 个人卷入理由/秘密）塞到 seed 里，
+    # 之后 KP/PL 的 x_block 会读取并使用
+    if player_meta:
+        seed["player_meta"] = player_meta
 
     state = init_run(
         session_store, virtual_field, adapt_parsed,
@@ -1218,6 +1306,7 @@ def run_coc_parallel_batch(
     field_run_store,
     adapt_parsed: dict,
     player_sets: list[list[dict]],
+    player_sets_meta: list[dict] | None = None,
     variant_configs: list[dict],
     max_pairs_per_session: int = 6,
     max_turns_per_session: int = 24,
@@ -1271,6 +1360,7 @@ def run_coc_parallel_batch(
                 field_no=field_no,
                 adapt_parsed=adapt_parsed,
                 player_cards=player_sets[i],
+                player_meta=(player_sets_meta[i] if player_sets_meta and i < len(player_sets_meta) else None),
                 variant_config=variant_configs[i],
                 max_pairs_per_session=max_pairs_per_session,
                 max_turns_per_session=max_turns_per_session,

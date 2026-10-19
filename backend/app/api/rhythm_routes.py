@@ -78,8 +78,9 @@ class _FinalizeIn(BaseModel):
 
 def _is_mock(vol) -> bool:
     try:
-        am = vol.adapted_module or ""
-        if isinstance(am, str) and am.startswith("测试副本核文本"):
+        from ..book.volume import adapted_premise_of
+        premise = adapted_premise_of(vol.adapted_module)
+        if isinstance(premise, str) and premise.startswith("测试副本核文本"):
             return True
         hc = vol.host_character or {}
         if isinstance(hc, dict) and "林薇" in (hc.get("name") or ""):

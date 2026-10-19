@@ -137,6 +137,36 @@ const allVariants = computed<any[]>(() => {
 
 const completed = computed(() => volume.value?.simulated_run ?? null)
 
+// adapted_module 新版本是 dict（含 adapted_premise / cast / flavor 等），老版本是纯字符串。
+// 这里兼容两种格式，把副本核文本+NPC 卡司拼成可读预览。
+const adaptedPreview = computed(() => {
+  const am = volume.value?.adapted_module
+  if (!am) return ''
+  if (typeof am === 'string') return am
+  if (typeof am === 'object') {
+    const premise = am.adapted_premise || ''
+    const cast: any[] = Array.isArray(am.cast) ? am.cast
+      : (Array.isArray(am.player_cards) ? am.player_cards : [])
+    const flavor = am.flavor_full || am.flavor || ''
+    const lines: string[] = []
+    if (flavor) lines.push(`【风格】${flavor}`)
+    if (premise) lines.push(premise)
+    if (cast.length) {
+      lines.push('\n【剧本 NPC 卡司】')
+      for (const c of cast) {
+        if (!c || typeof c !== 'object') continue
+        const n = c.name || '?'
+        const r = c.role ? `（${c.role}` : ''
+        const o = c.occupation ? `${r ? '；' : '（'}${c.occupation}）` : (r ? '）' : '')
+        const sec = c.secret ? `｜秘密：${c.secret}` : ''
+        lines.push(`- ${n}${r}${o}${sec}`)
+      }
+    }
+    return lines.join('\n')
+  }
+  return String(am)
+})
+
 async function loadVolume() {
   const pid = currentProjectId.value
   if (!pid || !props.volNo) return
@@ -404,7 +434,7 @@ watch(() => props.volNo, () => {
       step-label="COC 并行跑团仿真"
       prev-step-label="剧本改编（改编后副本核）"
       :sections="[
-        { title: '改编后副本核 / 模组前提', body: volume?.adapted_module || '', bodyType: 'text' }
+        { title: '改编后副本核 / 模组前提', body: adaptedPreview, bodyType: 'text' }
       ]"
     />
 

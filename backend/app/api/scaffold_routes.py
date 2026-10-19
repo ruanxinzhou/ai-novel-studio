@@ -89,8 +89,9 @@ def _session_id(pid: str, vol_no: int) -> str:
 
 def _is_mock(vol) -> bool:
     try:
-        am = vol.adapted_module or ""
-        if isinstance(am, str) and am.startswith("测试副本核文本"):
+        from ..book.volume import adapted_premise_of
+        premise = adapted_premise_of(vol.adapted_module)
+        if isinstance(premise, str) and premise.startswith("测试副本核文本"):
             return True
         hc = vol.host_character or {}
         if isinstance(hc, dict) and "林薇" in (hc.get("name") or ""):
@@ -192,13 +193,16 @@ def _mock_payload() -> dict:
 
 def _build_context(vol, directive: str = "") -> str:
     """复用：从 vol 上提取魂穿阶段所有产物拼成 LLM 上下文。"""
+    from ..book.volume import adapted_premise_of, adapted_cast_of
     parts: list[str] = []
-    am = vol.adapted_module or {}
-    if isinstance(am, dict):
-        parts.append("===== 副本骨架（改编稿）=====")
-        parts.append(am.get("adapted_premise") or json.dumps(am, ensure_ascii=False)[:2000])
-    elif am:
-        parts.append(f"===== 副本骨架 =====\n{am}")
+    premise = adapted_premise_of(vol.adapted_module)
+    cast_cards = adapted_cast_of(vol.adapted_module)
+    parts.append("===== 副本骨架（改编稿·副本核文本）=====")
+    parts.append(premise or "")
+    if cast_cards:
+        parts.append("\n===== 剧本 NPC/KPC 卡司 =====")
+        for c in cast_cards:
+            parts.append(f"- {c.get('name','?')}（{c.get('role','')}；{c.get('occupation','')}）｜秘密：{c.get('secret','')}")
     sr = vol.simulated_run or {}
     if isinstance(sr, dict):
         parts.append("\n===== 选定跑团走向 =====")

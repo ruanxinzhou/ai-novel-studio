@@ -97,9 +97,10 @@ def _load_vol(pid: str, vol_no: int):
 
 
 def _is_mock(v) -> bool:
-    """mock 短路条件：adapted_module 以「测试副本核文本」开头 或 host_character.name 含「林薇」。"""
-    am = getattr(v, "adapted_module", None)
-    if isinstance(am, str) and am.startswith("测试副本核文本"):
+    """mock 短路条件：adapted_premise 以「测试副本核文本」开头 或 host_character.name 含「林薇」。"""
+    from ..book.volume import adapted_premise_of
+    premise = adapted_premise_of(getattr(v, "adapted_module", None))
+    if isinstance(premise, str) and premise.startswith("测试副本核文本"):
         return True
     hc = getattr(v, "host_character", None)
     if isinstance(hc, dict) and "林薇" in (hc.get("name") or ""):

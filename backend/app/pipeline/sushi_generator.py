@@ -831,3 +831,158 @@ def adapt_pdf_source(provider: Provider, ps: PromptStore, pdf_text: str,
         original_chars=len(pdf_text),
         attempts=completion.attempts,
     )
+
+
+# ============================================================
+# COC 跑团 PL 调查员生成器（车卡）
+# ============================================================
+# 基于已经选好的「副本核文本 + 剧本 NPC 卡司 + 本场 flavor 种子」，
+# 生成 2-4 张 PL 调查员卡，让他们以合理的身份/动机被卷入副本事件。
+# PL 是"外面来的倒霉蛋/好奇心重的普通人/各怀心事的过客"，
+# 不是副本本地人，也不在 NPC 卡司里；他们的姓名/职业/性格必须和
+# 副本 premise 里出现的命名 NPC 严格区分。
+
+_INVESTIGATORS_SYSTEM = """你是一位克苏鲁 TRPG 的车卡助手。作者已经选好了一个副本（模组）的剧本骨架和 NPC 卡司，现在需要你生成 2-4 张 PLAYER 调查员卡，这些调查员是即将被卷入副本事件的玩家角色——他们都是普通人类（不是神话生物/不是神/不是内鬼），有自己的职业、技能、性格、秘密、社会关系和来到此地的理由。
+
+==== 硬性规则 ====
+1.【人数】输出 2-4 张调查员卡（3 张最佳），性别/年龄/职业/性格都要拉开差异，避免同行/同背景。
+2.【原创人物·严禁重名】这些调查员必须是你原创的新角色，他们的姓名绝对不能和下面"剧本 NPC 卡司"里任何一个名字相同或相似（哪怕同音都不行）。也不要使用"唐迟/林觉/赵魁"等已知人名。
+3.【本地人/外来人比例】每张卡要明确他/她是「本地人」还是「外来访客/过客」。可以有 0-1 个本地人（但这个本地人必须是剧本 NPC 卡司里没有提过的路人身份，不能抢命名 NPC 的戏份），其余必须是外来者，被事件合理卷入。
+4.【职业多样性】职业要贴近副本的地理/时代/世界观，并且和其他调查员以及剧本 NPC 的职业不要扎堆；例如如果剧本里已经有便利店经理/修锁匠/外卖骑手，就不要再生成第二个外卖员/便利店店员/锁匠。优先考虑和事件钩子自然相关的职业（目击者/亲属/委托人/走错路的路人/调查记者/送货人/休假旅客/附近上班的人/路过办私事的人 等），也允许看似无关却因巧合卷入的普通人。
+5.【合理卷入理由】每张卡必须写一个"他/她为什么此刻出现在此地、为什么会接下这个异常/走进这扇门/打开这个包裹"的简短理由（reason_here 字段），理由要符合身份，符合日常生活逻辑（例如：送外卖到这栋楼/来寻失踪的亲人/下错车/雨夜借电话/接了兼职/多年前的旧信指引/陪朋友来 等）。
+6.【普通人·不是英雄】所有调查员 san_max 在 40-80 之间，hp_max 在 8-16 之间；技能总值不要夸张（关键技能 30-80 之间，普通人水平），每人最多 1 项技能到 75-85（代表他的本职特长），其余应在 30-60。每张卡 6-10 个技能。
+7.【秘密/执念】每人有一个属于自己的秘密或未了心事（personal_secret），这个秘密可以和副本主题暗合但不要提前知道真相；可以是债务/感情/愧疚/好奇/失职/寻亲/追踪某人 等，给跑团 RP 留空间。
+8.【贴合副本风格】人物的职业、穿着、说话风格要贴合副本的时代/地域/题材外壳（例如古风副本里不要出现外卖员/程序员；西方哥特副本里不要出现中国名字；科幻副本里可以有工程师/星际商人；校园副本里可以有学生/老师/家长等）。姓名要符合地域设定（中式/日式/西式/奇幻 都要和题材一致）。
+9.【与唐迟无关】不要提「唐迟/主角/魂穿/接替/七天倒计时」——这些是后续阶段的事，你现在只生成 PL 调查员。
+
+==== 输出 JSON 结构 ====
+{
+  "investigators": [
+    {
+      "name": "原创姓名（符合副本地域/时代）",
+      "gender": "男/女/其他",
+      "age": 数字(18-65),
+      "origin": "本地/外来",
+      "occupation": "具体职业（与其他卡、与剧本NPC职业错开）",
+      "appearance": "一句话外貌气质（20-40字）",
+      "personality": "性格/说话风格/常见反应（40-80字）",
+      "reason_here": "他/她为什么此刻出现在此地、会被卷入事件的合理理由（40-80字）",
+      "personal_secret": "个人秘密/未了心事/隐藏动机（30-60字）",
+      "san_max": 数字(40-80),
+      "hp_max": 数字(8-16),
+      "mp_max": 数字(10-16),
+      "luck": 数字(20-80),
+      "skills": { "技能名": 数字值(25-85), ... 6-10 项 }
+    }
+  ],
+  "team_composition_note": "一句话说明这组人的组合关系/卷入方式/戏剧反差（给KP一个开场抓手）"
+}
+只输出 JSON，不要输出任何解释文字，不要输出 markdown 代码块。"""
+
+
+def _cast_to_text(cast: list[dict]) -> str:
+    """把 NPC 卡司列表格式化成 KP/PL 都能看的文本段落。"""
+    if not cast:
+        return "（剧本未提供命名 NPC 卡司，由 KP 按 premise 自然生成 NPC，但所有命名人物必须保持前后一致）"
+    lines = []
+    for i, c in enumerate(cast, 1):
+        name = c.get("name") or f"NPC{i}"
+        role = c.get("role") or ""
+        occ = c.get("occupation") or ""
+        age = c.get("age") or ""
+        gender = c.get("gender") or ""
+        app = c.get("appearance") or ""
+        pers = c.get("personality") or ""
+        mot = c.get("motivation") or ""
+        sec = c.get("secret") or ""
+        rel = c.get("relationships") or ""
+        ub = c.get("unfinished_business") or ""
+        cs = c.get("current_state") or ""
+        lines.append(
+            f"{i}. {name}（{role}；{occ}；{gender}{'，'+str(age)+'岁' if age else ''}）\n"
+            f"   - 外貌/气质：{app}\n"
+            f"   - 性格：{pers}\n"
+            f"   - 动机：{mot}\n"
+            f"   - 秘密：{sec}\n"
+            f"   - 关系：{rel}\n"
+            f"   - 未了执念：{ub}\n"
+            f"   - 当前状态：{cs}"
+        )
+    return "\n".join(lines)
+
+
+@dataclass
+class InvestigatorGenResult:
+    investigators: list[dict]
+    team_composition_note: str
+    attempts: int = 1
+
+
+def generate_investigators(
+    provider: Provider,
+    premise: str,
+    cast: list[dict],
+    *,
+    flavor_hint: str = "",
+    session_index: int = 0,
+    n_sessions: int = 1,
+) -> InvestigatorGenResult:
+    """基于副本核 premise + NPC 卡司，生成一组 PL 调查员卡。
+
+    - flavor_hint：本场差异化种子（好运线/残酷线/洗牌线/平行宇宙#N 等）
+    - session_index / n_sessions：并行场次索引，用于每盘组合做微调
+    """
+    cast_text = _cast_to_text(cast or [])
+    # 每盘给一点差异化导向，让三场 PL 组合自然拉开
+    slot_hints = [
+        "本场偏「误打误撞组合」：人物互相不认识，因巧合同时卷入，反差要大。",
+        "本场偏「宿命牵引组合」：至少一人和事件里某个 NPC 有旧关系（亲友/债主/旧识），其他人是陪他/她来的或被牵连的。",
+        "本场偏「职业组合」：几个人因为工作同时出现在现场（同一份订单/同一次任务/同一桩委托），技能互补。",
+    ]
+    slot_hint = slot_hints[session_index % len(slot_hints)]
+
+    user_block = (
+        "【副本核文本（即模组故事骨架）】\n"
+        f"{(premise or '').strip()}\n\n"
+        "【剧本已有 NPC/KPC 卡司（这些是剧本里的人物，KP 会扮演他们，调查员绝对不能和他们重名，也不要抢他们的职业/身份）】\n"
+        f"{cast_text}\n\n"
+        f"【本场差异化导向】{flavor_hint or '无'}；{slot_hint}\n\n"
+        "请生成 3 张（最少 2 张，最多 4 张）PL 调查员卡。记住：他们是被卷入事件的玩家角色，不是剧本 NPC；"
+        "他们的姓名/职业不能与上面 NPC 卡司里的任何人重复或近似。输出 JSON。"
+    )
+
+    def generate() -> object:
+        messages = [
+            {"role": "system", "content": _INVESTIGATORS_SYSTEM},
+            {"role": "user", "content": user_block},
+        ]
+        return provider.chat(messages).text
+
+    completion = complete_structured(generate, max_regenerations=2)
+    data = completion.data
+    if not isinstance(data, dict):
+        raise ValueError(f"PL 调查员生成连续 {completion.attempts} 次无法解析")
+    invs = data.get("investigators") or []
+    if not isinstance(invs, list):
+        invs = []
+    invs = [c for c in invs if isinstance(c, dict) and c.get("name")]
+    if len(invs) < 2:
+        raise ValueError(f"PL 调查员生成数量不足（只得到 {len(invs)} 张，至少需要 2 张）")
+    # 保底字段
+    for i, c in enumerate(invs):
+        c.setdefault("name", f"调查员{i+1}")
+        c.setdefault("occupation", "路人")
+        c.setdefault("san_max", 60)
+        c.setdefault("hp_max", 12)
+        c.setdefault("mp_max", 12)
+        c.setdefault("luck", 50)
+        c.setdefault("skills", {"侦查": 40, "聆听": 40, "图书馆": 35})
+        c.setdefault("personality", "普通人，话不多，遇事自保为先。")
+        c.setdefault("reason_here", "因日常事务恰好出现在此地，意外被卷入。")
+        c.setdefault("personal_secret", "有些不愿对外人提起的往事。")
+        c.setdefault("origin", "外来")
+    return InvestigatorGenResult(
+        investigators=invs[:4],
+        team_composition_note=str(data.get("team_composition_note") or ""),
+        attempts=completion.attempts,
+    )

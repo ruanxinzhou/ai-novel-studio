@@ -29,6 +29,34 @@ const stageMeta: Record<string, { label: string; icon: string }> = {
 const baseStage = computed(() => (props.phase || '').replace('_review', ''))
 const stageInfo = computed(() => stageMeta[baseStage.value] || { label: baseStage.value || '进度', icon: '📘' })
 
+// adapted_module 兼容 dict / 字符串两种格式
+const adaptedText = computed(() => {
+  const am = (volume.value as any)?.adapted_module
+  if (!am) return ''
+  if (typeof am === 'string') return am
+  if (typeof am === 'object') {
+    const premise = am.adapted_premise || ''
+    const cast: any[] = Array.isArray(am.cast) ? am.cast
+      : (Array.isArray(am.player_cards) ? am.player_cards : [])
+    const flavor = am.flavor_full || am.flavor || ''
+    const lines: string[] = []
+    if (flavor) lines.push(`【风格】${flavor}`)
+    if (premise) lines.push(premise)
+    if (cast.length) {
+      lines.push('\n【剧本 NPC 卡司】')
+      for (const c of cast) {
+        if (!c || typeof c !== 'object') continue
+        const n = c.name || '?'
+        const r = c.role ? `（${c.role}` : ''
+        const o = c.occupation ? `${r ? '；' : '（'}${c.occupation}）` : (r ? '）' : '')
+        lines.push(`- ${n}${r}${o}`)
+      }
+    }
+    return lines.join('\n')
+  }
+  return String(am)
+})
+
 async function load() {
   const pid = currentProjectId.value
   const vn = props.volNo
@@ -141,9 +169,9 @@ function deltaSign(delta: any): string {
         </div>
       </div>
 
-      <el-card v-if="volume.adapted_module" class="vr-card" shadow="never">
+      <el-card v-if="adaptedText" class="vr-card" shadow="never">
         <template #header><span>📖 核心文本</span></template>
-        <div class="vr-text">{{ volume.adapted_module }}</div>
+        <div class="vr-text" style="white-space:pre-wrap">{{ adaptedText }}</div>
       </el-card>
 
       <el-card class="vr-card" shadow="never">

@@ -189,47 +189,68 @@ def _stream_jobs(pid: str, vol_no: int):
 
 # ---- 启动 3 场并行 COC ----
 
+import logging as _logging
+_log = _logging.getLogger("api.simulate")
+
+
+def _fallback_investigators(cast_cards: list[dict], seed: int = 0) -> list[dict]:
+    """LLM 车卡失败时的兜底：用一组通用职业（避开 NPC 已用职业）的路人调查员。"""
+    from ..fields.coc_run import make_player_card
+    # 收集 NPC 已用职业关键词，尽量避开
+    used_occs = set()
+    for c in cast_cards or []:
+        occ = str(c.get("occupation") or "")
+        for kw in ("外卖", "骑手", "便利店", "夜班", "经理", "修锁", "物业", "维修", "记者", "警察", "医生", "学生", "教师"):
+            if kw in occ:
+                used_occs.add(kw)
+    pools = [
+        ("货运司机", {"驾驶": 70, "侦查": 40, "斗殴": 45, "聆听": 40}),
+        ("夜班护士", {"急救": 65, "医学": 55, "聆听": 50, "心理学": 40}),
+        ("短视频博主", {"侦查": 55, "话术": 60, "电子学": 50, "闪避": 40}),
+        ("风水先生", {"神秘学": 60, "历史": 50, "侦查": 40, "话术": 45}),
+        ("代驾司机", {"驾驶": 75, "聆听": 50, "侦查": 40, "斗殴": 40}),
+        ("保险理赔员", {"话术": 60, "图书馆": 55, "侦查": 50, "心理学": 45}),
+        ("退休教师", {"图书馆": 70, "历史": 60, "话术": 50, "聆听": 45}),
+        ("流浪歌手", {"表演": 70, "话术": 55, "聆听": 50, "闪避": 45}),
+    ]
+    picks = []
+    i = 0
+    fallback_names = ["沈昼", "江窈", "贺鸣", "苏苓", "罗铮", "孟岑", "裴砚", "周絮"]
+    for name, (occ, sk) in zip(fallback_names, pools):
+        if i >= 3:
+            break
+        # 粗粒度避开：如果职业关键词和 NPC 撞车就跳过
+        if any(k in occ for k in used_occs):
+            continue
+        picks.append(make_player_card(f"{name}", occ, san_max=60 + (i * 3) % 15,
+                                       hp_max=10 + (i % 4), skills=sk))
+        i += 1
+    if len(picks) < 2:
+        picks = [
+            make_player_card("沈昼", "货运司机", san_max=62, hp_max=13,
+                             skills={"驾驶": 70, "侦查": 40, "斗殴": 45, "聆听": 40}),
+            make_player_card("江窈", "夜班护士", san_max=58, hp_max=10,
+                             skills={"急救": 65, "医学": 55, "聆听": 50, "心理学": 40}),
+        ]
+    return picks
+
+
 def _start_sim(pid: str, vol_no: int, body: _StartIn) -> dict:
     from ..jobs.store import job_store, run_in_background
-    import logging
-    log = logging.getLogger("api.simulate")
+    log = _log
 
     d = _must_deps()
     vs, v = _get_volume_or_404(pid, vol_no)
     if not v.adapted_module:
         raise HTTPException(status_code=422, detail="请先完成 PDF 改编")
 
-    # 构造伪 source
-    src = {
-        "adapted_premise": v.adapted_module or "",
-        "title": v.title or f"卷{vol_no}",
-        "player_cards": (v.simulated_run.get("player_cards", []) if v.simulated_run else []),
-    }
-
-    player_cards = list(src.get("player_cards") or [])
-    if len(player_cards) < 2:
-        from ..fields.coc_run import make_player_card
-        defaults = [
-            make_player_card("林觉", "小报记者", san_max=65,
-                             skills={"侦查": 60, "聆听": 55, "图书馆": 70, "话术": 50}),
-            make_player_card("赵魁", "退伍兵", san_max=60, hp_max=14,
-                             skills={"侦查": 45, "聆听": 40, "斗殴": 70, "急救": 50, "闪避": 55}),
-        ]
-        player_cards = (player_cards + defaults)[:4]
-
-    # 跑团仿真先于魂穿：PL 均为外乡调查员（模组 NPC 故事里的人），
-    # 本阶段不注入唐迟，也不允许把某张 PL 卡替换成唐迟。
-    # 三场 PL 完全相同、模组/NPC/开场钩子完全相同；只通过独立 rng_seed + KP 自由发挥产生差异。
-    from ..pipeline.coc_simulator import run_coc_parallel_batch
-    import copy as _copy, random as _r
-    _brng = _r.Random()
-    NS = 3
-    player_sets = [_copy.deepcopy(player_cards) for _ in range(NS)]
-    variant_configs = []
-    for i in range(NS):
-        ss = _brng.randint(1, 2**30)
-        variant_configs.append({"flavor": None, "label": f"平行宇宙 #{i+1}",
-            "desc": f"同模组·同PL·骰子种子 {ss}；KP 自由长", "rng_seed": ss})
+    # 用 helper 从 adapted_module（可能是 dict 也可能是旧字符串）取出 premise 与 NPC 卡司
+    from ..book.volume import adapted_premise_of, adapted_cast_of, adapted_meta_of
+    premise_text = adapted_premise_of(v.adapted_module)
+    cast_cards = adapted_cast_of(v.adapted_module)
+    meta = adapted_meta_of(v.adapted_module)
+    if not premise_text:
+        raise HTTPException(status_code=422, detail="副本核文本为空，无法跑团")
 
     book_store = d.book_for(pid)
     field_store = d.fields_for(pid)
@@ -237,22 +258,43 @@ def _start_sim(pid: str, vol_no: int, body: _StartIn) -> dict:
     coc_store = d.coc_run_for(pid)
     field_no = int(v.field_no or vol_no)
 
+    # adapt_parsed：把副本核 premise + NPC 卡司完整塞给 KP；NPC 卡司是 KP 必须严格使用的命名人物表
     adapt_parsed = {
         "vid": f"vol{vol_no}",
         "title": v.title or f"卷{vol_no}",
-        "world_premise": v.adapted_module or "",
-        "hook": (v.adapted_module or "")[:80],
-        "entry_mood": "潮湿、不安",
+        "world_premise": premise_text,
+        "hook": premise_text[:80],
+        "entry_mood": meta.get("flavor") or "不安",
+        "cast": cast_cards,  # 剧本 NPC/KPC 卡司（命名人物），KP 必须从这里取
     }
 
     sid = _sim_session_id(pid, vol_no)
+    NS = 3
     job = job_store.create(session_id=sid, kind="coc_batch", meta={
         "phase": "simulate",
-        "total_sessions": 3,
-        "flavors": [vc.get("flavor") for vc in variant_configs],
+        "total_sessions": NS,
         "volume_no": vol_no,
     })
-    _session_labels = [vc.get("label", f"第{i+1}场") for i, vc in enumerate(variant_configs)]
+    _session_labels = [f"平行宇宙 #{i+1}" for i in range(NS)]
+    # 三场差异化种子
+    import random as _r
+    _brng = _r.Random()
+    variant_configs = []
+    flavor_tags = ["good", "bad", "distinct"]
+    flavor_labels = ["好运线", "残酷线", "身份洗牌线"]
+    flavor_descs = [
+        "运气偏向顺利，代价较轻，调查员更容易彼此信任",
+        "厄运连连，代价沉重，人物关系易走向猜忌",
+        "PL 组合与另两盘完全不同，走出不同的破局路径",
+    ]
+    for i in range(NS):
+        ss = _brng.randint(1, 2**30)
+        variant_configs.append({
+            "flavor": flavor_tags[i],
+            "label": flavor_labels[i],
+            "desc": flavor_descs[i],
+            "rng_seed": ss,
+        })
 
     progress_lock = threading.Lock()
     session_state = {i: {"day": 1, "turn": 0, "done": False, "finalizing": False} for i in range(3)}
@@ -347,7 +389,44 @@ def _start_sim(pid: str, vol_no: int, body: _StartIn) -> dict:
             return {"variants": variants}
 
         # ---- 真实路径 ----
-        # 每线程一个全新 PipelineRunner（coc_runner_factory 已由 main.py 注入）
+        from ..pipeline.sushi_generator import generate_investigators
+        from ..pipeline.coc_simulator import run_coc_parallel_batch
+        from ..fields.coc_run import _normalize_player_cards
+        import copy as _copy
+
+        # 每场单独生成一组 PL 调查员卡：基于副本核 premise + NPC 卡司 + 本场 flavor，
+        # 生成 2-4 张原创调查员（普通人/合理卷入/职业错开/不与 NPC 重名），
+        # 让三场平行跑团真的拥有不同的人物组合（而不是同一组卡反复跑）。
+        update(progress=2, message="正在为本场 3 盘分别生成 PL 调查员卡…")
+        player_sets: list[list[dict]] = []
+        player_sets_meta: list[dict] = []
+        for i in range(NS):
+            try:
+                # 单独 provider 实例，避免并发时共享会话
+                prov = chore_provider("sushi")
+                gen = generate_investigators(
+                    prov,
+                    premise=premise_text,
+                    cast=cast_cards,
+                    flavor_hint=variant_configs[i].get("label") + " " + variant_configs[i].get("desc", ""),
+                    session_index=i,
+                    n_sessions=NS,
+                )
+                cards = _normalize_player_cards(gen.investigators)
+                player_sets.append(cards)
+                player_sets_meta.append({
+                    "investigators": cards,
+                    "team_composition_note": gen.team_composition_note,
+                })
+                update(progress=2 + (i + 1) * 2, message=f"第 {i+1}/3 盘 PL 卡生成完毕（{len(cards)} 位调查员）")
+            except Exception as e:
+                log.warning("generate_investigators #%d failed: %s；回退到按副本职业派生卡", i, e)
+                # 回退：基于 premise 自动派生一组路人调查员（职业不与 NPC 重名）
+                fallback = _fallback_investigators(cast_cards, i)
+                player_sets.append(fallback)
+                player_sets_meta.append({"investigators": fallback, "team_composition_note": "（回退卡）"})
+
+        # 把本场 PL 组合注入 adapt_parsed（每场 copy 一份，避免并行相互污染）
         runner_factory = d.coc_runner_factory
         variants = run_coc_parallel_batch(
             runner_factory,
@@ -355,6 +434,7 @@ def _start_sim(pid: str, vol_no: int, body: _StartIn) -> dict:
             field_no=field_no, coc_store=coc_store, field_run_store=field_run_store,
             adapt_parsed=adapt_parsed,
             player_sets=player_sets,
+            player_sets_meta=player_sets_meta,
             variant_configs=variant_configs,
             max_pairs_per_session=max_pairs,
             max_turns_per_session=max_turns,

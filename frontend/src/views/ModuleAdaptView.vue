@@ -21,6 +21,35 @@ type UiState = 'loading' | 'upload' | 'progress' | 'done-pick' | 'selected'
 const uiState = ref<UiState>('loading')
 const realVolNo = ref<number>(0)
 const volume = ref<any>(null)
+// adapted_module 兼容 dict / 字符串两种格式
+const adaptedPreview = computed(() => {
+  const am = volume.value?.adapted_module
+  if (!am) return ''
+  if (typeof am === 'string') return am
+  if (typeof am === 'object') {
+    const premise = am.adapted_premise || ''
+    const cast: any[] = Array.isArray(am.cast) ? am.cast
+      : (Array.isArray(am.player_cards) ? am.player_cards : [])
+    const flavor = am.flavor_full || am.flavor || ''
+    const title = am.title ? `《${am.title}》\n` : ''
+    const lines: string[] = []
+    if (title || flavor) lines.push(`${title}${flavor ? '【风格】' + flavor : ''}`)
+    if (premise) lines.push(premise)
+    if (cast.length) {
+      lines.push('\n【剧本 NPC 卡司】')
+      for (const c of cast) {
+        if (!c || typeof c !== 'object') continue
+        const n = c.name || '?'
+        const r = c.role ? `（${c.role}` : ''
+        const o = c.occupation ? `${r ? '；' : '（'}${c.occupation}）` : (r ? '）' : '')
+        const sec = c.secret ? `｜秘密：${c.secret}` : ''
+        lines.push(`- ${n}${r}${o}${sec}`)
+      }
+    }
+    return lines.join('\n')
+  }
+  return String(am)
+})
 const file = ref<File | null>(null)
 const userHint = ref('')
 const nOptions = [3, 5, 8]
@@ -578,7 +607,7 @@ onUnmounted(() => {
       <el-alert type="success" :closable="false" show-icon title="改编版本已选定" />
       <div class="adapt-preview">
         <el-scrollbar max-height="320">
-          <pre class="adapt-preview-text">{{ volume?.adapted_module }}</pre>
+          <pre class="adapt-preview-text">{{ adaptedPreview }}</pre>
         </el-scrollbar>
       </div>
       <div class="adapt-actions">

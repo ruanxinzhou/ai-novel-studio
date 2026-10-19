@@ -115,8 +115,10 @@ def _get_volume_or_404(pid: str, vol_no: int):
     return vs, v
 
 
-def _is_mock(adapted_module: str | None, candidate: dict | None) -> bool:
-    if adapted_module and adapted_module.startswith("测试副本核文本"):
+def _is_mock(adapted_module, candidate: dict | None) -> bool:
+    from ..book.volume import adapted_premise_of
+    premise = adapted_premise_of(adapted_module) if adapted_module is not None else ""
+    if isinstance(premise, str) and premise.startswith("测试副本核文本"):
         return True
     if candidate and isinstance(candidate.get("name"), str) and "林薇" in candidate["name"]:
         return True
@@ -279,10 +281,20 @@ def _call_llm_json(system_prompt: str, user_prompt: str, fallback, tag: str = "e
 def _build_embody_context(v, candidate: dict | None = None, entry_point: dict | None = None,
                            stance: dict | None = None, user_directive: str = "") -> str:
     """构造给 LLM 的上下文（副本骨架+跑团+已选魂穿要素）。"""
+    from ..book.volume import adapted_premise_of, adapted_cast_of
     parts: list[str] = []
-    adapted = v.adapted_module or ""
-    parts.append("===== 副本骨架（改编稿）=====")
-    parts.append(adapted[:4000] if isinstance(adapted, str) else json.dumps(adapted, ensure_ascii=False)[:4000])
+    premise_text = adapted_premise_of(v.adapted_module)
+    cast_cards = adapted_cast_of(v.adapted_module)
+    parts.append("===== 副本骨架（改编稿·副本核文本）=====")
+    parts.append((premise_text or "")[:4000])
+    if cast_cards:
+        parts.append("\n===== 剧本 NPC/KPC 卡司（魂穿候选的人物池之一部分）=====")
+        for c in cast_cards:
+            parts.append(
+                f"- {c.get('name','?')}（{c.get('role','')}；{c.get('occupation','')}）"
+                f"｜动机：{c.get('motivation','')}｜秘密：{c.get('secret','')}"
+                f"｜当前状态：{c.get('current_state','')}"
+            )
     sim = v.simulated_run or {}
     sel_variant = sim.get("selected_variant") if isinstance(sim, dict) else None
     if isinstance(sel_variant, dict):

@@ -382,7 +382,20 @@ def _pick_adapt(pid: str, vol_no: int, body: _PickIn) -> dict:
     if not picked:
         raise HTTPException(status_code=422, detail="选版结果为空")
 
-    v.adapted_module = picked.get("adapted_premise", "")
+    # 把整版 adaptation dict 存进去（含 premise/cast/renamed_cast/changed_elements/
+    # risk_flags/flavor 等字段），后续跑团/魂穿/详设阶段都要用到 NPC 卡司。
+    # 为了兼容后续消费点，统一把人物卡字段命名为 cast（剧本 NPC/KPC），同时保留
+    # player_cards 作为别名，避免老消费点直接读 player_cards 时炸。
+    picked = dict(picked or {})
+    raw_cards = picked.get("player_cards") or []
+    if not isinstance(raw_cards, list):
+        raw_cards = []
+    picked["cast"] = [c for c in raw_cards if isinstance(c, dict)]
+    picked["player_cards"] = picked["cast"]  # 兼容老字段名
+    # 确保 premise 字段存在
+    if not picked.get("adapted_premise"):
+        picked["adapted_premise"] = ""
+    v.adapted_module = picked
     sc = dict(v.stage_completed or {})
     sc["adapt"] = True
     # 用户重新选版后，清掉 _view 覆盖，恢复正向阶段推进；同时把后续阶段的完成标记清掉，
@@ -405,11 +418,22 @@ def _pick_adapt(pid: str, vol_no: int, body: _PickIn) -> dict:
 def _save_custom_adapt(pid: str, vol_no: int, body: _SaveCustomAdaptIn) -> dict:
     """POST 直接保存作者自定义的改编版本（跳过 job 选版流程）。"""
     vs, v = _get_volume_or_404(pid, vol_no)
-    adapt = body.adaptation or {}
-    premise = adapt.get("adapted_premise") or adapt.get("content") or ""
+    adapt_in = body.adaptation or {}
+    premise = adapt_in.get("adapted_premise") or adapt_in.get("content") or ""
     if not premise:
         raise HTTPException(status_code=422, detail="adaptation.adapted_premise 不能为空")
-    v.adapted_module = premise
+    # 把作者提交的整份 adaptation dict 存进去（如果只传了 premise，也规整成 dict）
+    if isinstance(adapt_in, dict):
+        saved = dict(adapt_in)
+    else:
+        saved = {"adapted_premise": premise}
+    saved["adapted_premise"] = premise
+    raw_cards = saved.get("cast") or saved.get("player_cards") or []
+    if not isinstance(raw_cards, list):
+        raw_cards = []
+    saved["cast"] = [c for c in raw_cards if isinstance(c, dict)]
+    saved["player_cards"] = saved["cast"]  # 兼容老字段名
+    v.adapted_module = saved
     sc = dict(v.stage_completed or {})
     sc["adapt"] = True
     sc.pop("_view", None)
