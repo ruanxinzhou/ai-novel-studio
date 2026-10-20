@@ -259,11 +259,19 @@ async function loadOverview(keepSelection = true) {
     const fallbackChapter = props.freeStanding
       ? (todayNo.value || overview.value.chapters[0]?.no || 0)
       : (currentChapterNo.value || todayNo.value || overview.value.chapters[0]?.no || 0)
+    let targetNo = currentNo.value
     if (!keepSelection || !currentNo.value) {
-      currentNo.value = props.chapterNo || fallbackChapter
+      targetNo = props.chapterNo || fallbackChapter
     }
-    if (currentNo.value && !overview.value.chapters.some((c) => c.no === currentNo.value)) {
-      currentNo.value = props.chapterNo || fallbackChapter
+    if (targetNo && !overview.value.chapters.some((c) => c.no === targetNo)) {
+      targetNo = props.chapterNo || fallbackChapter
+    }
+    if (targetNo && targetNo !== currentNo.value) {
+      currentNo.value = targetNo
+    }
+    // 确保右栏加载当前章详情
+    if (targetNo && (!detail.value || detail.value.chapter.no !== targetNo)) {
+      await selectChapter(targetNo)
     }
   } catch (e) {
     ElMessage.error(`章台加载失败：${(e as Error).message}`)
@@ -790,6 +798,9 @@ watch(activeTab, (tab) => {
                 <el-tag v-if="currentBriefSelected.beat_type" size="small" type="info" effect="plain" style="margin-left: 6px">
                   {{ { hook:'钩子', sell:'卖设定', engine:'推进', climax:'高潮', cooldown:'余韵' }[currentBriefSelected.beat_type] || currentBriefSelected.beat_type }}
                 </el-tag>
+                <el-tag v-if="currentBriefSelected.chapter_words_target" size="small" type="info" effect="plain" style="margin-left: 4px">
+                  ~{{ currentBriefSelected.chapter_words_target }}字
+                </el-tag>
                 <el-tag v-if="currentBrief.is_custom" size="small" type="warning" effect="plain" style="margin-left: 4px">自编</el-tag>
               </div>
               <div style="font-size: 13px; color: #606266; line-height: 1.7; white-space: pre-wrap">
@@ -797,6 +808,87 @@ watch(activeTab, (tab) => {
               </div>
               <div v-if="currentBriefSelected.hooks" style="font-size: 12px; color: #e6a23c; margin-top: 4px">
                 🪝 {{ currentBriefSelected.hooks }}
+              </div>
+
+              <!-- 六要素（节奏骨架生成的章前细纲） -->
+              <div
+                v-if="currentBriefSelected.time_window || currentBriefSelected.location || (currentBriefSelected.entities_on_stage && currentBriefSelected.entities_on_stage.length) || currentBriefSelected.sensory_hook"
+                style="margin-top: 10px; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px 14px; font-size: 12px; color: #606266; line-height: 1.6"
+              >
+                <div v-if="currentBriefSelected.time_window">
+                  <span style="color:#909399">⏰ 时间</span>
+                  <span style="margin-left:4px">{{ currentBriefSelected.time_window }}</span>
+                </div>
+                <div v-if="currentBriefSelected.location">
+                  <span style="color:#909399">📍 地点</span>
+                  <span style="margin-left:4px">{{ currentBriefSelected.location }}</span>
+                </div>
+                <div v-if="currentBriefSelected.day">
+                  <span style="color:#909399">📅 日序</span>
+                  <span style="margin-left:4px">入戏第{{ currentBriefSelected.day }}天</span>
+                </div>
+                <div v-if="currentBriefSelected.sensory_hook">
+                  <span style="color:#909399">👁 感官</span>
+                  <span style="margin-left:4px">{{ currentBriefSelected.sensory_hook }}</span>
+                </div>
+                <div v-if="currentBriefSelected.entities_on_stage && currentBriefSelected.entities_on_stage.length" style="grid-column: 1 / -1">
+                  <span style="color:#909399">👥 登场</span>
+                  <span style="margin-left:4px">
+                    <el-tag v-for="c in currentBriefSelected.entities_on_stage" :key="c" size="small" effect="plain" style="margin: 2px 4px 2px 0">{{ c }}</el-tag>
+                  </span>
+                </div>
+              </div>
+
+              <!-- 起承转合 -->
+              <div
+                v-if="currentBriefSelected.plot_beats && (currentBriefSelected.plot_beats.qi || currentBriefSelected.plot_beats.cheng || currentBriefSelected.plot_beats.zhuan || currentBriefSelected.plot_beats.he)"
+                style="margin-top: 10px; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px"
+              >
+                <div v-if="currentBriefSelected.plot_beats.qi" style="background:#fdf6ec; border-left:3px solid #e6a23c; padding:6px 10px; border-radius:3px; font-size:12px; line-height:1.6">
+                  <b style="color:#e6a23c">起</b>
+                  <div style="color:#606266; margin-top:2px; white-space:pre-wrap">{{ currentBriefSelected.plot_beats.qi }}</div>
+                </div>
+                <div v-if="currentBriefSelected.plot_beats.cheng" style="background:#f4f4f5; border-left:3px solid #909399; padding:6px 10px; border-radius:3px; font-size:12px; line-height:1.6">
+                  <b style="color:#606266">承</b>
+                  <div style="color:#606266; margin-top:2px; white-space:pre-wrap">{{ currentBriefSelected.plot_beats.cheng }}</div>
+                </div>
+                <div v-if="currentBriefSelected.plot_beats.zhuan" style="background:#fef0f0; border-left:3px solid #f56c6c; padding:6px 10px; border-radius:3px; font-size:12px; line-height:1.6">
+                  <b style="color:#f56c6c">转</b>
+                  <div style="color:#606266; margin-top:2px; white-space:pre-wrap">{{ currentBriefSelected.plot_beats.zhuan }}</div>
+                </div>
+                <div v-if="currentBriefSelected.plot_beats.he" style="background:#ecf5ff; border-left:3px solid #409eff; padding:6px 10px; border-radius:3px; font-size:12px; line-height:1.6">
+                  <b style="color:#409eff">合</b>
+                  <div style="color:#606266; margin-top:2px; white-space:pre-wrap">{{ currentBriefSelected.plot_beats.he }}</div>
+                </div>
+              </div>
+
+              <!-- 伏笔 -->
+              <div
+                v-if="(currentBriefSelected.foreshadow_seeds && currentBriefSelected.foreshadow_seeds.length) || (currentBriefSelected.foreshadow_advance && currentBriefSelected.foreshadow_advance.length)"
+                style="margin-top: 10px; font-size: 12px; line-height: 1.7"
+              >
+                <div v-if="currentBriefSelected.foreshadow_seeds && currentBriefSelected.foreshadow_seeds.length" style="color:#606266">
+                  <span style="color:#67c23a">🌱 新埋伏笔</span>
+                  <ul style="margin:4px 0 6px 20px; padding:0">
+                    <li v-for="(s, i) in currentBriefSelected.foreshadow_seeds" :key="'seed'+i">{{ s }}</li>
+                  </ul>
+                </div>
+                <div v-if="currentBriefSelected.foreshadow_advance && currentBriefSelected.foreshadow_advance.length" style="color:#606266">
+                  <span style="color:#e6a23c">🔁 回收/推进</span>
+                  <ul style="margin:4px 0 0 20px; padding:0">
+                    <li v-for="(s, i) in currentBriefSelected.foreshadow_advance" :key="'pay'+i">{{ s }}</li>
+                  </ul>
+                </div>
+              </div>
+
+              <!-- 卷首/卷尾钩子（仅首章/末章显示） -->
+              <div v-if="currentBriefSelected.volume_opening_hook" style="margin-top: 10px; padding:8px 10px; background:linear-gradient(135deg, #fff4e6 0%, #ffe4c4 100%); border-radius:4px; font-size:12px; line-height:1.7">
+                <b style="color:#e6a23c">🎬 卷首钩子</b>
+                <div style="color:#606266; margin-top:3px; white-space:pre-wrap">{{ currentBriefSelected.volume_opening_hook }}</div>
+              </div>
+              <div v-if="currentBriefSelected.volume_ending_hook" style="margin-top: 8px; padding:8px 10px; background:linear-gradient(135deg, #ecf5ff 0%, #d9ecff 100%); border-radius:4px; font-size:12px; line-height:1.7">
+                <b style="color:#409eff">🎞️ 卷尾钩子</b>
+                <div style="color:#606266; margin-top:3px; white-space:pre-wrap">{{ currentBriefSelected.volume_ending_hook }}</div>
               </div>
             </div>
             <el-button size="small" plain @click="emit('reopen-brief')">✏️ 换方向</el-button>

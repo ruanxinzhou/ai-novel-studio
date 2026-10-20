@@ -362,19 +362,24 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
         created_nos: list[int] = []
         from datetime import datetime
         _now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        vol_hooks_v = bp.get("volume_hooks") if isinstance(bp, dict) else {}
+        if not isinstance(vol_hooks_v, dict):
+            vol_hooks_v = {}
         plan_items = plan if isinstance(plan, list) else []
         # 如果没有 plan（老数据/异常），至少建 start_no 第一章
         if not plan_items:
-            plan_items = [{"chapter": start_no, "day": 1, "focus": "", "words": 4500, "beat_type": "engine"}]
-        for item in plan_items:
+            plan_items = [{"chapter": 1, "day": 1, "focus": "", "words": 4500, "beat_type": "engine"}]
+        total_v = len(plan_items)
+        for idx, item in enumerate(plan_items):
             if not isinstance(item, dict):
                 continue
             try:
-                gno = int(item.get("chapter") or 0)
+                rel = int(item.get("chapter") or 0)
             except (TypeError, ValueError):
                 continue
-            if gno <= 0:
+            if rel <= 0:
                 continue
+            gno = rel - 1 + start_no
             w = desk.ensure(gno)
             w.field_no = field_no_v
             w.chapter_kind = ch_kind_v
@@ -386,33 +391,62 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
             focus = (item.get("focus") or "").strip()
             words = int(item.get("words") or 4500)
             beat = (item.get("beat_type") or "engine")
-            rel_no = gno - start_no + 1
+            title_in = (item.get("title") or "").strip()
+            if title_in and not w.title:
+                w.title = title_in
+            beats_v = item.get("plot_beats") if isinstance(item.get("plot_beats"), dict) else {}
+            chars_v = item.get("characters_on_stage") or []
+            if not isinstance(chars_v, list):
+                chars_v = []
+            seeds_v = item.get("foreshadow_seeds") or []
+            if not isinstance(seeds_v, list):
+                seeds_v = []
+            payback_v = item.get("foreshadow_payback") or []
+            if not isinstance(payback_v, list):
+                payback_v = []
+            try:
+                day_v = int(item.get("day") or 1)
+            except (TypeError, ValueError):
+                day_v = 1
             already_b = w.brief if isinstance(w.brief, dict) else None
             if not (already_b and already_b.get("selected")):
-                w.brief = {
-                    "selected": {
-                        "id": f"plan-{gno}",
-                        "title": f"第{rel_no}节·{beat_label.get(beat, beat)}",
-                        "summary": focus or f"第{rel_no}节按节奏蓝图推进（{beat_label.get(beat, beat)}）",
-                        "hooks": "",
-                        "day": int(item.get("day") or w.day or 1),
-                        "beat_type": beat,
-                        "foreshadow_advance": [],
-                        "entities_on_stage": [],
-                        "source": "rhythm",
-                        "chapter_words_target": words,
+                sel: dict = {
+                    "id": f"plan-{gno}",
+                    "title": title_in or f"第{rel}节·{beat_label.get(beat, beat)}",
+                    "summary": focus or f"第{rel}节按节奏蓝图推进（{beat_label.get(beat, beat)}）",
+                    "hooks": "",
+                    "day": day_v,
+                    "beat_type": beat,
+                    "foreshadow_advance": [str(s) for s in payback_v if s],
+                    "entities_on_stage": [str(c) for c in chars_v if c],
+                    "source": "rhythm",
+                    "chapter_words_target": words,
+                    "time_window": str(item.get("time_window") or f"入戏第{day_v}天"),
+                    "location": str(item.get("location") or ""),
+                    "plot_beats": {
+                        "qi": str(beats_v.get("qi") or ""),
+                        "cheng": str(beats_v.get("cheng") or ""),
+                        "zhuan": str(beats_v.get("zhuan") or ""),
+                        "he": str(beats_v.get("he") or ""),
                     },
+                    "foreshadow_seeds": [str(s) for s in seeds_v if s],
+                    "sensory_hook": str(item.get("sensory_hook") or ""),
+                    "chapter_title": title_in,
+                }
+                if rel == 1 and vol_hooks_v.get("opening_hook"):
+                    sel["volume_opening_hook"] = str(vol_hooks_v["opening_hook"])
+                if idx == total_v - 1 and vol_hooks_v.get("ending_hook"):
+                    sel["volume_ending_hook"] = str(vol_hooks_v["ending_hook"])
+                w.brief = {
+                    "selected": sel,
                     "selected_at": _now_str,
                     "chapter_no": gno,
-                    "day": int(item.get("day") or w.day or 1),
+                    "day": day_v,
                     "chapter_words_target": words,
                     "source": "rhythm",
                 }
             created_nos.append(gno)
         desk._flush()
-        # 建完后返回第一章进入 desk（因为 brief.selected 已填，phase 判定会进入 desk）
-        target_ch_nos = created_nos
-        all_chapter_nos = target_ch_nos
         first_no = min(created_nos) if created_nos else start_no
         return {
             "phase": "desk",
