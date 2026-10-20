@@ -4624,6 +4624,7 @@ register_rhythm_routes(
     app,
     require_project=_require_project,
     volumes_for=_volumes_for,
+    desk_for=_desk_for,
     chore_provider=_chore_provider,
 )
 from .chat_routes import register as register_chat_routes

@@ -350,18 +350,75 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
                     "is_last_chapter": False,
                     "is_reviewing": False,
                 }
-        # 所有规划阶段已完成但尚无章节 → 自动创建第一章并进入 briefing
+        # 所有规划阶段已完成但尚无章节 → 按 chapter_plan 批量建章
         start_no = int(getattr(target_vol, "start_chapter_no", 1) or 1)
-        w = desk.ensure(start_no)
-        w.field_no = target_vol.field_no if getattr(target_vol, "field_no", None) is not None else target_vol.volume_no
-        w.chapter_kind = "interlude" if target_vol.volume_kind == "interlude" else target_vol.volume_kind
-        w.is_interlude = (target_vol.volume_kind == "interlude")
+        bp = target_vol.rhythm_blueprint or {}
+        plan = bp.get("chapter_plan") if isinstance(bp, dict) else []
+        is_interlude_v = (target_vol.volume_kind == "interlude")
+        ch_kind_v = "interlude" if is_interlude_v else target_vol.volume_kind
+        field_no_v = target_vol.field_no if getattr(target_vol, "field_no", None) is not None else target_vol.volume_no
+        beat_label = {"hook": "黄金钩子", "sell": "卖设定", "engine": "主线推进",
+                      "climax": "高潮爆发", "cooldown": "余韵收束"}
+        created_nos: list[int] = []
+        from datetime import datetime
+        _now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        plan_items = plan if isinstance(plan, list) else []
+        # 如果没有 plan（老数据/异常），至少建 start_no 第一章
+        if not plan_items:
+            plan_items = [{"chapter": start_no, "day": 1, "focus": "", "words": 4500, "beat_type": "engine"}]
+        for item in plan_items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                gno = int(item.get("chapter") or 0)
+            except (TypeError, ValueError):
+                continue
+            if gno <= 0:
+                continue
+            w = desk.ensure(gno)
+            w.field_no = field_no_v
+            w.chapter_kind = ch_kind_v
+            w.is_interlude = is_interlude_v
+            try:
+                w.day = int(item.get("day") or w.day or 1)
+            except (TypeError, ValueError):
+                pass
+            focus = (item.get("focus") or "").strip()
+            words = int(item.get("words") or 4500)
+            beat = (item.get("beat_type") or "engine")
+            rel_no = gno - start_no + 1
+            already_b = w.brief if isinstance(w.brief, dict) else None
+            if not (already_b and already_b.get("selected")):
+                w.brief = {
+                    "selected": {
+                        "id": f"plan-{gno}",
+                        "title": f"第{rel_no}节·{beat_label.get(beat, beat)}",
+                        "summary": focus or f"第{rel_no}节按节奏蓝图推进（{beat_label.get(beat, beat)}）",
+                        "hooks": "",
+                        "day": int(item.get("day") or w.day or 1),
+                        "beat_type": beat,
+                        "foreshadow_advance": [],
+                        "entities_on_stage": [],
+                        "source": "rhythm",
+                        "chapter_words_target": words,
+                    },
+                    "selected_at": _now_str,
+                    "chapter_no": gno,
+                    "day": int(item.get("day") or w.day or 1),
+                    "chapter_words_target": words,
+                    "source": "rhythm",
+                }
+            created_nos.append(gno)
         desk._flush()
+        # 建完后返回第一章进入 desk（因为 brief.selected 已填，phase 判定会进入 desk）
+        target_ch_nos = created_nos
+        all_chapter_nos = target_ch_nos
+        first_no = min(created_nos) if created_nos else start_no
         return {
-            "phase": "briefing",
+            "phase": "desk",
             "volume_no": target_vol.volume_no,
             "volume_kind": target_vol.volume_kind,
-            "chapter_no": start_no,
+            "chapter_no": first_no,
             "is_last_chapter": False,
             "is_reviewing": False,
         }

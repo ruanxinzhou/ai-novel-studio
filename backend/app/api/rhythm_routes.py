@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable
 
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -66,6 +67,7 @@ _RHYTHM_SYSTEM = """你是一名克苏鲁风格无限流小说的节奏设计师
 class _Deps:
     require_project: Callable
     volumes_for: Callable
+    desk_for: Callable
     chore_provider: Callable
 
 
@@ -182,11 +184,13 @@ def register_rhythm_routes(
     *,
     require_project: Callable,
     volumes_for: Callable,
+    desk_for: Callable,
     chore_provider: Callable,
 ) -> None:
     deps = _Deps(
         require_project=require_project,
         volumes_for=volumes_for,
+        desk_for=desk_for,
         chore_provider=chore_provider,
     )
     router = APIRouter(tags=["rhythm"])
@@ -312,8 +316,70 @@ def register_rhythm_routes(
         sc = dict(vol.stage_completed or {})
         sc["rhythm"] = True
         vols.update_planning(vol_no, stage_completed=sc)
+
+        # 根据 chapter_plan 批量 ensure 章节 + 预填方向卡（source=rhythm），
+        # 这样用户从节奏骨架出来就能直接写第一章，不用再抽3版方向卡。
+        desk = deps.desk_for(pid)
+        bp = vol.rhythm_blueprint or {}
+        plan = bp.get("chapter_plan") if isinstance(bp, dict) else []
+        created: list[int] = []
+        is_interlude = (vol.volume_kind == "interlude")
+        ch_kind = "interlude" if is_interlude else vol.volume_kind
+        field_no_val = vol.field_no if getattr(vol, "field_no", None) is not None else vol.volume_no
+        _now = lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        beat_label = {"hook": "黄金钩子", "sell": "卖设定", "engine": "主线推进",
+                      "climax": "高潮爆发", "cooldown": "余韵收束"}
+        if isinstance(plan, list):
+            for item in plan:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    gno = int(item.get("chapter") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if gno <= 0:
+                    continue
+                w = desk.ensure(gno)
+                w.field_no = field_no_val
+                w.chapter_kind = ch_kind
+                w.is_interlude = is_interlude
+                w.day = int(item.get("day") or w.day or 1)
+                focus = (item.get("focus") or "").strip()
+                words = int(item.get("words") or 4500)
+                beat = (item.get("beat_type") or "engine")
+                rel_no = gno - int(getattr(vol, "start_chapter_no", 1) or 1) + 1
+                # 若用户未手动抽方向，就把节奏骨架的焦点直接作为"已选方向"，
+                # 标记 source=rhythm，Desk 识别后不要求再选卡。
+                already = w.brief if isinstance(w.brief, dict) else None
+                if not (already and already.get("selected")):
+                    w.brief = {
+                        "selected": {
+                            "id": f"rhythm-{gno}",
+                            "title": f"第{rel_no}节·{beat_label.get(beat, beat)}",
+                            "summary": focus or f"第{rel_no}节按节奏蓝图推进（{beat_label.get(beat, beat)}）",
+                            "hooks": "",
+                            "day": int(item.get("day") or w.day or 1),
+                            "beat_type": beat,
+                            "foreshadow_advance": [],
+                            "entities_on_stage": [],
+                            "source": "rhythm",
+                            "chapter_words_target": words,
+                        },
+                        "selected_at": _now(),
+                        "chapter_no": gno,
+                        "day": int(item.get("day") or w.day or 1),
+                        "chapter_words_target": words,
+                        "source": "rhythm",
+                    }
+                if not w.title:
+                    # 不强行写标题，留空让 DeskView 显示"第N章（未命名）"
+                    pass
+                created.append(gno)
+            desk._flush()
+
         vol = vols.get(vol_no)
-        return {"ok": True, "stage_completed": vol.stage_completed, "volume": vol.as_dict()}
+        return {"ok": True, "stage_completed": vol.stage_completed,
+                "volume": vol.as_dict(), "chapters_created": created}
 
     # ----- GET /rhythm/ -----
     def _rhythm_get(pid: str, vol_no: int):
