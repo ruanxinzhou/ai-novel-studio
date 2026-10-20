@@ -198,6 +198,9 @@ async function submitCustomWrite() {
   // 自编模式返回 1 条，默认选中
   pickedIndex.value = 0
   pickedId.value = options.value[0]?.id || null
+  // 用户点"就用我的"语义就是"直接用这版开写"，不要让用户再多点一次底部"就按这版开写"
+  // 直接调用 confirmSelect 把选中的自编方向持久化到 brief.selected
+  await confirmSelect()
 }
 
 function onEditCard(index: number) {
