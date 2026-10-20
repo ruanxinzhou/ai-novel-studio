@@ -25,9 +25,15 @@ const emit = defineEmits<{
   (e: 'selectVolume', no: number): void
   (e: 'selectChapter', vn: number, cn: number): void
   (e: 'addVolume'): void
+  (e: 'deleteVolume', no: number): void
   (e: 'goSetup'): void
   (e: 'openDesk'): void
 }>()
+
+function onDeleteVolume(e: MouseEvent, no: number) {
+  e.stopPropagation()
+  emit('deleteVolume', no)
+}
 
 const totalVolumes = computed(() => props.volumes.length)
 </script>
@@ -61,6 +67,7 @@ const totalVolumes = computed(() => props.volumes.length)
         <div class="sv-row">
           <span class="sv-icon">{{ v.icon || '📘' }}</span>
           <span class="sv-title">第{{ v.no }}卷 {{ v.title }}</span>
+          <button class="sv-del" title="删除此卷" @click="onDeleteVolume($event, v.no)">✕</button>
         </div>
         <div class="sv-chapters" v-if="v.chapters && v.chapters.length">
           <div
@@ -154,6 +161,25 @@ const totalVolumes = computed(() => props.volumes.length)
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.sv-del {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: #c0c4cc;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  opacity: 0;
+  transition: opacity .15s, color .15s, background .15s;
+}
+.sv-row:hover .sv-del {
+  opacity: 1;
+}
+.sv-del:hover {
+  color: #f56c6c;
+  background: #fef0f0;
 }
 .sv-chapters {
   padding-left: 28px;

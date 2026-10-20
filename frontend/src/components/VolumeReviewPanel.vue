@@ -84,13 +84,18 @@ async function load() {
       chapters.value = []
       return
     }
-    // 过滤该卷的章：优先 field_no 匹配
+    // 过滤该卷的章：主线/间章按 chapter_kind，dungeon 按 field_no
     const all: any[] = (deskRes as any)?.chapters || []
-    const fieldMatch = all.filter(
-      (c: any) => c.field_no === vn || c.field_no === vol.field_no,
-    )
-    if (fieldMatch.length > 0) {
-      chapters.value = fieldMatch.slice().sort((a: any, b: any) => a.no - b.no)
+    let matched: any[] = []
+    if (vol.volume_kind === 'mainline') {
+      matched = all.filter((c: any) => c.chapter_kind === 'mainline')
+    } else if (vol.volume_kind === 'interlude') {
+      matched = all.filter((c: any) => c.is_interlude || c.chapter_kind === 'interlude')
+    } else {
+      matched = all.filter((c: any) => c.field_no === vn || c.field_no === vol.field_no)
+    }
+    if (matched.length > 0) {
+      chapters.value = matched.slice().sort((a: any, b: any) => a.no - b.no)
     } else {
       // 老数据兼容：chapter 没有 field_no 时，按卷顺序近似分组
       try {

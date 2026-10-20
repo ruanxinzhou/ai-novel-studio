@@ -4111,6 +4111,9 @@ class VolumeCreateIn(BaseModel):
     gods_to_hint: list[str] = []
     contamination_goal: int = 0
     satisfaction_beats: list[str] = []
+    # Task 11 扩展：支持通过 kind 创建 mainline/interlude 卷；start_chapter_no 指定起始章号
+    kind: str = "dungeon"   # mainline | dungeon | interlude
+    start_chapter_no: int | None = None
 
 
 class VolumeUpdateIn(BaseModel):
@@ -4169,24 +4172,125 @@ def volumes_latest(pid: str) -> dict:
 
 @app.post("/api/projects/{pid}/volumes")
 def volumes_create_next(pid: str, body: VolumeCreateIn) -> dict:
-    """显式创建下一卷（通常由 settle_up 自动创建；此接口供前端手动新建/规划下一卷）。
-    注意：create_next 是幂等的（同 field_no 不重复创建），但本接口是在指定新场时手动调用，
-    这里通过 body 里没有 field_no 时自动取下一场号（latest.field_no + 1）。
+    """创建新卷。默认 kind=dungeon（副本）；传 kind=mainline 创建蓝星开篇卷（自动预建 2 章）；
+    kind=interlude 创建间章卷。start_chapter_no 可选（不指定则从 desk.next_available_no 开始）。
+    同时兼容老接口（不传 kind 时按 dungeon 行为）。
     """
     _require_project(pid)
     vs = _volumes_for(pid)
     fs = _fields_for(pid)
     bs = _book_for(pid)
-    # 自动取最新场号 +1
-    latest_vol = vs.latest()
-    next_field = (latest_vol.field_no + 1) if latest_vol else 1
-    # 确保该场在 FieldStore 存在（不强制；若未存在，volume 仍创建，只是 field_no 预留）
-    v = vs.create_next(bs, next_field)
-    # 应用规划板初始字段
-    kwargs = body.model_dump(exclude_unset=True) if hasattr(body, "model_dump") else body.dict()
-    kwargs = {k: val for k, val in kwargs.items() if val is not None}
-    v = vs.update_planning(v.volume_no, **kwargs)
-    return {"volume": v.as_dict(), "ok": True}
+    desk = _desk_for(pid)
+    kind = (body.kind or "dungeon").strip().lower()
+    if kind not in ("mainline", "dungeon", "interlude"):
+        kind = "dungeon"
+
+    title = (body.title or "").strip()
+    start_chapter_no = body.start_chapter_no
+
+    if kind == "mainline":
+        # 主线（蓝星开篇）永远从第 1 章开始，只允许一个 mainline 卷；若已存在则直接返回已有的
+        existing_ml = [v for v in vs.all_list() if v.volume_kind == "mainline"]
+        if existing_ml:
+            v = existing_ml[0]
+        else:
+            if not title:
+                title = "蓝星开篇"
+            start_chapter_no = 1
+            v = vs.create_new_volume(title=title, volume_kind="mainline", start_chapter_no=start_chapter_no)
+            # 在 desk 中预建 2 个 mainline 章节占位（让 phase 判定直接进入 mainline-brief）
+            ch_titles = ["蓝星日常·收到讣告", "讣告应验·穿越坠落"]
+            for i in range(2):
+                cno = start_chapter_no + i
+                desk.ensure(cno, title=ch_titles[i], field_no=v.volume_no, chapter_kind="mainline")
+    elif kind == "interlude":
+        # dungeon / interlude：从下一个可用章号开始
+        if start_chapter_no is None:
+            start_chapter_no = desk.next_available_no()
+        if not title:
+            title = "蓝星间章"
+        v = vs.create_new_volume(title=title, volume_kind="interlude", start_chapter_no=start_chapter_no)
+    else:  # dungeon
+        if start_chapter_no is None:
+            start_chapter_no = desk.next_available_no()
+        # 保留原有行为：在 field_no = latest.field_no + 1 处创建副本卷
+        latest_vol = vs.latest()
+        next_field = (latest_vol.field_no + 1) if latest_vol else 1
+        v = vs.create_next(bs, next_field)
+        # 纠正 start_chapter_no（create_next 不会设置）
+        if v.start_chapter_no != start_chapter_no:
+            v.start_chapter_no = start_chapter_no
+            vs._flush(v)
+
+    # 应用规划板初始字段（排除 kind/start_chapter_no）
+    kwargs_raw = body.model_dump(exclude_unset=True) if hasattr(body, "model_dump") else body.dict()
+    kwargs = {k: val for k, val in kwargs_raw.items() if val is not None and k not in ("kind", "start_chapter_no")}
+    if kwargs:
+        try:
+            v = vs.update_planning(v.volume_no, **kwargs)
+        except ValueError:
+            pass
+
+    # 返回当前最新 phase
+    try:
+        from .phase_routes import _determine_phase as _dp
+        ph = _dp(pid)
+    except Exception:
+        ph = None
+    return {"volume": v.as_dict(), "ok": True, "volume_no": v.volume_no, "phase": ph}
+
+
+@app.delete("/api/projects/{pid}/volumes/{vol_no}")
+def volumes_delete(pid: str, vol_no: int) -> dict:
+    """删除指定卷：清空该卷对应的章节 + desk 里 chapter_kind 对应的章节，再移除卷本身。
+    安全约束：有章节已定稿则拒绝（force 参数可放开，但默认不暴露）。"""
+    _require_project(pid)
+    vs = _volumes_for(pid)
+    desk = _desk_for(pid)
+    v = vs.get(vol_no)
+    if v is None:
+        raise HTTPException(404, f"卷 {vol_no} 不存在")
+
+    # 找 desk 中属于该卷的章节
+    # mainline/interlude 按 chapter_kind/is_interlude 判定；dungeon 按 field_no 判定
+    to_delete: list[int] = []
+    for no in sorted(desk.all_nos(), reverse=True):
+        ch = desk.get(no)
+        if not ch:
+            continue
+        belong = False
+        if v.volume_kind == "mainline":
+            belong = (ch.chapter_kind == "mainline")
+        elif v.volume_kind == "interlude":
+            belong = bool(ch.is_interlude)
+        else:
+            belong = (ch.field_no == v.volume_no)
+        if belong:
+            if ch.finalized_at:
+                raise HTTPException(400, f"第 {no} 章已定稿，无法删除该卷")
+            to_delete.append(no)
+    for no in to_delete:
+        try:
+            desk.delete(no, force=True)
+        except ValueError:
+            pass
+
+    # 删除卷文件：索引 + 单卷 json
+    if v.volume_no in getattr(vs, "_cache", {}):
+        del vs._cache[v.volume_no]
+    idx = vs._load_index()
+    idx["volumes"] = [e for e in idx.get("volumes", []) if int(e.get("volume_no", 0)) != vol_no]
+    vs._save_index(idx)
+    vpath = vs._path(vol_no) if hasattr(vs, "_path") else (vs.root / f"{vol_no}.json")
+    if vpath.exists():
+        vpath.unlink()
+
+    try:
+        from .phase_routes import _determine_phase as _dp
+        ph = _dp(pid)
+    except Exception:
+        ph = None
+    return {"ok": True, "phase": ph}
 
 
 @app.patch("/api/projects/{pid}/volumes/{vol_no}")

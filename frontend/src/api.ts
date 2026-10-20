@@ -2141,6 +2141,11 @@ export const volumesApi = {
       `/api/projects/${pid}/volumes`,
       { method: 'POST', body: JSON.stringify(body) },
     ),
+  remove: (pid: string, volNo: number) =>
+    req<{ ok: boolean; phase?: any }>(
+      `/api/projects/${pid}/volumes/${volNo}`,
+      { method: 'DELETE' },
+    ),
 }
 
 // ---- 蓝星开篇卷（mainline） ----

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
 import StatusBar from '../components/StatusBar.vue'
 import SpineNav from '../components/SpineNav.vue'
@@ -209,7 +209,16 @@ async function loadSpine() {
     }
     for (const c of chapters) {
       let targetVol = 0
-      if (c.field_no != null && fieldToVolNo.has(c.field_no)) {
+      // 主线/间章优先按 chapter_kind 匹配（因为它们的 field_no 可能与 dungeon 卷号冲突）
+      if (c.chapter_kind === 'mainline') {
+        const ml = orderedVols.find((v: any) => v.volume_kind === 'mainline')
+        if (ml) targetVol = ml.volume_no
+      } else if (c.is_interlude) {
+        // 匹配一个 interlude 卷：优先按 field_no，否则取最后一个 interlude 卷
+        const cand = orderedVols.find((v: any) => v.volume_kind === 'interlude' && v.field_no === c.field_no)
+          || [...orderedVols].reverse().find((v: any) => v.volume_kind === 'interlude')
+        if (cand) targetVol = cand.volume_no
+      } else if (c.field_no != null && fieldToVolNo.has(c.field_no)) {
         targetVol = fieldToVolNo.get(c.field_no)!
       } else {
         // fallback：把章按数量近似分配到最后一卷
@@ -262,8 +271,45 @@ async function onAddVolume() {
   newVolumeDlgVisible.value = true
 }
 
+async function onDeleteVolume(no: number) {
+  const pid = currentProjectId.value
+  if (!pid) return
+  try {
+    await ElMessageBox.confirm(
+      `确定删除第 ${no} 卷？该卷下所有章节（含未定稿内容）都会被删除，此操作不可恢复。`,
+      '删除卷',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    const r = await volumesApi.remove(pid, no)
+    ElMessage.success('已删除')
+    spineVolumesRefreshKey.value += 1
+    if (r.phase) {
+      currentPhase.value = r.phase.phase ?? ''
+      currentVolumeNo.value = r.phase.volume_no ?? 0
+      currentChapterNo.value = r.phase.chapter_no ?? 0
+      currentVolumeKind.value = r.phase.volume_kind ?? 'dungeon'
+      currentIsLastChapter.value = !!r.phase.is_last_chapter
+      isReviewingVolume.value = !!r.phase.is_reviewing
+    } else {
+      await loadPhase()
+    }
+  } catch (e: any) {
+    ElMessage.error(`删除失败：${e?.message ?? e}`)
+  }
+}
+
 function onGoSetup() {
   currentPhase.value = 'setup'
+}
+
+// mainline 创建/跳过/新建卷后都需要刷新 spine 列表
+async function onMainlineDone() {
+  spineVolumesRefreshKey.value += 1
+  await loadPhase()
 }
 
 function onSelectVolume(no: number) {
@@ -345,6 +391,7 @@ defineExpose({ refresh: loadPhase })
         @select-volume="onSelectVolume"
         @select-chapter="onSelectChapter"
         @add-volume="onAddVolume"
+        @delete-volume="onDeleteVolume"
         @go-setup="onGoSetup"
         @open-desk="enterWritingDesk"
       />
@@ -367,7 +414,7 @@ defineExpose({ refresh: loadPhase })
           <BookSetupView v-if="phase === 'setup'" @done="loadPhase" />
 
           <!-- mainline-waiting: 蓝星开篇引导页 -->
-          <MainlineLandingView v-else-if="phase === 'mainline-waiting'" @done="loadPhase" />
+          <MainlineLandingView v-else-if="phase === 'mainline-waiting'" @done="onMainlineDone" />
 
           <!-- writing-desk: 全局写作台（phase 推进进入） -->
           <WritingDeskView v-else-if="phase === 'writing-desk'" />

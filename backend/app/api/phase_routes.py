@@ -65,10 +65,8 @@ def register_phase_routes(
         "/api/projects/{pid}/workbench/volumes/interlude",
         _create_interlude_volume, methods=["POST"],
     )
-    router.add_api_route(
-        "/api/projects/{pid}/volumes",
-        _create_volume, methods=["POST"],
-    )
+    # 注意：POST /api/projects/{pid}/volumes 统一在 main.py 的 volumes_create_next 中处理（已扩展支持 kind/start_chapter_no），
+    # 这里不再重复注册，避免路由顺序导致老实现拦截 kind=mainline 的请求。
 
     app.include_router(router)
 
@@ -152,10 +150,11 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
             "is_last_chapter": False, "is_reviewing": False,
         }
     mv = mainline_vols[0]  # 只看第一个 mainline 卷
+    # 主线章节必须按 chapter_kind == "mainline" 识别；field_no 可能和 dungeon 卷号冲突（dungeon 卷 1 的 field_no=1 但不是主线）
     ml_ch_nos: list[int] = []
     for no in sorted(desk.all_nos()):
         ch = desk.get(no)
-        if ch and ch.field_no == mv.volume_no:
+        if ch and ch.chapter_kind == "mainline":
             ml_ch_nos.append(no)
     ml_finalized = sum(1 for n in ml_ch_nos if desk.get(n) and desk.get(n).finalized_at)
     if ml_finalized < 2:
@@ -165,10 +164,14 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
             cno = min(unfinished)
         elif ml_ch_nos:
             cno = max(ml_ch_nos) + 1
+            if cno > mv.start_chapter_no + 1:
+                cno = mv.start_chapter_no  # 不超过主线 2 章，回到未完成的首章
         else:
             cno = mv.start_chapter_no
         if not desk.get(cno):
-            desk.ensure(cno, title="", field_no=mv.volume_no, chapter_kind="mainline")
+            # 主线 2 章使用固定标题
+            ch_title = "蓝星日常·收到讣告" if cno == mv.start_chapter_no else "讣告应验·穿越坠落"
+            desk.ensure(cno, title=ch_title, field_no=mv.volume_no, chapter_kind="mainline")
         return {
             "phase": "mainline-brief",
             "volume_no": mv.volume_no,
