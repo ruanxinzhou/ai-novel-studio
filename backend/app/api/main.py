@@ -1714,11 +1714,50 @@ def _journal_dir(pid: str) -> Path:
 
 
 def _desk_summary(pid: str) -> dict:
-    """章台总览：章来源 = 大纲拆章 ∪ 章台记录 ∪ draft 正文拆章；卷头成组。"""
+    """章台总览：章来源 = 大纲拆章 ∪ 章台记录 ∪ draft 正文拆章；卷头按 volumes store 真实数据分组。"""
     desk = _desk_for(pid)
+    vs = _volumes_for(pid)
+    vols = vs.all_list()
     v = _project_store.current(pid, "outline")
-    o_map, volumes = parse_outline(v.y) if v else ({}, [])
-    vol_of = {no: vol["title"] for vol in volumes for no in vol["chapters"]}
+    o_map, _ol_volumes = parse_outline(v.y) if v else ({}, [])
+    # 建立章号 → 卷显示名 的映射（按 chapter_kind/field_no 真实归属）
+    vol_title_of: dict[int, str] = {}
+    ml_vol = next((vv for vv in vols if getattr(vv, "volume_kind", None) == "mainline"), None)
+    interludes = [vv for vv in vols if getattr(vv, "volume_kind", None) == "interlude"]
+    dungeons = [vv for vv in vols if getattr(vv, "volume_kind", None) == "dungeon"]
+    for no in desk.all_nos():
+        w = desk.get(no)
+        if not w:
+            continue
+        kind = getattr(w, "chapter_kind", None) or ""
+        if kind == "mainline" and ml_vol is not None:
+            vol_title_of[no] = f"第{ml_vol.volume_no}卷 {ml_vol.title or '蓝星开篇'}"
+            continue
+        if getattr(w, "is_interlude", False):
+            # 找 field_no 匹配的 interlude；否则按 no 顺序归到最近一个未绑章的 interlude
+            cand = next((iv for iv in interludes if iv.field_no == w.field_no), None)
+            if cand is None:
+                used = {n for nn, t in vol_title_of.items() for iv in interludes if t == f"第{iv.volume_no}卷 {iv.title}" for n in []}
+                cand = interludes[0] if interludes else None
+            if cand is not None:
+                vol_title_of[no] = f"第{cand.volume_no}卷 {cand.title or '蓝星间章'}"
+            continue
+        # dungeon 章：field_no 指向对应 dungeon 卷
+        fn = getattr(w, "field_no", None)
+        cand = next((dv for dv in dungeons if dv.volume_no == fn or dv.field_no == fn), None)
+        if cand is not None:
+            vol_title_of[no] = f"第{cand.volume_no}卷 {cand.title or f'第{cand.volume_no}卷'}"
+        elif dungeons:
+            # fallback：归到最新 dungeon 卷
+            cand = dungeons[-1]
+            vol_title_of[no] = f"第{cand.volume_no}卷 {cand.title or f'第{cand.volume_no}卷'}"
+        elif ml_vol is not None:
+            vol_title_of[no] = f"第{ml_vol.volume_no}卷 {ml_vol.title or '蓝星开篇'}"
+    # outline-only 章（只有大纲没进 desk）的旧逻辑保留，但优先用 desk 绑定
+    for vol in vols:
+        for no in (getattr(vol, "chapter_nos", None) or []):
+            if no not in vol_title_of:
+                vol_title_of[no] = f"第{vol.volume_no}卷 {vol.title or ''}".rstrip()
     draft_titles: dict[int, str] = {}
     v = _project_store.current(pid, "draft")
     if v is not None:
@@ -1729,11 +1768,37 @@ def _desk_summary(pid: str) -> dict:
         w = desk.get(no)
         body = o_map.get(no, "")
         latest = (work_text(w, "polish") or work_text(w, "draft")) if w else ""
+        ch_kind = getattr(w, "chapter_kind", None) if w else None
+        is_interlude = bool(getattr(w, "is_interlude", False)) if w else False
+        field_no = getattr(w, "field_no", None) if w else None
+        # 计算 volume_no / volume 显示名
+        vno: int | None = None
+        if ch_kind == "mainline" and ml_vol is not None:
+            vno = ml_vol.volume_no
+        elif is_interlude:
+            iv = next((iv for iv in interludes if iv.volume_no == field_no or iv.field_no == field_no), None)
+            if iv is None:
+                iv = next((iv for iv in interludes), None)
+            if iv is not None:
+                vno = iv.volume_no
+        else:
+            dv = next((dv for dv in dungeons if dv.volume_no == field_no or dv.field_no == field_no), None)
+            if dv is None and field_no is not None:
+                dv = next((dv for dv in dungeons if dv.start_chapter_no and no >= dv.start_chapter_no), None)
+            if dv is not None:
+                vno = dv.volume_no
+            elif dungeons:
+                vno = dungeons[-1].volume_no
+            elif ml_vol is not None:
+                vno = ml_vol.volume_no
         chapters.append({
             "no": no,
             "title": (w.title if w and w.title else "") or draft_titles.get(no, "")
             or chapter_title_of(body),
-            "volume": vol_of.get(no, ""),
+            "volume": vol_title_of.get(no, ""),
+            "volume_no": vno,
+            "chapter_kind": ch_kind or ("interlude" if is_interlude else "dungeon"),
+            "field_no": field_no,
             "has_outline": no in o_map,
             "plot_done": bool(work_text(w, "plot")),
             "draft_done": bool(work_text(w, "draft")),
@@ -1745,12 +1810,22 @@ def _desk_summary(pid: str) -> dict:
             "chars": len(latest),
             "outline_preview": body[:80],
         })
+    vol_summaries = []
+    for vv in vols:
+        vch = [c["no"] for c in chapters if c["volume_no"] == vv.volume_no]
+        vch.sort()
+        vol_summaries.append({
+            "title": f"第{vv.volume_no}卷 {vv.title or ''}".rstrip(),
+            "note": "",
+            "volume_no": vv.volume_no,
+            "volume_kind": getattr(vv, "volume_kind", "dungeon"),
+            "chapters": vch,
+        })
     return {
         "project": pid, "chapters": chapters, "total": len(chapters),
         "finalized": sum(1 for c in chapters if c["finalized_at"]),
         "outline_chapters": len(o_map),
-        "volumes": [{"title": x["title"], "note": x["note"],
-                     "chapters": x["chapters"]} for x in volumes],
+        "volumes": vol_summaries,
     }
 
 

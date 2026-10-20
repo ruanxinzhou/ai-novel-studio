@@ -157,7 +157,12 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
         if ch and ch.chapter_kind == "mainline":
             ml_ch_nos.append(no)
     ml_finalized = sum(1 for n in ml_ch_nos if desk.get(n) and desk.get(n).finalized_at)
-    if ml_finalized < 2:
+    # 主线未写完时，若用户显式点选了非 mainline 卷（去规划新副本/间章），允许跳过去做规划，不强绑主线
+    user_switching_away = (
+        target_volume_no is not None
+        and not any(v.volume_no == target_volume_no and v.volume_kind == "mainline" for v in vols)
+    )
+    if ml_finalized < 2 and not user_switching_away:
         # 找第一个未写完的章
         unfinished = [n for n in ml_ch_nos if not (desk.get(n) and desk.get(n).finalized_at)]
         if unfinished:
@@ -183,7 +188,7 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
             "is_last_chapter": (cno == mv.start_chapter_no + 1),
             "is_reviewing": False,
         }
-    # mainline 已写完 2 章：继续走后续（dungeon 卷判定），让 last_vol = max(vols) 选择最新卷推进
+    # mainline 已写完 2 章，或用户显式点选了非 mainline 卷做预规划：继续走后续（dungeon 卷判定）
 
     last_vol = max(vols, key=lambda v: v.volume_no)
 
