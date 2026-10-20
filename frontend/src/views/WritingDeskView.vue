@@ -95,14 +95,35 @@ async function loadSpine() {
   loading.value = true
   try {
     const data = await deskApi.spine(pid)
-    volumes.value = (data.volumes ?? []) as SpineVolume[]
-    const allChapters = (data.chapters ?? []) as SpineChapter[]
+    // 后端返回字段：volumes[*]{volume_no, volume_kind, title, field_no, start_chapter_no, stage_completed}
+    //                 chapters[*]{no, title, field_no, volume_no, chapter_kind, day, is_interlude, finalized_at, payoff, word_count}
+    // 这里归一化成前端内部使用的 {no, kind, finalized} 字段，避免模板里到处写两套名字
+    const rawVols = (data.volumes ?? []) as any[]
+    volumes.value = rawVols.map((v: any) => ({
+      no: v.volume_no ?? v.no ?? 0,
+      title: v.title ?? '',
+      kind: v.volume_kind ?? v.kind ?? 'dungeon',
+      field_no: v.field_no,
+      start_chapter_no: v.start_chapter_no,
+      stage_completed: v.stage_completed,
+    }))
+    const allChapters = (data.chapters ?? []) as any[]
     const byVol: Record<number, SpineChapter[]> = {}
     const byNo: Record<number, SpineChapter> = {}
-    for (const c of allChapters) {
-      // 后端已返回 volume_no；若老数据缺失则退化到 field_no
+    for (const raw of allChapters) {
+      const c: SpineChapter = {
+        no: raw.no,
+        title: raw.title ?? '',
+        volume_no: raw.volume_no,
+        field_no: raw.field_no,
+        chapter_kind: raw.chapter_kind,
+        day: raw.day,
+        chars: raw.word_count ?? raw.chars ?? 0,
+        finalized: !!raw.finalized_at,
+        finalized_at: raw.finalized_at,
+      }
       const vn = c.volume_no ?? c.field_no ?? 0
-      if (vn <= 0) continue // 归属不明的章忽略，避免出现"0 卷"
+      if (vn <= 0) continue
       if (!byVol[vn]) byVol[vn] = []
       byVol[vn].push(c)
       byNo[c.no] = c
