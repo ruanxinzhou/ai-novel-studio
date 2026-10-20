@@ -554,12 +554,17 @@ def register_rhythm_routes(
                 if not isinstance(item, dict):
                     continue
                 try:
-                    gno = int(item.get("chapter") or 0)
+                    raw_no = int(item.get("chapter") or 0)
                 except (TypeError, ValueError):
                     continue
-                if gno <= 0:
+                if raw_no <= 0:
                     continue
-                gno = gno - 1 + start_no  # 卷内相对章号 → 全书章号
+                # 兼容两种情况：analyze 阶段已经把 chapter 偏移到全局章号（>=start_no）
+                # 或仍然是卷内相对号（<= 计划总章数 < start_no）。
+                if raw_no >= start_no:
+                    gno = raw_no
+                else:
+                    gno = raw_no - 1 + start_no  # 卷内相对章号 → 全书章号
                 w = desk.ensure(gno)
                 w.field_no = field_no_val
                 w.chapter_kind = ch_kind

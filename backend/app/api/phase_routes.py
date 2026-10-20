@@ -379,7 +379,12 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
                 continue
             if rel <= 0:
                 continue
-            gno = rel - 1 + start_no
+            # 兼容两种情况：rhythm/analyze 阶段已把 chapter 偏移到全局章号（>=start_no），
+            # 或仍然是卷内相对号（rel <= 计划总章数 < start_no），避免重复偏移。
+            if rel >= start_no:
+                gno = rel
+            else:
+                gno = rel - 1 + start_no
             w = desk.ensure(gno)
             w.field_no = field_no_v
             w.chapter_kind = ch_kind_v

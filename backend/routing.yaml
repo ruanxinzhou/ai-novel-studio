@@ -29,3 +29,5 @@ routing:
   epilogue_ash:       { primary: minimax, fallback: trae_exec }
   interlude_expected: { primary: minimax, fallback: trae_exec }
   interlude_outline:  { primary: minimax, fallback: trae_exec }
+  # 节奏蓝图：输出大段结构化 JSON（~14章 × 六要素 + 起承转合 + 伏笔），走快模型更稳
+  rhythm:       { primary: minimax,    fallback: trae_exec }
