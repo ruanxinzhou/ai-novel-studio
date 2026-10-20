@@ -114,11 +114,14 @@ function onNewVolumeCreated(no: number) {
 
 // ---- 自由视图（非 phase 推进，手动覆盖当前面板） ----
 const freeView = ref<'writing-desk' | null>(null)
-function enterWritingDesk() {
+const freeViewInitialChapter = ref<number | null>(null)
+function enterWritingDesk(initialChapter?: number | null) {
+  freeViewInitialChapter.value = initialChapter ?? null
   freeView.value = 'writing-desk'
 }
 function exitFreeView() {
   freeView.value = null
+  freeViewInitialChapter.value = null
   loadPhase() // 回到当前 phase
 }
 
@@ -315,9 +318,14 @@ async function onMainlineDone() {
 function onSelectVolume(no: number) {
   loadPhase(no)
 }
-function onSelectChapter(vn: number, _cn: number) {
-  // 切到该卷，后端会自动定位到该章或阶段
-  loadPhase(vn)
+function onSelectChapter(vn: number, cn: number) {
+  // 若点击的是当前 phase 正在进行的章 → 走 phase 流程
+  if (vn === currentVolumeNo.value && cn === currentChapterNo.value) {
+    loadPhase(vn)
+    return
+  }
+  // 否则（点已完稿章 / 其他章）→ 进入全局写作台查看该章，不推进 phase
+  enterWritingDesk(cn)
 }
 
 function onChatRefresh() {
@@ -402,7 +410,7 @@ defineExpose({ refresh: loadPhase })
             <el-button size="small" @click="exitFreeView">⬅ 返回工作流</el-button>
             <span class="free-view-title">全局写作台</span>
           </div>
-          <WritingDeskView />
+          <WritingDeskView :key="freeViewInitialChapter ?? 'desk'" :initial-chapter-no="freeViewInitialChapter" />
         </div>
         <template v-else>
         <div v-if="loading" class="home-loading">

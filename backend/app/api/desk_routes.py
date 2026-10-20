@@ -239,6 +239,29 @@ def _desk_spine(pid: str) -> dict:
         })
 
     chapters_out = []
+    all_vols = vs.all_list()
+    # 预先建立 chapter → volume_no 的归属映射：
+    #   mainline   → 第一个 volume_kind=="mainline" 的卷
+    #   interlude  → 按 field_no 匹配 volume_kind=="interlude" 的卷；找不到则取最后一个 interlude 卷
+    #   dungeon    → field_no == volume_no
+    ml_vol = next((v for v in all_vols if v.volume_kind == "mainline"), None)
+    interlude_vols = [v for v in all_vols if v.volume_kind == "interlude"]
+    field_to_interlude = {v.field_no: v.volume_no for v in interlude_vols if getattr(v, "field_no", None) is not None}
+    last_interlude_no = interlude_vols[-1].volume_no if interlude_vols else None
+
+    def _resolve_volume_no(ch) -> int | None:
+        cd = ch.as_dict()
+        kind = cd.get("chapter_kind") or ""
+        if kind == "mainline":
+            return ml_vol.volume_no if ml_vol else None
+        if cd.get("is_interlude"):
+            fn = cd.get("field_no")
+            if fn is not None and fn in field_to_interlude:
+                return field_to_interlude[fn]
+            return last_interlude_no
+        # dungeon / 默认：field_no 就是 volume_no
+        return cd.get("field_no")
+
     for c in desk.all_sorted():
         cd = c.as_dict()
         text = (
@@ -251,6 +274,7 @@ def _desk_spine(pid: str) -> dict:
             "no": cd.get("no"),
             "title": cd.get("title"),
             "field_no": cd.get("field_no"),
+            "volume_no": _resolve_volume_no(c),
             "chapter_kind": cd.get("chapter_kind"),
             "day": cd.get("day"),
             "is_interlude": cd.get("is_interlude"),

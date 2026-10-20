@@ -25,12 +25,32 @@ interface SpineChapter {
   finalized_at?: string | null
 }
 
+const props = defineProps<{
+  initialChapterNo?: number | null
+}>()
+
 const loading = ref(false)
 const volumes = ref<SpineVolume[]>([])
 const chaptersMap = ref<Record<number, SpineChapter[]>>({}) // volume_no -> chapters
 const chaptersByNo = ref<Record<number, SpineChapter>>({}) // chapter_no -> chapter
 const selectedNo = ref<number>(0)
 const deskKey = ref(0) // 切章时强制刷新 DeskView
+
+onMounted(async () => {
+  await loadSpine()
+  // 若指定了初始章，加载完后自动选中
+  const init = Number(props.initialChapterNo)
+  if (init && chaptersByNo.value[init]) {
+    selectChapter(init)
+  } else if (!selectedNo.value) {
+    // 默认选中第一章（若存在）
+    const firstVol = volumes.value[0]
+    if (firstVol) {
+      const firstChs = chaptersMap.value[firstVol.no]
+      if (firstChs && firstChs.length) selectChapter(firstChs[0].no)
+    }
+  }
+})
 
 const selectedChapter = computed(() =>
   selectedNo.value ? chaptersByNo.value[selectedNo.value] ?? null : null,
@@ -80,7 +100,9 @@ async function loadSpine() {
     const byVol: Record<number, SpineChapter[]> = {}
     const byNo: Record<number, SpineChapter> = {}
     for (const c of allChapters) {
-      const vn = c.volume_no ?? 0
+      // 后端已返回 volume_no；若老数据缺失则退化到 field_no
+      const vn = c.volume_no ?? c.field_no ?? 0
+      if (vn <= 0) continue // 归属不明的章忽略，避免出现"0 卷"
       if (!byVol[vn]) byVol[vn] = []
       byVol[vn].push(c)
       byNo[c.no] = c
@@ -196,7 +218,6 @@ function onToSettle() {
   ElMessage.info('全局写作台不推进到杀青阶段')
 }
 
-onMounted(loadSpine)
 </script>
 
 <template>
