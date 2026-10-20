@@ -1858,7 +1858,7 @@ def desk_detail(pid: str, page: int | None = None, page_size: int = 50) -> dict:
     return summary
 
 
-@app.get("/api/projects/{pid}/desk/{chapter}")
+@app.get("/api/projects/{pid}/desk/{chapter:int}")
 def desk_chapter(pid: str, chapter: int) -> dict:
     """单章工作区：各阶段全文 + 本章大纲。"""
     _require_project(pid)
