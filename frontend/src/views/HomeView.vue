@@ -129,13 +129,15 @@ function exitFreeView() {
 watch(
   () => currentPhase.value,
   (p) => {
-    if (p === 'briefing' || p === 'mainline-brief') {
+    if ((p === 'briefing' || p === 'mainline-brief') && (currentChapterNo.value ?? 0) > 0) {
       existingBrief.value = null
       briefModalVisible.value = true
     } else if (p === 'desk') {
       briefModalVisible.value = false
       refreshDeskBrief()
       deskKey.value += 1
+    } else {
+      briefModalVisible.value = false
     }
   },
   { immediate: false },
@@ -484,7 +486,7 @@ defineExpose({ refresh: loadPhase })
               v-model:visible="briefModalVisible"
               :pid="currentProjectId"
               :vol-no="currentVolumeNo"
-              :chapter-no="currentChapterNo || 1"
+              :chapter-no="currentChapterNo > 0 ? currentChapterNo : 1"
               :existing-brief="existingBrief"
               @selected="onBriefSelected"
             />

@@ -350,11 +350,18 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
                     "is_last_chapter": False,
                     "is_reviewing": False,
                 }
+        # 所有规划阶段已完成但尚无章节 → 自动创建第一章并进入 briefing
+        start_no = int(getattr(target_vol, "start_chapter_no", 1) or 1)
+        w = desk.ensure(start_no)
+        w.field_no = target_vol.field_no if getattr(target_vol, "field_no", None) is not None else target_vol.volume_no
+        w.chapter_kind = "interlude" if target_vol.volume_kind == "interlude" else target_vol.volume_kind
+        w.is_interlude = (target_vol.volume_kind == "interlude")
+        desk._flush()
         return {
             "phase": "briefing",
             "volume_no": target_vol.volume_no,
             "volume_kind": target_vol.volume_kind,
-            "chapter_no": None,
+            "chapter_no": start_no,
             "is_last_chapter": False,
             "is_reviewing": False,
         }
@@ -532,12 +539,28 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
                 "is_reviewing": False,
             }
 
-    # 7. 都 True → briefing
+    # 7. 都 True → briefing；若当前卷还没有任何章，先创建第一章
+    if not all_chapter_nos:
+        start_no = int(getattr(target_vol, "start_chapter_no", 1) or 1)
+        w = desk.ensure(start_no)
+        w.field_no = target_vol.field_no if getattr(target_vol, "field_no", None) is not None else target_vol.volume_no
+        w.chapter_kind = "interlude" if target_vol.volume_kind == "interlude" else target_vol.volume_kind
+        w.is_interlude = (target_vol.volume_kind == "interlude")
+        desk._flush()
+        all_chapter_nos = target_ch_nos  # 刷新
+        return {
+            "phase": "briefing",
+            "volume_no": target_vol.volume_no,
+            "volume_kind": target_vol.volume_kind,
+            "chapter_no": start_no,
+            "is_last_chapter": False,
+            "is_reviewing": False,
+        }
     return {
         "phase": "briefing",
         "volume_no": target_vol.volume_no,
         "volume_kind": target_vol.volume_kind,
-        "chapter_no": None,
+        "chapter_no": min(all_chapter_nos),
         "is_last_chapter": False,
         "is_reviewing": False,
     }
