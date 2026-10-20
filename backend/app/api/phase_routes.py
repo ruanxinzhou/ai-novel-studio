@@ -172,8 +172,11 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
             # 主线 2 章使用固定标题
             ch_title = "蓝星日常·收到讣告" if cno == mv.start_chapter_no else "讣告应验·穿越坠落"
             desk.ensure(cno, title=ch_title, field_no=mv.volume_no, chapter_kind="mainline")
+        # 检查当前章是否已选方向卡：已选 → 直接进 desk；未选 → 停在 mainline-brief 让用户选方向
+        ch = desk.get(cno)
+        brief_sel = bool(ch and isinstance(getattr(ch, "brief", None), dict) and ch.brief.get("selected"))
         return {
-            "phase": "mainline-brief",
+            "phase": "desk" if brief_sel else "mainline-brief",
             "volume_no": mv.volume_no,
             "volume_kind": "mainline",
             "chapter_no": cno,
