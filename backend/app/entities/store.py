@@ -69,11 +69,16 @@ VOICEPRINT_FIELDS = tuple(VOICEPRINT_LABELS.keys())
 
 
 def _as_list(value, limit: int = 8) -> list[str]:
-    """把 str / list 统一成去空去重的短句列表（作者手输时常见裸字符串）。"""
+    """把 str / list 统一成去空去重的短句列表（作者手输时常见裸字符串）。
+
+    **只按换行切**，不按「、」「，」切——动作描述本身常含顿号
+    （「记账：记时间、金额、异常」），按顿号切会把一条动作撕成三条碎片。
+    编辑器里一个动作一行，裸字符串也建议用换行分隔。
+    """
     if value is None:
         return []
     if isinstance(value, str):
-        items = [x.strip() for x in value.replace("，", "\n").replace("、", "\n").splitlines()]
+        items = [x.strip() for x in value.splitlines()]
     elif isinstance(value, (list, tuple)):
         items = []
         for v in value:
@@ -165,20 +170,38 @@ class Voiceprint:
                 final.append(x)
             return "、".join(final)
 
+        def _strip_notes(items: list[str]) -> str:
+            """只剥出处注释，不做子串去重。
+
+            口癖/口音天然是短句且互相包含（「行。」之于「差不多。」、
+            「6。」之于一堆网络词），子串去重会把它们误删——那是给
+            习惯动作用的清洗，不能套到词表上。
+            """
+            out: list[str] = []
+            for x in items:
+                m = re.search(r"[（(]\s*出\s*[:：]", x)
+                if m:
+                    x = x[:m.start()].rstrip().rstrip("，、").rstrip("）)").rstrip()
+                else:
+                    x = x.strip()
+                if x and x not in out:
+                    out.append(x)
+            return "、".join(out)
+
         parts: list[str] = []
         if self.habits:
             parts.append(f"习惯动作 {_j(self.habits)}")
         if self.catchphrases:
-            parts.append(f"口癖 {_j(self.catchphrases)}")
+            parts.append(f"口癖 {_strip_notes(self.catchphrases)}")
         if self.dialect:
-            parts.append(f"口音 {_j(self.dialect)}")
+            parts.append(f"口音 {_strip_notes(self.dialect)}")
         for key, label in (("register", "语气"), ("psychology", "心理"),
                            ("silence", "沉默"), ("speech_pattern", "说话方式")):
             v = getattr(self, key)
             if v:
                 parts.append(f"{label} {v}")
         if self.taboos:
-            parts.append(f"绝不会说 {_j(self.taboos)}")
+            parts.append(f"绝不会说 {_strip_notes(self.taboos)}")
         return head + "；".join(parts)
 
     @classmethod
