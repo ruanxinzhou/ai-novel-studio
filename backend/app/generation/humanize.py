@@ -314,6 +314,41 @@ _PERSONIFIED_SIMILE_RE = re.compile(
 )
 
 
+# 段尾动作落点特征（段尾落在具体动作上 = 活人感）
+_ACTION_TAIL_RE = re.compile(
+    r"(起来|过来|下去|上去|走了|站着|坐着|看着|听着|伸手|收回|转身|抬头|低头|点头|摇头|"
+    r"抓起|放下|摸了摸|摸出|掏出|递|推|拉|打开|关上|起身|蹲下|弯腰|按住|踩|点了|盯着|扫了眼)"
+)
+
+
+def _rhythm_metrics(text: str) -> dict:
+    """活人节奏指标：段落长度分布、极短段占比、动作收尾占比。
+
+    这是润色层最容易磨掉的东西（合并段落、砍极短段），故单独度量。
+    """
+    paras = [p.strip() for p in (text or "").split("\n") if p.strip()]
+    n = len(paras)
+    if n == 0:
+        return {"段落数": 0, "段落均长": 0.0, "极短段(≤12字)": 0, "极短段占比": 0.0,
+                "超短段(2-6字)": 0, "动作收尾占比": 0.0, "段落CV": 0.0}
+    lens = [len(p) for p in paras]
+    mean = sum(lens) / n
+    var = sum((x - mean) ** 2 for x in lens) / n
+    cv = math.sqrt(var) / mean if mean else 0.0
+    short = sum(1 for L in lens if L <= 12)
+    tiny = sum(1 for L in lens if 2 <= L <= 6)
+    action_tail = sum(1 for p in paras if _ACTION_TAIL_RE.search(p.rstrip("。！？!?…")))
+    return {
+        "段落数": n,
+        "段落均长": round(mean, 1),
+        "段落CV": round(cv, 3),
+        "极短段(≤12字)": short,
+        "极短段占比": round(short * 100 / n, 1),
+        "超短段(2-6字)": tiny,
+        "动作收尾占比": round(action_tail * 100 / n, 1),
+    }
+
+
 def _burstiness_stats(text: str) -> dict:
     chars = len(text.strip())
     if chars == 0:

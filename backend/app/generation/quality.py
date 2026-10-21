@@ -29,6 +29,7 @@ from app.generation.humanize import (
     _HALF_DOUBLE_RE,
     _SAFE_REPLACES,
     _burstiness_stats,
+    _rhythm_metrics,
     diagnosis_score,
 )
 
@@ -242,6 +243,26 @@ def hard_gate(
         )
         if _SEAM_BAD_STARTS.match(first_sent):
             p1.append(f"块间接缝：本段以空泛过渡词「{first_sent[:10]}…」开头，建议改为动作/物件/时间锚点承接上一段")
+
+    # 活人节奏红线：润色层最容易磨掉这些（合并段落、砍掉极短段）
+    _rhythm = _rhythm_metrics(text)
+    stats["rhythm"] = _rhythm
+    if _rhythm["段落数"] >= 8:
+        if _rhythm["极短段占比"] < 20:
+            p1.append(
+                f"活人节奏：极短段（≤12字）仅 {_rhythm['极短段占比']}%（{_rhythm['极短段(≤12字)']} 段），"
+                f"建议 ≥20%——在情绪转折点砍出 2-5 字极短句独立成段；"
+                f"**如果原文有更多极短段而这里变少，说明润色把它们合并了，必须还原**"
+            )
+        if _rhythm["动作收尾占比"] < 8:
+            p1.append(
+                f"活人节奏：动作收尾段仅 {_rhythm['动作收尾占比']}%（建议 ≥10%）"
+                f"——段尾爱落在抽象总结，改为落在具体动作/物件/短句"
+            )
+        if _rhythm["段落均长"] > 60:
+            p1.append(
+                f"活人节奏：段落均长 {_rhythm['段落均长']} 字（>60 偏长），适当把长段拆出短段"
+            )
 
     return HardGateResult(p0=p0, p1=p1, stats=stats)
 
