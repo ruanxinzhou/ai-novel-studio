@@ -149,8 +149,21 @@ class PipelineRunner:
             chunk=chunk,
             rendered=rendered,
             decision=decision,
-            max_tokens=max(256, decision.output_budget_tokens or 2_048),
+            max_tokens=self._budget_max_tokens(decision),
         )
+
+    def _budget_max_tokens(self, decision) -> int:
+        """正文预算 + reasoning 预留。
+
+        推理模型（M3.1-Flash / DeepSeek 等）会把链锁思考写入 reasoning_tokens，
+        这部分与正文共享 max_tokens 配额。若按"正文 chars × 系数"直传，reasoning
+        很容易把全部额度吃完、正文一字不出（之前的空 y bug 即此）。因此：
+        - 基础预算走 plan_budget 算的 output_budget_tokens；
+        - 若 provider 带 reasoning_reserve 属性，额外加上。
+        """
+        base = max(256, decision.output_budget_tokens or 2_048)
+        reserve = int(getattr(self.provider, "reasoning_reserve_tokens", 0) or 0)
+        return base + reserve
 
     def _base_materials(self, spec: PipelineSpec, materials: list[Material] | None) -> list[Material]:
         layer_instruction_mat = Material(
@@ -236,6 +249,12 @@ class PipelineRunner:
                     if acc:
                         tail = acc[-CONTINUATION_TAIL_CHARS:]
                         msgs.append({"role": "user", "content": f"从断点处续写，不要重复已写内容：\n{tail}"})
+                    elif acc is not None:
+                        # 上一轮返回空正文（模型只吐 reasoning 就 stop）。用 assistant 前缀引导它直接吐正文，
+                        # 再用 user 明确指令，避免再次陷入纯 reasoning。
+                        msgs.append({"role": "assistant", "content": ""})
+                        msgs.append({"role": "user",
+                                     "content": "请直接开始输出小说正文，不要额外思考或解释。"})
                     if hasattr(self.provider, "chat_stream"):
                         return self._generate_stream(msgs, _max_tokens, _index, on_event)
                     resp = self.provider.chat(msgs, self.model, max_tokens=_max_tokens)
@@ -274,9 +293,10 @@ class PipelineRunner:
 
     def _generate_stream(self, msgs: list[dict], max_tokens: int, index: int,
                          on_event: Callable[[str, dict[str, Any]], None] | None) -> tuple[str, str]:
-        """流式调用：thinking/delta 实时回调，同时聚合出正文与截断判定。"""
+        """流式调用：thinking/delta 实时回调，同时聚合正文与真实 finish_reason。"""
         parts: list[str] = []
         usage_total = 0
+        finish_reason: str | None = None
         for ev in self.provider.chat_stream(msgs, self.model, max_tokens=max_tokens):
             if ev.kind == "delta":
                 parts.append(ev.text)
@@ -290,6 +310,17 @@ class PipelineRunner:
                     on_event("notice", {"text": ev.text})
             elif ev.kind == "usage" and ev.usage:
                 usage_total = ev.usage.output_tokens
+                # MiniMax 等通道在 usage/done 的 meta 里带真实 finish_reason
+                fr = (ev.meta or {}).get("finish_reason")
+                if fr:
+                    finish_reason = fr
+            elif ev.kind == "done":
+                fr = (ev.meta or {}).get("finish_reason")
+                if fr:
+                    finish_reason = fr
+        # 优先用通道真实 finish_reason；通道未提供时回退到 token 比例代理判断
+        if finish_reason:
+            return "".join(parts), finish_reason
         return "".join(parts), proxy_finish_reason(usage_total, max_tokens)
 
 

@@ -54,13 +54,25 @@ def complete_prose(
         text, finish_reason = generate(accumulated if attempts else None)
         attempts += 1
 
+        stripped = text.strip()
+
         if attempts > 1:
             text = strip_overlap(accumulated, text, max_overlap_chars)
+            stripped = text.strip()
             if text:
                 overlaps += 1
-            if finish_reason == "length" and len(text.strip()) < min_progress_chars:
-                return ProseCompletion(accumulated, NO_PROGRESS, attempts, overlaps)
+
         accumulated += text
+
+        # 空正文：M3.1-Flash 等模型偶发"只输出 reasoning 就 stop"，把它当作被截断，
+        # 触发续写（调用方会发"从断点处续写"指令）；续写后仍无正文则返回 no_progress。
+        if not stripped:
+            if attempts > max_continuations:
+                return ProseCompletion(accumulated, NO_PROGRESS, attempts, overlaps)
+            # 把 finish_reason 伪装成 length，让循环继续走续写分支
+            finish_reason = "length"
+        elif finish_reason == "length" and len(stripped) < min_progress_chars:
+            return ProseCompletion(accumulated, NO_PROGRESS, attempts, overlaps)
 
         if finish_reason != "length":
             return ProseCompletion(accumulated, COMPLETE, attempts, overlaps)

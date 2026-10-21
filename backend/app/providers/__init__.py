@@ -1,6 +1,7 @@
 """Provider 注册与路由（含 failover）。"""
 from __future__ import annotations
 
+import logging
 from typing import Iterator
 
 from ..config import AppConfig, load_config
@@ -8,6 +9,8 @@ from .base import LLMResponse, Provider, ProviderError, StreamEvent, Usage, stri
 from .minimax import MiniMaxProvider
 from .trae_acp import TraeAcpProvider
 from .trae_exec import TraeExecProvider
+
+_log = logging.getLogger(__name__)
 
 __all__ = ["Provider", "ProviderError", "StreamEvent", "LLMResponse", "Usage",
            "strip_think", "Router", "get_router"]
@@ -49,9 +52,16 @@ class Router:
                 return
             except ProviderError as e:
                 last_err = e
+                _log.warning("failover from %s: %s", provider.name, e)
                 if i < len(attempts) - 1:
                     # 通知上层发生了 failover（meta 不进正文）
                     yield StreamEvent(kind="error", text=f"[failover {provider.name}] {e}",
+                                      meta={"failover_from": provider.name})
+            except Exception as e:
+                last_err = ProviderError(f"{provider.name} 未知错误: {type(e).__name__}: {e}")
+                _log.exception("unexpected error from %s", provider.name)
+                if i < len(attempts) - 1:
+                    yield StreamEvent(kind="error", text=f"[failover {provider.name}] {last_err}",
                                       meta={"failover_from": provider.name})
         raise last_err or ProviderError("无可用通道")
 

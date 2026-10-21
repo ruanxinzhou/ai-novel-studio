@@ -8,6 +8,7 @@ Spike 结论（2026-10-09）：
 from __future__ import annotations
 
 import json
+import time
 from typing import Iterator
 
 import httpx
@@ -63,6 +64,11 @@ class ThinkSplitter:
 class MiniMaxProvider(Provider):
     name = "minimax"
 
+    # 推理模型预留：reasoning_content 会占用 max_tokens 配额，需给正文留出空间。
+    # M3.1-Flash 实测长 prompt 下单轮 reasoning 可达 4k tok 且正文未启；
+    # 预留至少 12k 让它把 reasoning 写完再输出正文，否则会被 length 截断导致空正文。
+    reasoning_reserve_tokens = 12_288
+
     def __init__(self, api_key: str, base_url: str | None = None,
                  default_model: str = "MiniMax-M3.1-Flash-Preview"):
         if not api_key or "在此填入" in api_key:
@@ -84,53 +90,89 @@ class MiniMaxProvider(Provider):
                     extra: dict | None = None) -> Iterator[StreamEvent]:
         model = model or self.default_model
         body: dict = {"model": model, "messages": messages, "stream": True,
-                      "stream_options": {"include_usage": True}}
+                      "stream_options": {"include_usage": True},
+                      # 降低推理强度，让正文更早开始（M3.1-Flash）
+                      "reasoning_effort": "low"}
         # max_tokens 不传时交给 API 模型默认（M3 ≥10K，远优于硬编码 2048 截断）
         if max_tokens:
             body["max_tokens"] = max_tokens
         body.update(extra or {})
-        try:
-            with httpx.stream("POST", f"{self.base_url}/chat/completions",
-                              json=body, headers=self._headers(),
-                              timeout=httpx.Timeout(20, read=300)) as r:
-                if r.status_code != 200:
-                    detail = r.read().decode("utf-8", errors="replace")[:300]
-                    raise ProviderError(f"MiniMax HTTP {r.status_code}: {detail}")
-                splitter = ThinkSplitter()
-                usage = Usage()
-                for line in r.iter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    payload = line[5:].strip()
-                    if payload == "[DONE]":
-                        break
-                    try:
-                        ev = json.loads(payload)
-                    except json.JSONDecodeError:
-                        continue
-                    if ev.get("usage"):
-                        u = ev["usage"]
-                        usage = Usage(input_tokens=u.get("prompt_tokens", 0),
-                                      output_tokens=u.get("completion_tokens", 0))
-                    delta_obj = (ev.get("choices") or [{}])[0].get("delta", {})
-                    # M3 等新模型思考走独立 reasoning_content 字段；M2 系内嵌 <think>
-                    reasoning = delta_obj.get("reasoning_content")
-                    if reasoning:
-                        yield StreamEvent(kind="thinking", text=reasoning)
-                    delta = delta_obj.get("content")
-                    if not delta:
-                        continue
-                    # 思考块实时透传（kind="thinking"），不进正文
-                    plain, think = splitter.feed(delta)
-                    if think:
-                        yield StreamEvent(kind="thinking", text=think)
-                    if plain:
-                        yield StreamEvent(kind="delta", text=plain)
-                usage.cost_cny = self._estimate_cost(model, usage)
-                yield StreamEvent(kind="usage", usage=usage)
-                yield StreamEvent(kind="done")
-        except httpx.HTTPError as e:
-            raise ProviderError(f"MiniMax 网络错误: {type(e).__name__}: {e}") from e
+        # 529/429/503 集群过载：指数退避重试，不直接丢给上层 failover
+        max_retries = 3
+        last_err: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                with httpx.stream("POST", f"{self.base_url}/chat/completions",
+                                  json=body, headers=self._headers(),
+                                  timeout=httpx.Timeout(20, read=300)) as r:
+                    if r.status_code in (429, 503, 529):
+                        detail = r.read().decode("utf-8", errors="replace")[:200]
+                        last_err = ProviderError(
+                            f"MiniMax HTTP {r.status_code}: {detail}")
+                        if attempt < max_retries:
+                            wait = 1.5 * (2 ** attempt)
+                            yield StreamEvent(kind="notice",
+                                              text=f"MiniMax 过载（{r.status_code}），"
+                                                   f"{wait:.0f}s 后第{attempt+1}次重试…")
+                            time.sleep(wait)
+                            continue
+                        raise last_err
+                    if r.status_code != 200:
+                        detail = r.read().decode("utf-8", errors="replace")[:300]
+                        raise ProviderError(f"MiniMax HTTP {r.status_code}: {detail}")
+                    splitter = ThinkSplitter()
+                    usage = Usage()
+                    finish_reason: str | None = None
+                    for line in r.iter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        payload = line[5:].strip()
+                        if payload == "[DONE]":
+                            break
+                        try:
+                            ev = json.loads(payload)
+                        except json.JSONDecodeError:
+                            continue
+                        if ev.get("usage"):
+                            u = ev.get("usage")
+                            usage = Usage(input_tokens=u.get("prompt_tokens", 0),
+                                          output_tokens=u.get("completion_tokens", 0))
+                        choices = ev.get("choices") or []
+                        if not choices:
+                            continue
+                        choice0 = choices[0] or {}
+                        fr = choice0.get("finish_reason")
+                        if fr:
+                            finish_reason = fr
+                        delta_obj = choice0.get("delta", {})
+                        reasoning = delta_obj.get("reasoning_content")
+                        if reasoning:
+                            yield StreamEvent(kind="thinking", text=reasoning)
+                        delta = delta_obj.get("content")
+                        if not delta:
+                            continue
+                        plain, think = splitter.feed(delta)
+                        if think:
+                            yield StreamEvent(kind="thinking", text=think)
+                        if plain:
+                            yield StreamEvent(kind="delta", text=plain)
+                    usage.cost_cny = self._estimate_cost(model, usage)
+                    yield StreamEvent(kind="usage", usage=usage,
+                                      meta={"finish_reason": finish_reason or ""})
+                    yield StreamEvent(kind="done", meta={"finish_reason": finish_reason or ""})
+                    return
+            except httpx.HTTPError as e:
+                last_err = ProviderError(f"MiniMax 网络错误: {type(e).__name__}: {e}")
+                last_err.__cause__ = e
+                if attempt < max_retries:
+                    wait = 1.5 * (2 ** attempt)
+                    yield StreamEvent(kind="notice",
+                                      text=f"MiniMax 网络错误，{wait:.0f}s 后重试…")
+                    time.sleep(wait)
+                    continue
+                raise last_err
+        if last_err:
+            raise last_err
 
     def health(self) -> dict:
         try:
