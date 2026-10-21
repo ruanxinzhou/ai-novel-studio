@@ -216,7 +216,11 @@ def outline_map(project_store, pid: str) -> dict[int, str]:
 
 def _brief_outline_text(work) -> str:
     """从新工作台 ChapterWork.brief.selected 构造本章大纲输入 x。
-    兼容旧版全书 outline 缺失的工作台项目（T1-T16 之后的标准起手）。"""
+
+    分层输出（圆桌结论：硬事实照抄 / 意图给方向，模型才有自由度）：
+    brief.summary 里如果作者已按【硬事实】【起承转合】【必须出现】【禁止】分块，
+    就保持原样透传；否则退回旧的单段拼接。
+    """
     if not work or not isinstance(getattr(work, "brief", None), dict):
         return ""
     sel = work.brief.get("selected")
@@ -229,6 +233,17 @@ def _brief_outline_text(work) -> str:
     beat = sel.get("beat_type")
     if beat:
         lines.append(f"【节奏定位】{beat}")
+
+    # 起承转合：优先用 brief.structure，其次用 rhythm_blueprint 的 plot_beats
+    struct = work.brief.get("structure")
+    if isinstance(struct, dict) and any(struct.get(k) for k in ("qi", "cheng", "zhuan", "he")):
+        lines.append("【本章起承转合（节奏骨架，必须体现）】")
+        for k, label in (("qi", "起"), ("cheng", "承"), ("zhuan", "转"), ("he", "合")):
+            v = str(struct.get(k) or "").strip()
+            if v:
+                lines.append(f"{label}｜{v}")
+        lines.append("")
+
     summary = sel.get("summary")
     if summary:
         lines.append(f"【本章核心剧情方向】\n{summary}")
@@ -269,6 +284,16 @@ def previous_tail(desk: DeskStore, chapter: int) -> str:
             if t:
                 return t[-CONTINUATION_TAIL_CHARS:]
     return ""
+
+
+def _projects_root():
+    """backend/data/projects 根目录（与 entities.json / desk.json 同级）。"""
+    try:
+        from .. import _config
+        return _config.REPO / "backend" / "data" / "projects"
+    except Exception:
+        from pathlib import Path
+        return Path(__file__).resolve().parents[2] / "data" / "projects"
 
 
 def _direction_material(wizard: WizardStore) -> Material | None:
@@ -818,6 +843,20 @@ def run_chapter_stage(
                 materials.insert(0, markers_material(pending, chapter))
         anchor = previous_tail(desk, chapter)
 
+    # 描写轮换账本（圆桌方案）：生成前把「你已经写过什么」当记忆注入给模型，
+    # 措辞是叙事性的（记忆）而非管理性的（禁令）——这是它能起作用的关键。
+    if stage in ("draft", "polish"):
+        try:
+            from app.generation.lexicon import load_lexicon
+            lex = load_lexicon(pid, _projects_root())
+            mem = lex.memory_block(chapter)
+            if mem:
+                materials.insert(0, Material(
+                    source_id=f"lexicon:ch{chapter}", family=MaterialFamily.REQUIRED,
+                    content=mem, title="描写记忆（你已用过的表达）"))
+        except Exception:
+            pass
+
     run_key = compute_run_key(stage, [x],
                               [(m.source_id, m.family.value, m.content) for m in materials],
                               directive)
@@ -827,7 +866,9 @@ def run_chapter_stage(
     runner = PipelineRunner(provider, prompt_store=prompt_store)
     result = runner.run_layer(spec, [(x, "")], materials=materials,
                               initial_anchor=anchor, user_directive=directive,
-                              journal=journal, on_event=on_event)
+                              journal=journal, on_event=on_event,
+                              project_id=pid,
+                              chapter_no=chapter if stage in ("draft", "polish") else None)
     desk.record(chapter, stage, result.y, run_key, title=chapter_title_of(o_map.get(chapter, "")))
     return {
         "chapter": chapter, "stage": stage, "y": result.y, "run_id": run_key,

@@ -83,6 +83,16 @@ SPECS: dict[str, PipelineSpec] = {
 }
 
 
+def _lexicon_root():
+    """backend/data/projects 根目录（lexicon.json 与 entities.json 同级）。"""
+    try:
+        from .. import _config
+        return _config.REPO / "backend" / "data" / "projects"
+    except Exception:
+        from pathlib import Path
+        return Path(__file__).resolve().parents[2] / "data" / "projects"
+
+
 def proxy_finish_reason(response_usage_output_tokens: int, max_tokens: int) -> str:
     return "length" if response_usage_output_tokens >= int(max_tokens * FINISH_LENGTH_RATIO) else "stop"
 
@@ -220,9 +230,12 @@ class PipelineRunner:
         x_chunk_length: int | None = None,
         journal: RunJournal | None = None,
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
+        project_id: str | None = None,
+        chapter_no: int | None = None,
     ) -> LayerRunResult:
         """on_event(kind, payload) 实时回调：thinking/delta（含 index）、
-        resumed（收据复用）、block_done（单块完成）、notice（failover）。"""
+        resumed（收据复用）、block_done（单块完成）、notice（failover）、
+        quality（硬门禁/软评审）、lexicon（描写重复 Top6 提示）。"""
         writer = XYWriter(
             [(x, "") for x, _ in x_pairs],
             x_chunk_length=x_chunk_length or spec.x_chunk_length,
@@ -364,6 +377,28 @@ class PipelineRunner:
                     # burstiness 重试护栏：单项连续未改善则降级，防止死循环
                     hard_review = _apply_burstiness_guard(hard_review)
                     burst_stats = (hard_review.stats or {}).get("burstiness") or {}
+
+                    # 描写轮换账本：本轮正文记入账本（供下一章生成前注入 + 本章 Top6 提示）
+                    if project_id and chapter_no:
+                        try:
+                            from ..generation.lexicon import load_lexicon
+                            lex = load_lexicon(project_id, _lexicon_root())
+                            rec = lex.record_chapter(completion.text, chapter_no)
+                            if rec.get("recorded"):
+                                tops = lex.top_n_for_chapter(chapter_no)
+                                if on_event:
+                                    if tops:
+                                        on_event("lexicon", {
+                                            "index": i, "chapter": chapter_no,
+                                            "top": tops,
+                                            "report": lex.report_block(chapter_no),
+                                        })
+                                    else:
+                                        on_event("notice", {
+                                            "text": f"[描写账本] 第{chapter_no}章记入 {rec['recorded']} 个高频表达"})
+                        except Exception as lex_e:
+                            log.debug("lexicon record failed: %s", lex_e)
+
                     if on_event:
                         on_event("quality", {
                             "index": i, "round": quality_rounds,

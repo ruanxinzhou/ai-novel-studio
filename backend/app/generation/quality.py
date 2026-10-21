@@ -244,6 +244,16 @@ def hard_gate(
         if _SEAM_BAD_STARTS.match(first_sent):
             p1.append(f"块间接缝：本段以空泛过渡词「{first_sent[:10]}…」开头，建议改为动作/物件/时间锚点承接上一段")
 
+    # 机械冗余（圆桌：唯一可以自动改的情况——同段内同词重复，笔误级，无需审美判断）
+    from app.generation.lexicon import mechanical_redundancy
+    _redundant = mechanical_redundancy(text)
+    if _redundant:
+        stats["mechanical_redundancy"] = _redundant
+        _red_desc = "、".join(
+            f"「{r['term']}」第{r['para'] + 1}段出现{r['count']}次"
+            for r in _redundant[:6])
+        p1.append(f"机械冗余：同一段内重复用词 {_red_desc}——同一段里同一个表达出现两次以上属于笔误级冗余，请改掉其中一处")
+
     # 活人节奏红线：润色层最容易磨掉这些（合并段落、砍掉极短段）
     _rhythm = _rhythm_metrics(text)
     stats["rhythm"] = _rhythm
