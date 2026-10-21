@@ -421,6 +421,7 @@ class PipelineRunner:
                     hard_review = hard_gate(
                         completion.text, prev_tail=prev_tail,
                         target_chars=spec.target_chars,
+                        stage=spec.name,
                     )
                     # burstiness 重试护栏：单项连续未改善则降级，防止死循环
                     hard_review = _apply_burstiness_guard(hard_review)
@@ -557,7 +558,7 @@ class PipelineRunner:
                                 cleaned2 = humanize_postprocess(completion2.text)
                                 # 重写后再跑一次硬门禁，仍 P0 就保留原版本
                                 hard2 = hard_gate(cleaned2, prev_tail=anchor_text[-200:] if anchor_text else "",
-                                                  target_chars=spec.target_chars)
+                                                  target_chars=spec.target_chars, stage=spec.name)
                                 if hard2.passed and len(cleaned2.strip()) > len(completion.text) * 0.5:
                                     completion = ProseCompletion(
                                         text=cleaned2, status=completion2.status,

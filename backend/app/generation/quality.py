@@ -102,8 +102,9 @@ def hard_gate(
     target_chars: int = 0,
     min_ratio: float = 0.6,
     max_ratio: float = 1.8,
+    stage: str = "",
 ) -> HardGateResult:
-    """零 token 硬门禁。"""
+    """零 token 硬门禁。stage='plot' 时额外校验章细纲格式。"""
     p0: list[str] = []
     p1: list[str] = []
     stats: dict = {}
@@ -191,149 +192,184 @@ def hard_gate(
     if long_para_no_dialog >= 2:
         p1.append(f"存在 {long_para_no_dialog} 段超过 300 字无对白的长段（可能信息倾倒）")
 
-    # 章首入场模板池（xt A 条款）：连续同模板 = AI 味
-    tmpl_name, tmpl_ev = _detect_opening_template(text)
-    if tmpl_name:
-        stats["opening_template"] = {"name": tmpl_name, "evidence": tmpl_ev}
-        if tmpl_name == "醒来开头":
-            p1.append(
-                f"章首入场模板：识别为「醒来开头」（{tmpl_ev[:20]}…）。"
-                f"这是最典型的 AI 开场——近 10 章「醒来开头」≥4 即 FAIL。"
-                f"换一个入场方式：从动作中途开始、从对话开始、从某个具体物件开始，"
-                f"或直接跳到最有戏的那一刻"
-            )
-        else:
-            p1.append(
-                f"章首入场模板：识别为「{tmpl_name}」（{tmpl_ev[:20]}…）。"
-                f"注意不要连续多章用同一种入场模板"
-            )
-
-    # lieflat 11 项 AI 痕迹检测（283 万字人机对照实证，R = 生成 ÷ 人类）
-    lieflat = _lieflat_ai_signals(text)
-    if lieflat:
-        stats["lieflat"] = lieflat
-        per_k_lf = {k: round(v * 1000 / max(chars, 1), 2) for k, v in lieflat.items()}
-        stats["lieflat_per_k"] = per_k_lf
-        # 回滚级：R≥7 的强区分项
-        for k, v in lieflat.items():
-            if k == "冒号-空转句引列表" and v >= 2:
-                p0.append(f"AI 痕迹回滚级·冒号空转句引列表 {v} 处（R=9.4）：「我见过的几种典型场景：」"
-                          f"这种总起句是 AI 强指纹——直接给内容，不要预告")
-            elif k == "拟人化褒义喻体" and v >= 1:
-                p1.append(f"AI 痕迹·拟人化褒义喻体 {v} 处（R=7.3，带褒义 12.6）："
-                          f"「像一位智慧的导师」这类，改写为具体动作或感官")
-            elif k == "对举结构(不是A而是B)" and v >= 3:
-                p1.append(f"AI 痕迹·对举结构「不是A而是B」{v} 处（R=3.4，上限 2）——"
-                          f"这是命中率最高的 AI 指纹之一")
-            elif k == "冒号-提示语引出内容" and v >= 2:
-                p1.append(f"AI 痕迹·冒号提示语 {v} 处（R=3.8）：「他解释道：」"
-                          f"用提示语代替了动作锚定，改成 ≤7 字身体动作")
-            elif k == "起首语(说白了)" and v >= 2:
-                p1.append(f"AI 痕迹·起首语 {v} 处（R=3.2）：「说白了」「也就是说」——直接说，不用预告")
-            elif k == "序数词当小标题" and v >= 2:
-                p1.append(f"AI 痕迹·序数词当小标题 {v} 处（R=3.1）：正文里出现「第一」「首先」当段落序号")
-            elif k == "相邻句结构同构" and v >= 4:
-                p1.append(f"AI 痕迹·相邻句结构同构 {v} 处（R=2.0）：连续两句逗号数相同且长度接近——"
-                          f"打乱句法骨架，别让节奏变成等距")
-            elif k.startswith("译文-") and v >= 2:
-                p1.append(f"AI 痕迹·{k} {v} 处（R=2.6-5.3）：译文腔，改成中文自然语序")
-
-    # burstiness/材料密度指标（基于 lieflat 283 万字人机对照实证）
-    burst = _burstiness_stats(text)
-    stats["burstiness"] = burst
-    q_d = burst["question_density"]
-    cv = burst["sentence_cv"]
-    ct = burst["char_type_density"]
-    cm = burst["comma_density"]
-    num_d = burst["number_density"]
-    t_d = burst["time_anchor_density"]
-    za = burst["zero_anaphora_hits"]
-    ps = burst["personified_simile"]
-    # 问号密度 < 2/千字 P0（R=0.05，人机差 17 倍，区分力最强），< 5 P1
-    if q_d < 2.0:
-        p0.append(f"问号密度过低：{q_d:.1f}/千字（< 2，人类稿是 AI 的 17 倍，请加入内心反问/对白问句/不确定自问）")
-    elif q_d < 5.0:
-        p1.append(f"问号偏少：{q_d:.1f}/千字（建议 5-8，加入内心反问/对白问句）")
-    elif q_d > 15.0:
-        p1.append(f"问号过密：{q_d:.1f}/千字（建议 5-8，过多像审讯）")
-    # 句长 CV —— 撤回 P0（lieflat 实证 R=0.87 人机差异不显著），< 0.2 才给 P1 提示
-    if cv < 0.2:
-        p1.append(f"句长极度均匀：CV={cv:.2f}（< 0.2，建议在情绪转折点砍 2-5 字极短句打断，但不要为变速而变速）")
-    elif cv < 0.4:
-        pass  # 不提示，避免误伤（0.4-0.7 都在人机重叠区）
-    # 字种密度 < 0.25 P0（套话堆砌），< 0.35 P1
-    if ct < 0.25:
-        p0.append(f"字种密度过低：{ct:.2f}（< 0.25，套话/高频重复词堆砌，请用具体名词动词替换）")
-    elif ct < 0.35:
-        p1.append(f"字种偏低：{ct:.2f}（建议 > 0.35，增加具体名词/动词，减少套话）")
-    # 逗号密度
-    if cm < 25:
-        p1.append(f"逗号偏少：{cm:.1f}/千字（可能短句过少或无停顿）")
-    elif cm > 100:
-        p1.append(f"逗号过密：{cm:.1f}/千字（可能长句连写，请适当断句）")
-    # 数字密度 < 2/千字 P1（人类 17.9 vs AI 6.3，R=2.8×）
-    if num_d < 2.0:
-        p1.append(f"具体数字偏少：{num_d:.1f}/千字（建议 ≥ 2，加入房号/时间/价格/年龄/楼层/次数等具体数字，避免「很久/不少」等模糊词）")
-    # 时间锚点密度 < 1/千字 P1（人类是 AI 的 2.6 倍）
-    if t_d < 1.0:
-        p1.append(f"时间锚点偏少：{t_d:.1f}/千字（建议 ≥ 1，加入三点钟/第二天/上周/分钟/秒等具体时间词）")
-    # 拟人化褒义喻体（像一位智慧的导师）命中即 P1（R=12.6× AI 重灾区）
-    if ps > 0:
-        p1.append(f"拟人化褒义喻体 {ps} 处（AI 高频特征，改写为具体动作/感官描写）")
-    # 段首零回指命中（postprocess 已自动修复；残留 > 2 处提示）
-    if za > 2:
-        p1.append(f"段首零回指评论 {za} 处（已自动补'但'字衔接，建议下次写时直接带回指）")
-
-    # 块间接缝（与 prev_tail 衔接）：首句用空泛过渡词强行衔接 = 接缝断裂信号
-    if prev_tail:
-        first_sent = re.split(r"[。！？!?\n]", text.lstrip(), maxsplit=1)[0].strip()
-        _SEAM_BAD_STARTS = re.compile(
-            r"^(与此同时|话音刚落|话音未落|就在这时|就在这一刻|霎时间|刹那间|下一秒|紧接着|随后)"
-        )
-        if _SEAM_BAD_STARTS.match(first_sent):
-            p1.append(f"块间接缝：本段以空泛过渡词「{first_sent[:10]}…」开头，建议改为动作/物件/时间锚点承接上一段")
-
-    # 机械冗余（圆桌：唯一可以自动改的情况——同段内同词重复，笔误级，无需审美判断）
-    from app.generation.lexicon import mechanical_redundancy
-    _redundant = mechanical_redundancy(text)
-    if _redundant:
-        stats["mechanical_redundancy"] = _redundant
-        _red_desc = "、".join(
-            f"「{r['term']}」第{r['para'] + 1}段出现{r['count']}次"
-            for r in _redundant[:6])
-        p1.append(f"机械冗余：同一段内重复用词 {_red_desc}——同一段里同一个表达出现两次以上属于笔误级冗余，请改掉其中一处")
-
-    # 节奏门禁：段长阶梯 + 单句段瀑布
-    # 依据 xt-webnovel-writing K/C 条款：句长均匀度人机无差异（R=0.87），
-    # 「拆短句制造节奏」是错的去味手段；真正的匀速机感来自「全章没有长段」。
-    _rhythm = _rhythm_metrics(text)
-    stats["rhythm"] = _rhythm
-    if _rhythm["段落数"] >= 8:
-        if _rhythm["长段数(>80字)"] < 3:
+    # 章细纲格式门禁（仅 plot 层）：必须是编号场景块，不能是散文。
+    # 同时：plot 是结构化编号块，短句/低问号/低逗号是格式特性而非质量问题，
+    # 所以正文专属的节奏/密度/burstiness 检查对 plot 层全部跳过。
+    is_outline = (stage == "plot")
+    if is_outline:
+        import re as _re
+        _scenes = _re.findall(r"第\s*\d+\s*场", text)
+        _blocks = _re.findall(r"^\s*[-·*]\s*(?:场景|微观目标|阻力|信息差|关键对白|关键动作|感官锚点|情绪四拍|落点|POV)\s*[：:]", text, _re.M)
+        stats["outline_format"] = {"scenes": len(_scenes), "fields": len(_blocks)}
+        if len(_scenes) < 3:
             p0.append(
-                f"节奏回滚级：全章只有 {_rhythm['长段数(>80字)']} 个 >80 字的长段（要求 ≥3，其中至少 1 段 >120 字）。"
-                f"全是中短段拼起来的匀速机感——请补写承担描写/心理/环境的长段，"
-                f"不要靠拆短句制造节奏（句长均匀度人机无差异，拆短句无效）"
+                f"章细纲格式错误：只识别到 {len(_scenes)} 个「第N场」标记（至少 3 个）。"
+                f"章细纲必须是编号场景块（每场含 场景/微观目标/阻力/关键对白/关键动作/落点 等字段），"
+                f"**不能写成连续散文或正文**——你输出的是细纲，不是正文。"
+                f"格式：第1场：<场名>\\n- 场景：…\\n- 微观目标：…\\n- 阻力：…\\n- 关键对白：「…」\\n- 关键动作：A→B→C\\n- 落点：…"
             )
-        elif _rhythm["超长段数(>120字)"] == 0:
+        elif len(_blocks) < len(_scenes) * 4:
             p1.append(
-                f"节奏：{_rhythm['长段数(>80字)']} 个长段但没有 >120 字的（建议至少 1 段），"
-                f"长段要真正承担描写/心理/环境，不是拉长句子"
+                f"章细纲字段不全：{len(_scenes)} 个场景只有 {len(_blocks)} 个字段"
+                f"（建议每场 ≥6 个：场景/微观目标/阻力/信息差/关键对白/关键动作/感官锚点/情绪四拍/落点）"
             )
-        if _rhythm["最长连续单句段"] >= 6:
-            p0.append(
-                f"节奏回滚级：连续 {_rhythm['最长连续单句段']} 段单句成段（上限 3，≥6 是典型 AI 瀑布体）。"
-                f"把其中至少一半并入相邻段——单句成段必须有显式理由（情绪顶点/打断/转场锚点/对话重击）"
+        # 细纲只做格式 + 字数校验，正文质量门禁不适用
+        if len(_scenes) >= 3:
+            if chars < 900:
+                p1.append(f"章细纲过短：{chars} 字（建议 1200-1900，字段写不全正文就没东西写）")
+            elif chars > 2600:
+                p1.append(
+                    f"章细纲过长：{chars} 字（上限 2600）——"
+                    f"**这通常意味着你在写正文而不是细纲**。细纲是编号块，每场 6-10 行。"
+                    f"如果你觉得内容写不下，说明该拆成更多场而不是写得更长"
+                )
+
+    # ---- 以下全部是正文层专属检查，plot（章细纲）不适用 ----
+    if not is_outline:
+        # 章首入场模板池（xt A 条款）：连续同模板 = AI 味（仅正文层）
+        tmpl_name, tmpl_ev = _detect_opening_template(text)
+        if tmpl_name:
+            stats["opening_template"] = {"name": tmpl_name, "evidence": tmpl_ev}
+            if tmpl_name == "醒来开头":
+                p1.append(
+                    f"章首入场模板：识别为「醒来开头」（{tmpl_ev[:20]}…）。"
+                    f"这是最典型的 AI 开场——近 10 章「醒来开头」≥4 即 FAIL。"
+                    f"换一个入场方式：从动作中途开始、从对话开始、从某个具体物件开始，"
+                    f"或直接跳到最有戏的那一刻"
+                )
+            else:
+                p1.append(
+                    f"章首入场模板：识别为「{tmpl_name}」（{tmpl_ev[:20]}…）。"
+                    f"注意不要连续多章用同一种入场模板"
+                )
+
+        # lieflat 11 项 AI 痕迹检测（283 万字人机对照实证，R = 生成 ÷ 人类）
+        lieflat = _lieflat_ai_signals(text)
+        if lieflat:
+            stats["lieflat"] = lieflat
+            per_k_lf = {k: round(v * 1000 / max(chars, 1), 2) for k, v in lieflat.items()}
+            stats["lieflat_per_k"] = per_k_lf
+            # 回滚级：R≥7 的强区分项
+            for k, v in lieflat.items():
+                if k == "冒号-空转句引列表" and v >= 2:
+                    p0.append(f"AI 痕迹回滚级·冒号空转句引列表 {v} 处（R=9.4）：「我见过的几种典型场景：」"
+                              f"这种总起句是 AI 强指纹——直接给内容，不要预告")
+                elif k == "拟人化褒义喻体" and v >= 1:
+                    p1.append(f"AI 痕迹·拟人化褒义喻体 {v} 处（R=7.3，带褒义 12.6）："
+                              f"「像一位智慧的导师」这类，改写为具体动作或感官")
+                elif k == "对举结构(不是A而是B)" and v >= 3:
+                    p1.append(f"AI 痕迹·对举结构「不是A而是B」{v} 处（R=3.4，上限 2）——"
+                              f"这是命中率最高的 AI 指纹之一")
+                elif k == "冒号-提示语引出内容" and v >= 2:
+                    p1.append(f"AI 痕迹·冒号提示语 {v} 处（R=3.8）：「他解释道：」"
+                              f"用提示语代替了动作锚定，改成 ≤7 字身体动作")
+                elif k == "起首语(说白了)" and v >= 2:
+                    p1.append(f"AI 痕迹·起首语 {v} 处（R=3.2）：「说白了」「也就是说」——直接说，不用预告")
+                elif k == "序数词当小标题" and v >= 2:
+                    p1.append(f"AI 痕迹·序数词当小标题 {v} 处（R=3.1）：正文里出现「第一」「首先」当段落序号")
+                elif k == "相邻句结构同构" and v >= 4:
+                    p1.append(f"AI 痕迹·相邻句结构同构 {v} 处（R=2.0）：连续两句逗号数相同且长度接近——"
+                              f"打乱句法骨架，别让节奏变成等距")
+                elif k.startswith("译文-") and v >= 2:
+                    p1.append(f"AI 痕迹·{k} {v} 处（R=2.6-5.3）：译文腔，改成中文自然语序")
+
+        # burstiness/材料密度指标（基于 lieflat 283 万字人机对照实证）
+        burst = _burstiness_stats(text)
+        stats["burstiness"] = burst
+        q_d = burst["question_density"]
+        cv = burst["sentence_cv"]
+        ct = burst["char_type_density"]
+        cm = burst["comma_density"]
+        num_d = burst["number_density"]
+        t_d = burst["time_anchor_density"]
+        za = burst["zero_anaphora_hits"]
+        ps = burst["personified_simile"]
+        # 问号密度 < 2/千字 P0（R=0.05，人机差 17 倍，区分力最强），< 5 P1
+        if q_d < 2.0:
+            p0.append(f"问号密度过低：{q_d:.1f}/千字（< 2，人类稿是 AI 的 17 倍，请加入内心反问/对白问句/不确定自问）")
+        elif q_d < 5.0:
+            p1.append(f"问号偏少：{q_d:.1f}/千字（建议 5-8，加入内心反问/对白问句）")
+        elif q_d > 15.0:
+            p1.append(f"问号过密：{q_d:.1f}/千字（建议 5-8，过多像审讯）")
+        # 句长 CV —— 撤回 P0（lieflat 实证 R=0.87 人机差异不显著），< 0.2 才给 P1 提示
+        if cv < 0.2:
+            p1.append(f"句长极度均匀：CV={cv:.2f}（< 0.2，建议在情绪转折点砍 2-5 字极短句打断，但不要为变速而变速）")
+        elif cv < 0.4:
+            pass  # 不提示，避免误伤（0.4-0.7 都在人机重叠区）
+        # 字种密度 < 0.25 P0（套话堆砌），< 0.35 P1
+        if ct < 0.25:
+            p0.append(f"字种密度过低：{ct:.2f}（< 0.25，套话/高频重复词堆砌，请用具体名词动词替换）")
+        elif ct < 0.35:
+            p1.append(f"字种偏低：{ct:.2f}（建议 > 0.35，增加具体名词/动词，减少套话）")
+        # 逗号密度
+        if cm < 25:
+            p1.append(f"逗号偏少：{cm:.1f}/千字（可能短句过少或无停顿）")
+        elif cm > 100:
+            p1.append(f"逗号过密：{cm:.1f}/千字（可能长句连写，请适当断句）")
+        # 数字密度 < 2/千字 P1（人类 17.9 vs AI 6.3，R=2.8×）
+        if num_d < 2.0:
+            p1.append(f"具体数字偏少：{num_d:.1f}/千字（建议 ≥ 2，加入房号/时间/价格/年龄/楼层/次数等具体数字，避免「很久/不少」等模糊词）")
+        # 时间锚点密度 < 1/千字 P1（人类是 AI 的 2.6 倍）
+        if t_d < 1.0:
+            p1.append(f"时间锚点偏少：{t_d:.1f}/千字（建议 ≥ 1，加入三点钟/第二天/上周/分钟/秒等具体时间词）")
+        # 拟人化褒义喻体（像一位智慧的导师）命中即 P1（R=12.6× AI 重灾区）
+        if ps > 0:
+            p1.append(f"拟人化褒义喻体 {ps} 处（AI 高频特征，改写为具体动作/感官描写）")
+        # 段首零回指命中（postprocess 已自动修复；残留 > 2 处提示）
+        if za > 2:
+            p1.append(f"段首零回指评论 {za} 处（已自动补'但'字衔接，建议下次写时直接带回指）")
+
+        # 块间接缝（与 prev_tail 衔接）：首句用空泛过渡词强行衔接 = 接缝断裂信号
+        if prev_tail:
+            first_sent = re.split(r"[。！？!?\n]", text.lstrip(), maxsplit=1)[0].strip()
+            _SEAM_BAD_STARTS = re.compile(
+                r"^(与此同时|话音刚落|话音未落|就在这时|就在这一刻|霎时间|刹那间|下一秒|紧接着|随后)"
             )
-        elif _rhythm["单句成段占比"] > 50:
-            p1.append(
-                f"节奏：单句成段占比 {_rhythm['单句成段占比']}%（上限 30%），全章像流水账"
-            )
-        if _rhythm["动作收尾占比"] < 8:
-            p1.append(
-                f"活人节奏：动作收尾段仅 {_rhythm['动作收尾占比']}%（建议 ≥10%）"
-                f"——段尾爱落在抽象总结，改为落在具体动作/物件/短句"
-            )
+            if _SEAM_BAD_STARTS.match(first_sent):
+                p1.append(f"块间接缝：本段以空泛过渡词「{first_sent[:10]}…」开头，建议改为动作/物件/时间锚点承接上一段")
+
+        # 机械冗余（圆桌：唯一可以自动改的情况——同段内同词重复，笔误级，无需审美判断）
+        from app.generation.lexicon import mechanical_redundancy
+        _redundant = mechanical_redundancy(text)
+        if _redundant:
+            stats["mechanical_redundancy"] = _redundant
+            _red_desc = "、".join(
+                f"「{r['term']}」第{r['para'] + 1}段出现{r['count']}次"
+                for r in _redundant[:6])
+            p1.append(f"机械冗余：同一段内重复用词 {_red_desc}——同一段里同一个表达出现两次以上属于笔误级冗余，请改掉其中一处")
+
+
+        # 节奏门禁：段长阶梯 + 单句段瀑布
+        # 依据 xt-webnovel-writing K/C 条款：句长均匀度人机无差异（R=0.87），
+        # 「拆短句制造节奏」是错的去味手段；真正的匀速机感来自「全章没有长段」。
+        _rhythm = _rhythm_metrics(text)
+        stats["rhythm"] = _rhythm
+        if _rhythm["段落数"] >= 8:
+            if _rhythm["长段数(>80字)"] < 3:
+                p0.append(
+                    f"节奏回滚级：全章只有 {_rhythm['长段数(>80字)']} 个 >80 字的长段（要求 ≥3，其中至少 1 段 >120 字）。"
+                    f"全是中短段拼起来的匀速机感——请补写承担描写/心理/环境的长段，"
+                    f"不要靠拆短句制造节奏（句长均匀度人机无差异，拆短句无效）"
+                )
+            elif _rhythm["超长段数(>120字)"] == 0:
+                p1.append(
+                    f"节奏：{_rhythm['长段数(>80字)']} 个长段但没有 >120 字的（建议至少 1 段），"
+                    f"长段要真正承担描写/心理/环境，不是拉长句子"
+                )
+            if _rhythm["最长连续单句段"] >= 6:
+                p0.append(
+                    f"节奏回滚级：连续 {_rhythm['最长连续单句段']} 段单句成段（上限 3，≥6 是典型 AI 瀑布体）。"
+                    f"把其中至少一半并入相邻段——单句成段必须有显式理由（情绪顶点/打断/转场锚点/对话重击）"
+                )
+            elif _rhythm["单句成段占比"] > 50:
+                p1.append(
+                    f"节奏：单句成段占比 {_rhythm['单句成段占比']}%（上限 30%），全章像流水账"
+                )
+            if _rhythm["动作收尾占比"] < 8:
+                p1.append(
+                    f"活人节奏：动作收尾段仅 {_rhythm['动作收尾占比']}%（建议 ≥10%）"
+                    f"——段尾爱落在抽象总结，改为落在具体动作/物件/短句"
+                )
 
     return HardGateResult(p0=p0, p1=p1, stats=stats)
 
