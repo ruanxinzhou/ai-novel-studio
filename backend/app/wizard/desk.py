@@ -987,7 +987,12 @@ def finalize_chapter(
     auto_entities: bool = True,
     payoff: str | None = None,
 ) -> dict:
-    """定稿 + 保鲜飞轮：实体抽取、伏笔兑现问询、标记核验、整本合成采纳。
+    """定稿 + 保鲜飞轮：实体核对、伏笔兑现问询、标记核验、整本合成采纳。
+
+    注意：实体库的主入口**不在这里**。副本卷创作链路里（节奏蓝图 finalize /
+    方向卡 select）就已经把本章实体落库了，所以每章写作时能注入到角色卡。
+    这里的抽取降级为「核对/补漏」——只补前置落库漏掉的，正文里已声明的
+    不会重复创建，也不会覆盖作者改过的档案。
 
     payoff：定稿时顺手点选的兑现规模四选一（none/small/medium/climax），
     供开章核对单的节奏位置与审稿的节奏饥饿检查消费。"""
@@ -1001,10 +1006,19 @@ def finalize_chapter(
     entities_report: dict | None = None
     foreshadow_report: dict | None = None
     if auto_entities and entity_store is not None:
+        # 先记下落库前已有的实体，抽取结果只当作「补漏」来报告
+        before = {e.name for e in entity_store.list(type="character")}
+        before |= {e.name for e in entity_store.list(type="location")}
+        before |= {e.name for e in entity_store.list(type="item")}
+        before |= {e.name for e in entity_store.list(type="foreshadow")}
         try:
             r = extract_entities(provider, entity_store, prompt_store, text, chapter=chapter)
-            entities_report = {"created": r.created, "updated": r.updated,
-                               "dropped": len(r.dropped), "attempts": r.attempts}
+            entities_report = {
+                "created": r.created, "updated": r.updated,
+                "dropped": len(r.dropped), "attempts": r.attempts,
+                "note": "定稿抽取仅作核对补漏；主要来源是副本卷前置落库",
+                "new_names": sorted({str(e.get("name", "")) for e in r.created} - before),
+            }
         except Exception as e:   # 飞轮失败不阻断定稿
             entities_report = {"error": str(e)[:300]}
         try:

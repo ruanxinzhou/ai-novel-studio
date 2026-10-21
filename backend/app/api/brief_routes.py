@@ -73,6 +73,7 @@ class _Deps:
     volumes_for: Callable[[str], Any]
     desk_for: Callable[[str], Any]
     chore_provider: Callable
+    entities_for: Callable[[str], Any] | None = None
 
 
 _deps: _Deps | None = None
@@ -85,6 +86,7 @@ def register_brief_routes(
     volumes_for: Callable[[str], Any],
     desk_for: Callable[[str], Any],
     chore_provider: Callable,
+    entities_for: Callable[[str], Any] | None = None,
 ) -> None:
     global _deps
     _deps = _Deps(
@@ -92,6 +94,7 @@ def register_brief_routes(
         volumes_for=volumes_for,
         desk_for=desk_for,
         chore_provider=chore_provider,
+        entities_for=entities_for,
     )
 
     router = APIRouter(tags=["brief"])
@@ -570,7 +573,23 @@ def _brief_select(
     if not work.title:
         work.title = f"第{cno}章 {selected.get('title') or ''}".strip()
     desk._flush()
-    return {"ok": True, "brief": work.brief, "chapter_no": cno}
+
+    # ---- 实体库章级同步 ----
+    # 方向卡锁定 = 本章内容已定稿，此时把本章声明的实体/伏笔落库，
+    # 这样紧接着的章细纲与正文生成就能注入到本章角色卡与伏笔状态。
+    seed = None
+    if deps.entities_for is not None:
+        try:
+            from ..entities.vault_plan import sync_from_brief
+            seed = sync_from_brief(deps.entities_for(pid), work, cno)
+        except Exception as e:  # 落库失败不阻塞主线
+            log.warning("章级实体同步失败（第%s章）：%s", cno, e)
+            seed = None
+
+    resp = {"ok": True, "brief": work.brief, "chapter_no": cno}
+    if seed is not None:
+        resp["entity_seed"] = seed.as_dict()
+    return resp
 
 
 def _brief_advance(

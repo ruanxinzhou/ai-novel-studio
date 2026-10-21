@@ -13,6 +13,7 @@ M1 新增：
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
@@ -132,20 +133,52 @@ class Voiceprint:
         if self.is_empty():
             return ""
         head = f"· {name}：" if name else ""
+
+        def _j(items: list[str]) -> str:
+            # 作者可能给动作加「（出：…）」出处注释。注入是给模型读的，出处是给人看的。
+            # 只剥**明确以「出:」开头**的括注——「短促的一声叫（催促）」这种是动作本身的
+            # 补充说明，不能剥。
+            cleaned: list[str] = []
+            for x in items:
+                m = re.search(r"[（(]\s*出\s*[:：]", x)
+                if m:
+                    # 只在真的切掉了内容时才收尾括号；否则可能误伤动作自带的括注
+                    x = x[:m.start()].rstrip().rstrip("，、").rstrip("）)").rstrip()
+                else:
+                    x = x.strip().strip("，、").strip()
+                if x:
+                    cleaned.append(x)
+            # 先剥后去重：子串级去重必须放在全部剥完之后，否则「A，B」与「B」
+            # 谁先谁后会影响结果，留下碎片。
+            out: list[str] = []
+            for x in cleaned:
+                norm = x.replace(" ", "")
+                if any(c.replace(" ", "") in norm for c in out):
+                    continue
+                out.append(x)
+            # 再反向清一次：某项被更长的项包含时删掉短项
+            final: list[str] = []
+            for i, x in enumerate(out):
+                nx = x.replace(" ", "")
+                if any(j != i and nx in o.replace(" ", "") for j, o in enumerate(out)):
+                    continue
+                final.append(x)
+            return "、".join(final)
+
         parts: list[str] = []
         if self.habits:
-            parts.append(f"习惯动作 {'、'.join(self.habits)}")
+            parts.append(f"习惯动作 {_j(self.habits)}")
         if self.catchphrases:
-            parts.append(f"口癖 {'、'.join(self.catchphrases)}")
+            parts.append(f"口癖 {_j(self.catchphrases)}")
         if self.dialect:
-            parts.append(f"口音 {'、'.join(self.dialect)}")
+            parts.append(f"口音 {_j(self.dialect)}")
         for key, label in (("register", "语气"), ("psychology", "心理"),
                            ("silence", "沉默"), ("speech_pattern", "说话方式")):
             v = getattr(self, key)
             if v:
                 parts.append(f"{label} {v}")
         if self.taboos:
-            parts.append(f"绝不会说 {'、'.join(self.taboos)}")
+            parts.append(f"绝不会说 {_j(self.taboos)}")
         return head + "；".join(parts)
 
     @classmethod

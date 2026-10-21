@@ -1100,6 +1100,74 @@ def entities_update(pid: str, eid: str, body: EntityUpdateIn) -> dict:
         raise HTTPException(status_code=404 if "不存在" in str(ex) else 422, detail=str(ex))
 
 
+# ---- 实体库前置落库 / 审查预警 ----
+# 副本卷创作链路：选副本 → 详设6卡 → 节奏蓝图 → 方向卡 → 章细纲 → 正文。
+# 实体库在「节奏蓝图 finalize」和「方向卡 select」两个时机就已落库，
+# 让每一章写作时都能注入到本章角色卡/伏笔状态；定稿后的抽取只作核对补漏。
+
+
+class VaultSeedIn(BaseModel):
+    vol_no: int
+    chapter: int | None = None
+
+
+class UnknownCharIn(BaseModel):
+    text: str | None = None          # 直接传正文；不传则扫 desk 已写正文
+    chapter: int | None = None
+    create: bool = False             # true=直接建档（空档案），false=只预警
+
+
+@app.post("/api/projects/{pid}/vault/seed")
+def vault_seed(pid: str, body: VaultSeedIn) -> dict:
+    """手动触发卷级/章级实体落库（补漏用；正常流程已在 rhythm/brief 里自动跑）。"""
+    _require_project(pid)
+    from ..entities.vault_plan import seed_from_volume_plan, sync_from_brief
+    vols = _volumes_for(pid)
+    vol = vols.get(body.vol_no)
+    if vol is None:
+        raise HTTPException(status_code=404, detail=f"卷 {body.vol_no} 不存在")
+    store = _entities_for(pid)
+    merged = seed_from_volume_plan(store, vol,
+                                   start_chapter_no=int(getattr(vol, "start_chapter_no", 1) or 1))
+    if body.chapter is not None:
+        desk = _desk_for(pid)
+        merged.merge(sync_from_brief(store, desk.ensure(body.chapter), body.chapter))
+    return {"ok": True, "vol_no": body.vol_no, "entity_seed": merged.as_dict()}
+
+
+@app.post("/api/projects/{pid}/vault/unknown-characters")
+def vault_unknown_characters(pid: str, body: UnknownCharIn) -> dict:
+    """审查预警：扫正文找实体库里没有的角色，提醒作者建档。
+
+    蓝星主线不经过副本卷创作，实体天然缺一批——这个端点就是那条兜底路径。
+    """
+    _require_project(pid)
+    from ..entities.vault_plan import find_unknown_characters, seed_unknown_characters
+    store = _entities_for(pid)
+    text = (body.text or "").strip()
+    if not text:
+        desk = _desk_for(pid)
+        parts: list[str] = []
+        for no in sorted(desk.all_nos()):
+            if body.chapter is not None and no != body.chapter:
+                continue
+            for stage in ("polish", "draft"):
+                t = work_text(desk.get(no), stage)
+                if t:
+                    parts.append(t)
+                    break
+        text = "\n".join(parts)
+    if not text:
+        return {"ok": True, "unknown": [], "created": [], "scanned_chars": 0}
+    unknown = find_unknown_characters(store, text)
+    created: list[dict] = []
+    if body.create and unknown:
+        res = seed_unknown_characters(store, unknown, body.chapter)
+        created = res.created
+    return {"ok": True, "unknown": unknown, "created": created,
+            "scanned_chars": len(text)}
+
+
 # ---- 角色声音档案（voiceprint）----
 # 角色的习惯动作/口癖/口音是「这个角色是谁」的一部分，所以存实体库跟人走，
 # 不写死在 style_dna.md 或任何 prompt 里。主角走 PROTAGONIST_ID，同一套接口。
@@ -4622,6 +4690,7 @@ register_brief_routes(
     volumes_for=_volumes_for,
     desk_for=_desk_for,
     chore_provider=_chore_provider,
+    entities_for=_entities_for,
 )
 
 # ============================================================
@@ -4699,6 +4768,7 @@ register_rhythm_routes(
     volumes_for=_volumes_for,
     desk_for=_desk_for,
     chore_provider=_chore_provider,
+    entities_for=_entities_for,
 )
 from .chat_routes import register as register_chat_routes
 register_chat_routes(app, get_router)

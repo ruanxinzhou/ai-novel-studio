@@ -109,6 +109,7 @@ class _Deps:
     volumes_for: Callable
     desk_for: Callable
     chore_provider: Callable
+    entities_for: Callable | None = None
 
 
 class _AnalyzeIn(BaseModel):
@@ -351,12 +352,14 @@ def register_rhythm_routes(
     volumes_for: Callable,
     desk_for: Callable,
     chore_provider: Callable,
+    entities_for: Callable | None = None,
 ) -> None:
     deps = _Deps(
         require_project=require_project,
         volumes_for=volumes_for,
         desk_for=desk_for,
         chore_provider=chore_provider,
+        entities_for=entities_for,
     )
     router = APIRouter(tags=["rhythm"])
     prefix = "/api/projects/{pid}/workbench/volumes/{vol_no}/rhythm"
@@ -594,8 +597,26 @@ def register_rhythm_routes(
             desk._flush()
 
         vol = vols.get(vol_no)
-        return {"ok": True, "stage_completed": vol.stage_completed,
+        # ---- 实体库前置落库 ----
+        # 节奏骨架已锁定，本卷将出场的角色/地点/道具/伏笔此时已经全部可推导，
+        # 必须在这里进实体库，否则每章写作时注入的实体账本都是空的。
+        seed = None
+        if deps.entities_for is not None:
+            try:
+                from ..entities.vault_plan import seed_from_volume_plan
+                seed = seed_from_volume_plan(
+                    deps.entities_for(pid), vol,
+                    start_chapter_no=int(getattr(vol, "start_chapter_no", 1) or 1),
+                )
+            except Exception as e:  # 落库失败不阻塞主线
+                log.warning("卷级实体预落库失败：%s", e)
+                seed = None
+
+        resp = {"ok": True, "stage_completed": vol.stage_completed,
                 "volume": vol.as_dict(), "chapters_created": created}
+        if seed is not None:
+            resp["entity_seed"] = seed.as_dict()
+        return resp
 
     # ----- GET /rhythm/ -----
     def _rhythm_get(pid: str, vol_no: int):
