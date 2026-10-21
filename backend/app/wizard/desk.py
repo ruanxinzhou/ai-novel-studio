@@ -296,6 +296,84 @@ def _projects_root():
         return Path(__file__).resolve().parents[2] / "data" / "projects"
 
 
+def _load_style_dna(pid: str) -> Material | None:
+    """加载本书文风卡，抽取「优先级裁决 + 十维摘要 + 不可写清单」注入 prompt。
+
+    只注入决策相关的部分，不注入全文（style_dna.md 可能很长，全注入会挤占注意力预算）。
+    注入位置在 materials[0]——REQUIRED 家族，优先级高于其他材料。
+    """
+    p = _projects_root() / pid / "style_dna.md"
+    if not p.exists():
+        return None
+    try:
+        raw = p.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    import re as _re
+
+    def _table_row(line: str) -> str:
+        """把 `| 指标 | 目标值 | 说明 |` 压成 `指标：目标值`；表头/分隔行返回空串。"""
+        if not line.startswith("|"):
+            return "\x00"  # 不是表格行
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if not cells or all(set(c) <= set("-: ") for c in cells):
+            return ""
+        if cells[0] in ("指标", "位置", "类别", "字段"):
+            return ""
+        vals = [c for c in cells[1:] if c]
+        if not vals:
+            return ""
+        return f"{cells[0]}：{' / '.join(vals)}"
+
+    dims: list[str] = []
+    taboos: list[str] = []
+    in_dims = False
+    cur_is_taboos = False
+    for raw_line in raw.splitlines():
+        s = raw_line.strip()
+        if s.startswith("# "):
+            in_dims = s.startswith("# 十维规范")
+            cur_is_taboos = False
+            continue
+        if not in_dims:
+            continue
+        if s.startswith("## "):
+            title = s[3:].strip()
+            cur_is_taboos = "行文禁忌" in title
+            # 禁忌整块单独输出，不再重复一个空标题
+            if not cur_is_taboos:
+                dims.append(f"\n【{title}】")
+            continue
+        if s.startswith("|"):
+            row = _table_row(s)
+            if row:
+                dims.append(f"  {row[:130]}")
+            continue
+        if cur_is_taboos and _re.match(r"^\d+[.、]\s*\S", s):
+            taboos.append(s)
+            continue
+        if not s or s.startswith("---") or s.strip("*") == "":
+            continue
+        s = _re.sub(r"\\_", "_", s)  # markdown 转义符不该进 prompt
+        if s.startswith("- "):
+            s = s[2:]
+        dims.append(f"  {s[:130]}")
+
+    body = (
+        "【本书文风卡（最高优先级之一，冲突时听它）】\n"
+        "以下不是通用建议，是这本书真实的写法。与通用去 AI 味规则冲突时，以本卡为准"
+        "（lieflat：蒸馏产物记录的是目标作者的真实写法，不属生成痕迹）。\n"
+        "本卡只管「怎么写」，不管「写什么」——事件/事实/日号/视角纪律仍按章前方向和硬设定。\n"
+        + "\n".join(dims)
+        + "\n\n【本书行文禁忌（违反即打回）】\n"
+        + "\n".join(f"  {x}" for x in taboos[:14])
+        + "\n\n【风格冲突裁决顺序】本次明确要求 > 本书文风卡 > 本书硬设定 > 章前方向 > 通用规则"
+    )
+    return Material(source_id=f"style_dna:{pid}", family=MaterialFamily.REQUIRED,
+                    content=body, title="本书文风卡（风格基准）")
+
+
 def _direction_material(wizard: WizardStore) -> Material | None:
     d = wizard.get()
     if not d.direction.strip():
@@ -842,6 +920,13 @@ def run_chapter_stage(
             if pending:
                 materials.insert(0, markers_material(pending, chapter))
         anchor = previous_tail(desk, chapter)
+
+    # 本书文风卡（style_dna.md）：风格基准，优先级高于通用去 AI 味规则。
+    # 只注入「维度摘要 + 优先级裁决 + 不可写清单」，不注入全文（省 token）。
+    if stage in ("draft", "polish"):
+        _style = _load_style_dna(pid)
+        if _style:
+            materials.insert(0, _style)
 
     # 描写轮换账本（圆桌方案）：生成前把「你已经写过什么」当记忆注入给模型，
     # 措辞是叙事性的（记忆）而非管理性的（禁令）——这是它能起作用的关键。

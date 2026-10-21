@@ -30,6 +30,8 @@ from app.generation.humanize import (
     _SAFE_REPLACES,
     _burstiness_stats,
     _detect_opening_template,
+    _detect_vague_transitions,
+    _detect_idle_time_anchor,
     _lieflat_ai_signals,
     _rhythm_metrics,
     diagnosis_score,
@@ -242,6 +244,37 @@ def hard_gate(
                     f"章首入场模板：识别为「{tmpl_name}」（{tmpl_ev[:20]}…）。"
                     f"注意不要连续多章用同一种入场模板"
                 )
+
+        # 空泛过渡词零容忍（xt Q 条款）：模型不搭桥就拿这类词糊过去
+        _vague = _detect_vague_transitions(text)
+        if _vague:
+            stats["vague_transitions"] = _vague
+            _vtotal = sum(_vague.values())
+            _vdesc = "、".join(f"「{w}」×{n}" for w, n in
+                              sorted(_vague.items(), key=lambda x: -x[1])[:6])
+            if _vtotal >= 3:
+                p0.append(
+                    f"转场回滚级：空泛过渡词 {_vtotal} 处（{_vdesc}）。"
+                    f"**这类词是 AI 转场味的核心指纹**——用它们等于没搭桥。"
+                    f"必须改用五类转场桥：Q1 感官延续 / Q2 物件带过去（用途不同）/ "
+                    f"Q3 对话打断 / Q4 摩擦点（小意外/延迟/错位）/ Q5 情绪错位。"
+                    f"或用「直接标时 + 立刻给后果」的写法"
+                )
+            elif _vtotal >= 1:
+                p1.append(
+                    f"转场：空泛过渡词 {_vtotal} 处（{_vdesc}）——"
+                    f"换成具体的时间锚 + 后果，或用感官/物件桥接上"
+                )
+        _idle_anchor = _detect_idle_time_anchor(text)
+        if _idle_anchor:
+            stats["idle_time_anchor"] = _idle_anchor[:5]
+            _idesc = "、".join(f"「{a['anchor']}」后接{a['tail'][:10]}"
+                              for a in _idle_anchor[:3])
+            p1.append(
+                f"转场空转：时间锚后没有内容（{_idesc}）——"
+                f"标时之后要立刻给具体后果（「第二天我睡到天光大亮。/ 我打开手机，来电有十七通」），"
+                f"不要只标时间不写事情"
+            )
 
         # lieflat 11 项 AI 痕迹检测（283 万字人机对照实证，R = 生成 ÷ 人类）
         lieflat = _lieflat_ai_signals(text)

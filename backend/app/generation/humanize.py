@@ -402,6 +402,50 @@ OPENING_TEMPLATES = {
 }
 
 
+# ============================================================
+# 空泛过渡词零容忍（xt Q 条款禁用词清单）
+# 这些是「AI 转场味」的核心指标——模型不搭桥就拿这类词糊过去。
+# 允许嵌在对话或人物心理活动中（人物自己随口说），但独立使用即计数。
+# ============================================================
+
+VAGUE_TRANSITIONS = [
+    "与此同时", "就在这时", "就在这一刻", "霎时间", "刹那间", "下一秒",
+    "话音刚落", "话音未落", "紧接着", "三天后", "一个星期后", "半个月过去",
+    "转眼间", "时间一晃", "一晃眼", "不多时", "须臾",
+]
+
+# 「第二天」「第二天早上」这类是必要的时间锚，不能一刀切禁用——
+# 只在「标时后 30 字内没有具体内容」时提示（那就是空转）。
+_TIME_ANCHOR_RE = re.compile(r"(第二天|次日|第二天早上|第二天清晨|第三天|第二天夜里|当晚|次日清晨)")
+
+
+def _detect_vague_transitions(text: str) -> dict:
+    """检测空泛过渡词。返回 {'词': 次数}，只统计独立使用（不在引号对话内）。"""
+    if not text:
+        return {}
+    hits: dict[str, int] = {}
+    # 先把对话内容挖掉——人物自己说的「与此同时」不算 AI 转场味
+    stripped = re.sub(r"「[^」]*」", "", text)
+    stripped = re.sub(r"“[^”]*”", "", stripped)
+    for w in VAGUE_TRANSITIONS:
+        n = stripped.count(w)
+        if n:
+            hits[w] = n
+    return hits
+
+
+def _detect_idle_time_anchor(text: str) -> list[dict]:
+    """检测「标时后没有内容」的空转时间锚：'第二天早上，' 之后 30 字内没有实质内容。"""
+    out: list[dict] = []
+    for m in _TIME_ANCHOR_RE.finditer(text):
+        tail = text[m.end():m.end() + 30]
+        # 去掉标点后如果几乎没有实词，说明是空转
+        core = re.sub(r"[，。、：；\s]", "", tail)
+        if len(core) < 4:
+            out.append({"anchor": m.group(0), "tail": tail.strip()})
+    return out
+
+
 def _detect_opening_template(text: str) -> tuple[str, str]:
     """返回 (模板名, 命中的证据片段)。"""
     if not text:
