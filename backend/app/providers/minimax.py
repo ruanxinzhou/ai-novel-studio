@@ -65,9 +65,9 @@ class MiniMaxProvider(Provider):
     name = "minimax"
 
     # 推理模型预留：reasoning_content 会占用 max_tokens 配额，需给正文留出空间。
-    # reasoning_effort=medium 时，长 prompt 下单轮 reasoning 可达 6k~10k tok；
-    # 预留 16k 让它把 reasoning 写完再输出正文，否则会被 length 截断导致空正文。
-    reasoning_reserve_tokens = 16_384
+    # reasoning_effort=high 时，长 prompt 下单轮 reasoning 可达 12k~18k tok；
+    # 预留 24k 让它把 reasoning 写完再输出正文，否则会被 length 截断导致空正文。
+    reasoning_reserve_tokens = 24_576
 
     def __init__(self, api_key: str, base_url: str | None = None,
                  default_model: str = "MiniMax-M3.1-Flash-Preview"):
@@ -91,8 +91,8 @@ class MiniMaxProvider(Provider):
         model = model or self.default_model
         body: dict = {"model": model, "messages": messages, "stream": True,
                       "stream_options": {"include_usage": True},
-                      # 中等推理强度：给足思考空间，但不走 full-max 以免正文被挤占
-                      "reasoning_effort": "medium"}
+                      # 高推理强度：让模型充分铺排情节/伏笔/人物逻辑再落笔正文
+                      "reasoning_effort": "high"}
         # max_tokens 不传时交给 API 模型默认（M3 ≥10K，远优于硬编码 2048 截断）
         if max_tokens:
             body["max_tokens"] = max_tokens
