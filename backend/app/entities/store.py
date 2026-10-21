@@ -1456,9 +1456,18 @@ class EntityStore:
 
     # ---- LLM 抽取回灌（保留旧接口，兼容现有调用） ----
 
-    def merge_extracted(self, found: list[dict], chapter: int | None = None) -> dict:
+    def merge_extracted(self, found: list[dict], chapter: int | None = None,
+                        text: str = "") -> dict:
+        """把抽取结果合并入库。
+
+        定位是**状态更新 + 补漏**（主来源是副本卷创作期的前置落库）：
+        · 库里没有 → 建档（前置落库漏掉的）
+        · 库里已有 → 比对状态声明，有变化就写 StateChange 形成变动链；
+          没变化只补 appearances，不产生变更记录（避免状态日志被噪声淹没）
+        """
         created: list[Entity] = []
         updated: list[Entity] = []
+        state_changes: list[dict] = []
         dropped: list[dict] = []
         for item in found:
             if not isinstance(item, dict):
@@ -1490,14 +1499,33 @@ class EntityStore:
                 existing.appearances.append(chapter)
                 existing.appearances.sort()
                 changed = True
+            # 状态更新：只在「值真的变了」时写 StateChange
+            if etype == "character" and text:
+                for attr, val in _detect_state_hints(text, name):
+                    old = existing.state_attrs.get(attr, "")
+                    if old == val:
+                        continue
+                    ch = StateChange(
+                        id=_new_id(), entity_id=existing.id, attr=attr,
+                        label=ENTITY_ATTRS.get(etype, {}).get(attr, attr),
+                        old_value=old, new_value=val,
+                        cause="定稿正文状态声明", chapter=chapter,
+                        source_kind="extracted", confirmed=True,
+                        created_at=_now(), applied_at=_now(),
+                    )
+                    self.changes[ch.id] = ch
+                    self._apply_change_to_entity(ch)
+                    state_changes.append(ch.as_dict())
+                    changed = True
             if changed:
                 existing.updated_at = _now()
                 updated.append(existing)
-        if created or updated:
+        if created or updated or state_changes:
             self._flush()
         return {
             "created": [e.as_dict() for e in created],
             "updated": [e.as_dict() for e in updated],
+            "state_changes": state_changes,
             "dropped": dropped,
         }
 
@@ -1517,3 +1545,47 @@ def _entity_from_legacy(d: dict) -> dict:
     d.setdefault("state_log", [])
     d["voiceprint"] = Voiceprint.from_dict(d.get("voiceprint")).as_dict()
     return d
+
+
+# ============================================================
+# 定稿抽取用的状态声明识别（模块级：EntityStore.merge_extracted 会调用）
+# ============================================================
+
+# 文本里可能出现的状态关键词 → (attr, 归一化值)
+# 命中的会写成 StateChange，形成可追溯的状态变动链，而不是覆盖式更新。
+_STATE_HINTS: tuple[tuple[str, str], ...] = (
+    ("死亡", "alive", "false"),
+    ("已死", "alive", "false"),
+    ("身亡", "alive", "false"),
+    ("断气", "alive", "false"),
+    ("咽气", "alive", "false"),
+    ("死了", "alive", "false"),
+    ("重伤", "physical_state", "重伤"),
+    ("昏迷", "physical_state", "昏迷"),
+    ("失踪", "physical_state", "失踪"),
+    ("敌意", "attitude_to_tangchi", "敌对"),
+    ("翻脸", "attitude_to_tangchi", "敌对"),
+    ("起了疑心", "suspicion_level", "高"),
+    ("怀疑他", "suspicion_level", "高"),
+)
+
+
+def _detect_state_hints(text: str, name: str) -> list[tuple[str, str]]:
+    """在「角色名附近」的上下文里找状态声明。
+
+    只在名字第一次出现处的前后一小段窗口里找——否则「他死了」会误判到
+    在场所有人身上。找不到就返回空列表（不做猜测）。
+    """
+    if not text or not name:
+        return []
+    out: list[tuple[str, str]] = []
+    for m in re.finditer(re.escape(name), text):
+        window = text[max(0, m.start() - 60): m.end() + 80]
+        for kw, attr, val in _STATE_HINTS:
+            if kw in window:
+                pair = (attr, val)
+                if pair not in out:
+                    out.append(pair)
+        if out:
+            break   # 只取第一次出现处的窗口，避免重复
+    return out

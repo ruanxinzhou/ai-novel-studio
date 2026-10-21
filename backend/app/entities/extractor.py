@@ -27,6 +27,7 @@ class ExtractionResult:
     updated: list[dict] = field(default_factory=list)
     dropped: list[dict] = field(default_factory=list)
     attempts: int = 0
+    state_changes: list[dict] = field(default_factory=list)  # 本章产生的状态变动
 
     @property
     def total(self) -> int:
@@ -41,7 +42,14 @@ def extract_entities(
     chapter: int | None = None,
     model: str | None = None,
 ) -> ExtractionResult:
-    """从一段文本抽取实体并合并入库；chapter 提供时记入出现章节。"""
+    """从一段文本抽取实体并合并入库；chapter 提供时记入出现章节。
+
+    **主来源不是这里**——副本卷创作链路里（节奏蓝图 finalize / 方向卡 select）
+    已经把本章实体落库了。所以这里的定位是「状态更新 + 补漏」：
+    · 库里已有且文本声明了新状态（如 alive=False）→ 写 StateChange
+    · 库里已有但状态没变 → 只补appearances，不产生变更记录
+    · 库里没有 → 建档（这是前置落库漏掉的）
+    """
     text = text.strip()
     if not text:
         raise ValueError("待抽取文本不能为空")
@@ -59,10 +67,11 @@ def extract_entities(
         raise ValueError(f"抽取输出连续 {completion.attempts} 次无法解析为 JSON")
     raw = completion.data.get("entities") if isinstance(completion.data, dict) else None
     found = raw if isinstance(raw, list) else []
-    merged = store.merge_extracted(found, chapter)
+    merged = store.merge_extracted(found, chapter, text=text)
     return ExtractionResult(
         created=merged["created"], updated=merged["updated"],
         dropped=merged["dropped"], attempts=completion.attempts,
+        state_changes=merged.get("state_changes") or [],
     )
 
 

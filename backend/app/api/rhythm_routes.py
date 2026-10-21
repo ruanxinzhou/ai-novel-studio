@@ -75,9 +75,10 @@ _RHYTHM_SYSTEM = """你是一名克苏鲁风格无限流小说的节奏设计师
 - key_beats_progress 长度必须是 7，day=1~7 各一条（唐迟入戏第1-7天），intensity 为 1~7 的整数（7=T-0终极高潮），label 4-8 字；每条必须带 original_timeline_anchor 标注原剧本此刻事件。
 - warnings 是数组，可以为空。每条必须带 type（dearth=真空日，cluster=过载日，front_load=前重后轻，back_load=前轻后重）、day（除 front_load/back_load 外必填）、msg（中文一句话描述问题）。
 - volume_hooks 是必填对象，包含 opening_hook（卷首钩子，30-60字）和 ending_hook（卷尾钩子，30-60字）；opening_hook 要落到 chapter_plan[0] 的 qi（起）开场，ending_hook 要落到 chapter_plan 最后一章的 he（合）收尾。
-- suggested_length：整卷总字数（整数，建议 63000~90000，即 14~20 章 × 4500 字）。
-- suggested_chapter_range：[min, max] 两个整数，14~20 之间，min<=max。
-- chapter_plan：章节分配数组，长度必须在 [min, max] 之间；每章 4000-5000 字，不短于 4000、不超过 5000，推荐 4500。
+- suggested_length：整卷总字数（整数，按你分配的 chapter_plan 累加，建议 63000~90000）。
+- suggested_chapter_range：[min, max] 两个整数，**由节奏意图决定，不设固定下限上限**。短卷可以 6 章，长卷可以 30 章。
+  判断依据是这一卷的节奏意图需要多少章承载——「零死·慢热」可能20 章铺氛围，「高密度·连环倒」可能 8 章就够。
+- chapter_plan：章节分配数组，长度落在 suggested_chapter_range 内；每章 4000-5000 字，不短于 4000、不超过 5000，推荐 4500。
   每章必须包含以下字段，缺一不可：
   * chapter：从 1 开始递增的卷内相对章号（后端自动加全局偏移）；
   * day：1~7，唐迟入戏第几天；

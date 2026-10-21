@@ -396,7 +396,9 @@ def _inject_mainline_context(materials: list, vol, chapter: int, work, entity_st
         lines.append(f"【本章定位】第{chapter}章（全书第{chapter}章）——{title}")
         lines.append("【写作红线】")
         lines.append("- 场景限定在蓝星现代都市（写字楼/出租屋/地铁/便利店/医院/街道等），不许出现任何副本/克苏鲁神明/魂穿宿主/NPC")
-        lines.append("- 主角唐迟：理性、冷静、善归纳、对规则边界敏感的程序员；但禁止出现任何编程职业黑话（debug/Bug/栈/日志/变量/指针/越权/溢出/短路/重定向/死锁/卡bug 等）")
+        lines.append("- 主角唐迟：理性、冷静、善归纳、对规则边界敏感的前端程序员；"
+                    "允许并鼓励他用编程术语消解情绪和恐惧（ROI、日志、上线、回滚、兼容、这波不亏等）——"
+                     "这是他的核心辨识度，不是黑话；但**不成段堆砌**，也不写教学式代码讲解")
         lines.append("- 第1章不许穿越；第2章末才穿越坠落")
 
         # 主角状态（唐迟）
@@ -1015,8 +1017,9 @@ def finalize_chapter(
             r = extract_entities(provider, entity_store, prompt_store, text, chapter=chapter)
             entities_report = {
                 "created": r.created, "updated": r.updated,
+                "state_changes": r.state_changes,
                 "dropped": len(r.dropped), "attempts": r.attempts,
-                "note": "定稿抽取仅作核对补漏；主要来源是副本卷前置落库",
+                "note": "定稿抽取仅作状态更新与补漏；主要来源是副本卷前置落库",
                 "new_names": sorted({str(e.get("name", "")) for e in r.created} - before),
             }
         except Exception as e:   # 飞轮失败不阻断定稿

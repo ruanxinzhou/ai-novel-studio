@@ -227,22 +227,114 @@ def _build_context(vol, directive: str = "") -> str:
     return "\n".join(parts)
 
 
+def _normalize_list_card(raw, fallback_intent: str = "") -> list[dict]:
+    """把 list 类卡的版本值归一化成 [{rhythm_intent, nodes}]。
+
+    模型可能返回两种形状：
+    · 新格式 [{"rhythm_intent": "...", "nodes": [...]}, ...]
+    · 旧格式 [[{...节点}], [{...节点}]]（改prompt 前的历史数据/mock）
+    统一成新格式，并保留 nodes 里的原始节点。
+    节奏意图缺失时给一句兜底说明，不让下游拿不到意图。
+    """
+    out: list[dict] = []
+    if not isinstance(raw, list):
+        return out
+    for i, ver in enumerate(raw):
+        if isinstance(ver, dict) and "nodes" in ver:
+            nodes = ver.get("nodes")
+            out.append({
+                "rhythm_intent": str(ver.get("rhythm_intent") or fallback_intent or "").strip(),
+                "nodes": list(nodes) if isinstance(nodes, list) else [],
+            })
+        elif isinstance(ver, list):
+            out.append({"rhythm_intent": fallback_intent, "nodes": list(ver)})
+        elif ver is None:
+            out.append({"rhythm_intent": fallback_intent, "nodes": []})
+    return out
+
+
+def _nodes_of(version) -> list:
+    """取某一版的节点数组；兼容 dict(新) 与 list(旧) 两种形状。"""
+    if isinstance(version, dict):
+        n = version.get("nodes")
+        return list(n) if isinstance(n, list) else []
+    if isinstance(version, list):
+        return version
+    return []
+
+
+def _intent_of(version) -> str:
+    if isinstance(version, dict):
+        return str(version.get("rhythm_intent") or "").strip()
+    return ""
+
+
 # 单卡重抽/derive：只出 2 版差异化变体（不再一次 18 卡），响应体是 {<card_key>: [v1, v2]}
+#
+# 【节奏意图原则】三版候选必须各自声明一个**节奏意图**，节点数量与分布由该意图推导，
+# 不再套用统一的硬数字（不再要求「必3~5 个死亡」「必2~3 个高潮」「恰好 1 个 weight=3」）。
+# 意图由模型自由发明，无固定模式列表——这是为了让每卷的节奏形状真正不同，
+# 而不是三版只换「谁死、怎么死」。
+#
+# 唯一保留的硬底线：**因果张力不能全丢**。doomed/diverted/escalated 三类
+# 是这本书的差异化内核（先知感 / 改命 / 反噬），但它是**下限参考**而非配额——
+# 允许某版只侧重其中一类（比如「零死」版可以没有 escalated），不允许三类全空。
+_RHYTHM_INTENT_BLOCK = """
+【节奏意图（每版必写，且三版必须彼此不同）】
+每版开头先给出一句节奏意图，说明这一版的**节奏形状**，节点数量与分布由它推导。
+意图由你根据副本类型自由发明，不要套固定模板，但必须具体到「读者感受到什么」，
+不能写「节奏紧张」这种空话。参考方向（不必照抄，可自由创造）：
+  · 零死·代价递进：无人死亡，压力全靠环境/规则/关系侵蚀
+  · 慢热·单点爆破：前半程零死亡，后段集中收割
+  · 高密度·连环倒：每 1-2 天一个节点，中段有一次结构反转
+  · 全程倒叙：从结果倒推，读者先知道结局再看过程
+  · 他人视角推进：主角缺席或昏迷，由 NPC 视角承担叙事
+三版意图不同是硬要求——三版节奏骨架一样就等于没给作者选择。
+"""
+
 _SCAFFOLD_SINGLE_CARD_SYSTEMS: dict[str, str] = {
     "death_nodes": """你是克苏鲁风格生存副本的资深模组设计师。请基于给定的副本上下文，只生成【死亡节点 death_nodes】的 2 个差异显著的候选版本（不要生成其他卡）。
-每版必须是 3~5 个死亡事件数组，每个元素 {day,who,how,tease,cost,fate_layer}，字段语义与 6 卡预填保持一致：doomed=原剧本死劫（唐迟已预见但救不下来）/diverted=唐迟改命成功但付代价/escalated=改命反致更惨，每版三类 fate_layer 必须各至少 1 个。
-严格以 JSON 返回，不输出任何其他文字，不写 Markdown 包裹。返回格式：{"death_nodes": [ [第1版数组], [第2版数组] ]}""",
+每版结构：{"rhythm_intent": "本版节奏意图（一句话，具体到读者感受）", "nodes": [死亡事件数组]}
+nodes 里每个元素 {day,who,how,tease,cost,fate_layer}，字段语义与 6 卡预填保持一致：
+doomed=原剧本死劫（唐迟已预见但救不下来）/diverted=唐迟改命成功但付代价/escalated=改命反致更惨。
+
+【数量不设上限】节点几个由你的节奏意图决定：可以是 0（零死卷）、1（单点爆破）、可以是 8（连环倒）。
+不要为了凑数硬塞，也不要为了显得克制而删到只剩 1 个。
+fate_layer 是**下限参考不是配额**：三类都不允许全空，但允许某一版只侧重其中一两类。
+""" + _RHYTHM_INTENT_BLOCK + """
+严格以 JSON 返回，不输出任何其他文字，不写 Markdown 包裹。返回格式：
+{"death_nodes": [ {"rhythm_intent": "...", "nodes": [...]}, {"rhythm_intent": "...", "nodes": [...]} ]}""",
     "climax_nodes": """你是克苏鲁风格生存副本的资深模组设计师。请基于给定的副本上下文，只生成【高潮/转折 climax_nodes】的 2 个差异显著的候选版本。
-每版 2~3 个节点数组，每个元素 {day,title,beat,weight,fate_layer}，weight=1~3 整数且每版恰好 1 个 weight=3，三类 fate_layer 必须各至少 1 个。
-严格以 JSON 返回：{"climax_nodes": [ [第1版数组], [第2版数组] ]}""",
+每版结构：{"rhythm_intent": "本版节奏意图（一句话）", "nodes": [节点数组]}
+nodes 里每个元素 {day,title,beat,weight,fate_layer}，weight=1~3 整数表示轻重。
+
+【数量与权重不设上限】节点几个、weight 怎么分布，由你的节奏意图决定。
+不再要求「恰好 1 个 weight=3」——如果这一版的重头戏在别处（比如第1天就炸），
+那 weight=3 就该落在第 1 天；也可能整卷只有 1 个高潮，甚至没有 weight=3（用 2 和 1 层层递进）。
+fate_layer 是下限参考不是配额，三类都不允许全空。
+""" + _RHYTHM_INTENT_BLOCK + """
+严格以 JSON 返回：{"climax_nodes": [ {"rhythm_intent": "...", "nodes": [...]}, {"rhythm_intent": "...", "nodes": [...]} ]}""",
     "clue_nodes": """你是克苏鲁风格生存副本的资深模组设计师。请基于给定的副本上下文，只生成【线索与红鲱鱼 clue_nodes】的 2 个差异显著的候选版本。
-每版至少 5 条线索数组，每个元素 {day,where,what,leads_to,is_red_herring}，每版至少 1 条红鲱鱼。
-严格以 JSON 返回：{"clue_nodes": [ [第1版数组], [第2版数组] ]}""",
+每版结构：{"rhythm_intent": "本版节奏意图（一句话，说明这一版线索怎么铺）", "nodes": [线索数组]}
+nodes 里每个元素 {day,where,what,leads_to,is_red_herring}。
+
+【数量不设上限】线索几条由节奏意图决定，可以是 2 条精线索，也可以是 12 条铺满。
+红鲱鱼同理——不是每卷都必须有红鲱鱼；如果这一版的张力来自「线索本身都指向真结论」，
+那就 is_red_herring 全填 false 也是合法的。
+""" + _RHYTHM_INTENT_BLOCK + """
+严格以 JSON 返回：{"clue_nodes": [ {"rhythm_intent": "...", "nodes": [...]}, {"rhythm_intent": "...", "nodes": [...]} ]}""",
     "core_twist": """你是克苏鲁风格生存副本的资深模组设计师。请基于给定的副本上下文，只生成【核心诡计 core_twist】的 2 个差异显著候选（每条 80-120 字）。
 严格以 JSON 返回：{"core_twist": ["第1版文本", "第2版文本"]}""",
     "tangchi_start": """你是克苏鲁风格生存副本的资深模组设计师。请基于给定的副本上下文，只生成【唐迟第一秒 tangchi_start】的 2 个差异显著候选（每条 80-120 字，要有画面感与第一个异常）。
 严格以 JSON 返回：{"tangchi_start": ["第1版文本", "第2版文本"]}""",
-    "cost_cap": """你是克苏鲁风格生存副本的资深模组设计师。请基于给定的副本上下文，只生成【代价上限 cost_cap】的 2 个差异显著候选（每条 80-120 字，要写出唐迟被触碰/突破的底线）。
+    "cost_cap": """你是克苏鲁风格生存副本的资深模组设计师。请基于给定的副本上下文，只生成【代价上限 cost_cap】的 2 个差异显著候选（每条 80-120 字）。
+
+必填，但**不要套固定分类**。不要默认写成「道德底线/存在本身/情感记忆」那三种——
+先判断这一副本的类型是什么，再决定该付出什么代价。代价可以是：
+理智（清醒着却不记得自己是谁）、肉体（某处再也长不好）、关系（某个人的脸记不住了）、
+道德底线（做了自己不接受的事）、资源（时间/寿命/记忆被扣走）、规则（身上被留下不可逆的印记）……
+也可以是这一副本独有的、前面几类都不贴的代价。用一句话写清「他被碰到了什么底线」。
+
 严格以 JSON 返回：{"cost_cap": ["第1版文本", "第2版文本"]}""",
 }
 
@@ -352,9 +444,9 @@ def register_scaffold_routes(
                     log.warning("scaffold LLM 失败，回退 mock：%s", _e)
                     data = _mock_payload()
                 payload = {
-                    "death_nodes": data.get("death_nodes") or [],
-                    "climax_nodes": data.get("climax_nodes") or [],
-                    "clue_nodes": data.get("clue_nodes") or [],
+                    "death_nodes": _normalize_list_card(data.get("death_nodes")),
+                    "climax_nodes": _normalize_list_card(data.get("climax_nodes")),
+                    "clue_nodes": _normalize_list_card(data.get("clue_nodes")),
                     "core_twist": data.get("core_twist") or [],
                     "tangchi_start": data.get("tangchi_start") or [],
                     "cost_cap": data.get("cost_cap") or [],
@@ -366,12 +458,18 @@ def register_scaffold_routes(
             for key in ["core_twist", "tangchi_start", "cost_cap"]:
                 cards[key] = {"variants": payload.get(key) or [], "picked_idx": None, "locked_at": None, "text": None}
             for key in ["death_nodes", "climax_nodes", "clue_nodes"]:
-                cards[key] = {"picked_idx": None, "locked_at": None, "variants": payload.get(key) or []}
+                vers = payload.get(key) or []
+                cards[key] = {
+                    "picked_idx": None, "locked_at": None, "variants": vers,
+                    # 每版的节奏意图单独存一份，前端展示「这一版是什么节奏」
+                    "rhythm_intents": [_intent_of(v) for v in vers],
+                }
+            # 顶层字段存第一版的节点数组（历史兼容：下游按 vol.death_nodes 消费数组）
             vols.update_planning(
                 vol_no,
-                death_nodes=payload.get("death_nodes") or [],
-                climax_nodes=payload.get("climax_nodes") or [],
-                clue_nodes=payload.get("clue_nodes") or [],
+                death_nodes=_nodes_of((payload.get("death_nodes") or [None])[0]),
+                climax_nodes=_nodes_of((payload.get("climax_nodes") or [None])[0]),
+                clue_nodes=_nodes_of((payload.get("clue_nodes") or [None])[0]),
                 pasted_nodes=[],
                 scaffold_cards=cards,
             )
@@ -464,16 +562,30 @@ def register_scaffold_routes(
         now = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
         if card_key in list_keys:
             if body.custom_value is not None and isinstance(body.custom_value, list):
-                selected = body.custom_value
+                # 自编可能是裸节点数组，也可能是 {rhythm_intent, nodes}
+                if (body.custom_value and isinstance(body.custom_value[0], dict)
+                        and "nodes" in body.custom_value[0]):
+                    custom = _normalize_list_card(body.custom_value)
+                    selected = _nodes_of(custom[0]) if custom else []
+                    custom_intent = _intent_of(custom[0]) if custom else ""
+                else:
+                    selected = list(body.custom_value)
+                    custom_intent = ""
+                entry["rhythm_intent"] = custom_intent
             else:
                 all_variants = entry.get("variants") or getattr(vol, card_key, None) or []
                 idx = int(body.pick_index)
                 if idx < 0 or idx >= len(all_variants):
                     raise HTTPException(422, f"版本序号越界：{card_key}[{idx}]")
-                selected = all_variants[idx]
+                ver = all_variants[idx]
+                # 落库存纯节点数组（下游 rhythm/settle/foreshadow 都按数组消费），
+                # 节奏意图单独存进 scaffold_cards 供前端展示与作者回看。
+                selected = _nodes_of(ver)
+                entry["rhythm_intent"] = _intent_of(ver)
             entry["picked_idx"] = body.pick_index if body.custom_value is None else -1
             entry["locked_at"] = now
-            entry["variants"] = entry.get("variants") or selected if body.custom_value is None else entry.get("variants")
+            if body.custom_value is None:
+                entry["variants"] = all_variants
             vols.update_planning(vol_no, **{card_key: selected}, scaffold_cards=cards)
         else:
             if body.custom_value is not None and isinstance(body.custom_value, str):
@@ -558,6 +670,9 @@ def register_scaffold_routes(
             )
 
         payload = {k: (data.get(k) or []) for k in _ALL_KEYS}
+        # 列表卡统一成 {rhythm_intent, nodes} 形状（旧数据会自动包一层空意图）
+        for k in _LIST_KEYS:
+            payload[k] = _normalize_list_card(payload.get(k))
 
         now = _now()
         new_cards: dict = {}
@@ -572,24 +687,25 @@ def register_scaffold_routes(
                 "locked_at": now,
                 "text": vs[0],
             }
-        # 列表卡：vol.death_nodes 等三维数组存所有版；cards[k].variants 存所有版；picked_idx=0 锁 A 版
+        # 列表卡：variants 存 {rhythm_intent, nodes}；顶层字段存 A 版的纯节点数组
         for k in _LIST_KEYS:
             arr = payload.get(k) or []
             if not arr:
-                arr = [[]]
+                arr = [{"rhythm_intent": "", "nodes": []}]
             new_cards[k] = {
                 "variants": arr,
                 "picked_idx": 0,
                 "locked_at": now,
+                "rhythm_intent": _intent_of(arr[0]),
+                "rhythm_intents": [_intent_of(v) for v in arr],
             }
 
-        # 顶层层字段写入 vol（方便 desk/brief 直接读 vol.death_nodes 等——这里存全量三维，
-        #  desk._join_by_layer 会按当前章号过滤 todays）
+        # 顶层层字段写入 vol（存 A 版的纯节点数组——desk/brief 按节点数组消费）
         vols.update_planning(
             vol_no,
-            death_nodes=payload.get("death_nodes") or [],
-            climax_nodes=payload.get("climax_nodes") or [],
-            clue_nodes=payload.get("clue_nodes") or [],
+            death_nodes=_nodes_of((payload.get("death_nodes") or [None])[0]),
+            climax_nodes=_nodes_of((payload.get("climax_nodes") or [None])[0]),
+            clue_nodes=_nodes_of((payload.get("clue_nodes") or [None])[0]),
             scaffold_cards=new_cards,
         )
         vol = vols.get(vol_no)
@@ -645,6 +761,9 @@ def register_scaffold_routes(
                 fallback,
             )
         new_variants = data.get(card_key) or []
+        if card_key in _LIST_KEYS:
+            # 重抽的候选统一成 {rhythm_intent, nodes}；重抽出来的两版必须意图不同
+            new_variants = _normalize_list_card(new_variants)
         if len(new_variants) < 1:
             raise HTTPException(500, "LLM 返回空结果，重试或换指令")
         # 规范成 2 版（截断/补齐）
@@ -653,13 +772,15 @@ def register_scaffold_routes(
         # 写入 cards 与顶层数组
         existing_variants = list(entry.get("variants") or [])
         if card_key in _LIST_KEYS:
-            # 顶层层是三维数组，直接追加两版
+            existing_intents = list(entry.get("rhythm_intents") or [])
             top_arr = list(getattr(vol, card_key, None) or [])
             for v in new_variants:
-                if isinstance(v, list):
-                    top_arr.append(v)
-                    existing_variants.append(v)
+                if _nodes_of(v):
+                    top_arr.append(_nodes_of(v))
+                existing_variants.append(v)
+                existing_intents.append(_intent_of(v))
             entry["variants"] = existing_variants
+            entry["rhythm_intents"] = existing_intents
             cards[card_key] = entry
             kwargs = {card_key: top_arr, "scaffold_cards": cards}
         else:
