@@ -257,13 +257,53 @@ export const corpusApi = {
     }),
 }
 
-// SSE 公共消费器：解析 thinking/delta/resumed/block_done/notice/result/fail 事件
+// SSE 公共消费器：解析 thinking/delta/resumed/block_done/notice/quality/lexicon/result/fail 事件
+export interface QualityRetryState {
+  round: number
+  max_rounds: number
+  passed: boolean
+  burst_streak: Record<string, number>
+  rhythm_streak: Record<string, number>
+  burst_current: Record<string, number>
+  rhythm_current: Record<string, number>
+}
+
+export interface QualityEvent {
+  index: number
+  round: number
+  max_rounds?: number
+  kind: 'hard' | 'soft' | 'soft_rewrite'
+  p0: string[]
+  p1: string[]
+  total?: number
+  scores?: Record<string, number>
+  burstiness?: Record<string, number>
+  rhythm?: Record<string, number>
+  retry?: QualityRetryState
+}
+
+export interface LexiconEvent {
+  index: number
+  chapter: number
+  top: Array<{
+    field: string
+    violations: number
+    min_gap: number
+    total_across_book: number
+    samples: string[]
+    members: string[]
+  }>
+  report: string
+}
+
 interface SSEHandlers {
   onThinking?: (text: string, index: number) => void
   onDelta?: (text: string, index: number) => void
   onResumed?: (index: number) => void
   onBlockDone?: (index: number, status: string, chars: number) => void
   onNotice?: (text: string) => void
+  onQuality?: (e: QualityEvent) => void
+  onLexicon?: (e: LexiconEvent) => void
 }
 
 async function consumeSSE<T>(r: Response, h: SSEHandlers): Promise<T> {
@@ -296,6 +336,8 @@ async function consumeSSE<T>(r: Response, h: SSEHandlers): Promise<T> {
       else if (event === 'resumed') h.onResumed?.(p.index)
       else if (event === 'block_done') h.onBlockDone?.(p.index, p.status, p.chars)
       else if (event === 'notice') h.onNotice?.(p.text)
+      else if (event === 'quality') h.onQuality?.(p as QualityEvent)
+      else if (event === 'lexicon') h.onLexicon?.(p as LexiconEvent)
       else if (event === 'result') result = p
       else if (event === 'fail') throw new Error(p.detail)
     }

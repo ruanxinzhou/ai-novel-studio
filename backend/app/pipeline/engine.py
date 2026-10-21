@@ -311,11 +311,30 @@ class PipelineRunner:
                     "问号密度过低": ("question_density", "up"),
                     "字种密度过低": ("char_type_density", "up"),
                 }
+                # 节奏类 P0 护栏：段长阶梯/单句段瀑布。
+                # 与 burstiness 不同，这类调整幅度大（76%→30%），模型常常改不动，
+                # 所以只给 2 次机会（首轮+1轮重写），未改善即降级 P1 交给作者。
+                _rhythm_streak: dict[str, int] = {}
+                _rhythm_prev: dict[str, float] = {}
+                _RHYTHM_P0_KEYS = {  # p0_msg 子串 -> rhythm stats key -> 改善方向
+                    "全章只有": ("长段数(>80字)", "up"),
+                    "长段但没有": ("超长段数(>120字)", "up"),
+                    "连续": ("最长连续单句段", "down"),
+                    "单句成段占比": ("单句成段占比", "down"),
+                }
+
+                demoted_msgs: list[str] = []
 
                 def _apply_burstiness_guard(review: HardGateResult) -> HardGateResult:
-                    """把连续 2 轮未改善的 burstiness P0 降级为 P1。"""
-                    nonlocal _burst_streak, _burst_prev
+                    """把连续未改善的 burstiness / 节奏类 P0 降级为 P1。
+
+                    burstiness（问号/字种）：3 次机会未改善降级
+                    节奏（长段/单句段）：2 次机会未改善降级（调整幅度大，模型常改不动）
+                    """
+                    nonlocal _burst_streak, _burst_prev, _rhythm_streak, _rhythm_prev, demoted_msgs
+                    demoted_msgs.clear()   # 只保留本轮新增的降级项
                     burst = (review.stats or {}).get("burstiness") or {}
+                    rhythm = (review.stats or {}).get("rhythm") or {}
                     remaining_p0: list[str] = []
                     demoted_p1: list[str] = []
                     for msg in review.p0:
@@ -335,11 +354,40 @@ class PipelineRunner:
                                     _burst_streak[key] = _burst_streak.get(key, 0) + 1
                                 _burst_prev[key] = cur
                                 if _burst_streak[key] >= 3:  # 首轮+2轮重写共3次机会
-                                    demoted_p1.append(
+                                    _msg = (
                                         f"{msg}（已重写 {_burst_streak[key]-1} 轮未改善，降级为建议项）"
                                     )
+                                    demoted_p1.append(_msg)
+                                    demoted_msgs.append(_msg)
                                     matched = True
                                 break
+                        if not matched:
+                            # 节奏类 P0（段长阶梯/单句段瀑布）：连续 2 轮未改善即降级 P1。
+                            # 理由：76%→30% 是很大的调整量，模型常常改不动；
+                            # 与其死循环，不如放行并把建议给作者。
+                            for needle, (key, better) in _RHYTHM_P0_KEYS.items():
+                                if needle in msg:
+                                    cur = float(rhythm.get(key, 0) or 0)
+                                    prev = _rhythm_prev.get(key)
+                                    improved = (
+                                        prev is None
+                                        or (better == "up" and cur > prev + 0.5)
+                                        or (better == "down" and cur < prev - 0.5)
+                                    )
+                                    if improved:
+                                        _rhythm_streak[key] = 1
+                                    else:
+                                        _rhythm_streak[key] = _rhythm_streak.get(key, 0) + 1
+                                    _rhythm_prev[key] = cur
+                                    if _rhythm_streak[key] >= 2:  # 首轮+1轮重写
+                                        _msg = (
+                                            f"{msg}（已重写 {_rhythm_streak[key]-1} 轮未改善，"
+                                            f"当前 {key}={cur}，降级为建议项——建议作者手工调整段落划分）"
+                                        )
+                                        demoted_p1.append(_msg)
+                                        demoted_msgs.append(_msg)
+                                        matched = True
+                                    break
                         if not matched:
                             remaining_p0.append(msg)
                     if demoted_p1:
@@ -400,11 +448,23 @@ class PipelineRunner:
                             log.debug("lexicon record failed: %s", lex_e)
 
                     if on_event:
+                        # retry 状态透传：让前端能显示「第 N/M 轮重写」+ 各护栏计数
                         on_event("quality", {
                             "index": i, "round": quality_rounds,
+                            "max_rounds": max_quality_rounds,
                             "kind": "hard", "p0": hard_review.p0, "p1": hard_review.p1,
                             "stats": hard_review.stats,
                             "burstiness": burst_stats,
+                            "rhythm": (hard_review.stats or {}).get("rhythm") or {},
+                            "retry": {
+                                "round": quality_rounds,
+                                "max_rounds": max_quality_rounds,
+                                "passed": hard_review.passed,
+                                "burst_streak": dict(_burst_streak),
+                                "rhythm_streak": dict(_rhythm_streak),
+                                "burst_current": dict(_burst_prev),
+                                "rhythm_current": dict(_rhythm_prev),
+                            },
                         })
                     if hard_review.passed:
                         break
@@ -428,12 +488,36 @@ class PipelineRunner:
                             burst_hints.append("删掉「像一位智慧的导师」这类带褒义拟人化喻体，改写为具体动作或感官")
                         elif "零回指" in msg:
                             burst_hints.append("段首评论句前补「但/可/这」等指示代词，不要让评价直接悬空起笔")
+                        elif "全章只有" in msg and "长段" in msg:
+                            burst_hints.append(
+                                "补写 2-3 段 >80 字的长段（其中至少 1 段 >120 字）承担描写/心理/环境——"
+                                "把相邻的短段合并扩写成长段，不要靠继续拆短句")
+                        elif "长段但没有" in msg:
+                            burst_hints.append("把最长的那段扩到 120 字以上，真正承担环境描写或心理展开")
+                        elif "连续" in msg and "单句成段" in msg:
+                            burst_hints.append(
+                                "把连续的单句段合并——每 2-3 个短句并成一段，"
+                                "单句成段只保留在情绪顶点/打断/转场锚点处（最多连续 2 段）")
+                        elif "单句成段占比" in msg:
+                            burst_hints.append(
+                                "全章至少有 70% 的段落要包含 2 句以上——"
+                                "把拆散的短句合回去，让段落有内部层次")
                     if burst_hints:
                         extra_directive += "\n\n【burstiness 具体修复方向】\n" + "\n".join(f"- {x}" for x in burst_hints)
                     extra_directive += "\n\n请重写这一段，修正以上问题，严格保留剧情骨架。"
                     if on_event:
-                        on_event("notice", {"text": f"[质量门禁] 第 {i} 块硬门禁未通过，重写第 {quality_rounds} 轮："
-                                                   + "；".join(hard_review.p0)[:80]})
+                        _p0_joined = "；".join(hard_review.p0)[:80]
+                        on_event("notice", {
+                            "text": f"[质量门禁] 第 {i} 块重写第 {quality_rounds}/{max_quality_rounds - 1} 轮：{_p0_joined}",
+                            "retry_round": quality_rounds,
+                            "max_rounds": max_quality_rounds - 1,
+                            "p0": hard_review.p0,
+                            "burst_streak": dict(_burst_streak),
+                            "rhythm_streak": dict(_rhythm_streak),
+                        })
+                        # 护栏降级提示（明确告诉用户「已放弃自动重试，改为建议」）
+                        for _d in demoted_msgs:
+                            on_event("notice", {"text": f"[护栏降级] {_d}"})
 
                 # 正文/润色层：软评审（LLM 13 维打分，1 次非流式调用）。
                 # 仅在硬门禁通过后才做；P0 问题再触发一轮带 fix_hints 的重写。
