@@ -14,8 +14,11 @@ Provider 无 finish_reason，用 output_tokens ≥ 0.95×max_tokens 代理判定
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable
+
+log = logging.getLogger(__name__)
 
 from app.chunking import XYWriter
 from app.context import Material, MaterialAssembler, MaterialFamily
@@ -27,6 +30,15 @@ from app.generation import (
     ProseCompletion,
     complete_prose,
     plan_budget,
+)
+from app.generation.humanize import postprocess as humanize_postprocess
+from app.generation.quality import (
+    HardGateResult,
+    SoftReviewResult,
+    build_soft_review_messages,
+    hard_gate,
+    parse_soft_review,
+    rewrite_prompt_with_hints,
 )
 from app.pipeline.journal import ChunkReceipt, RunJournal, x_fingerprint
 from app.pipeline.prompts import PromptStore, RenderedPrompt, render_generation_messages
@@ -244,8 +256,16 @@ class PipelineRunner:
                     on_event("resumed", {"index": i})
             else:
                 def generate(acc: str | None, _messages=rendered.messages, _max_tokens=max_tokens,
-                             _index=i) -> tuple[str, str]:
+                             _index=i, _extra_directive: str | None = None) -> tuple[str, str]:
                     msgs = list(_messages)
+                    # 质量门禁反馈注入：如果带了 extra_directive（来自上一轮 P0/fix_hints），
+                    # 追加到最后一个 user 消息末尾
+                    if _extra_directive:
+                        for j in range(len(msgs) - 1, -1, -1):
+                            if msgs[j].get("role") == "user":
+                                msgs[j] = dict(msgs[j])
+                                msgs[j]["content"] = msgs[j]["content"] + "\n\n" + _extra_directive
+                                break
                     if acc:
                         tail = acc[-CONTINUATION_TAIL_CHARS:]
                         msgs.append({"role": "user", "content": f"从断点处续写，不要重复已写内容：\n{tail}"})
@@ -262,14 +282,107 @@ class PipelineRunner:
                         on_event("delta", {"index": _index, "text": resp.text})
                     return resp.text, proxy_finish_reason(resp.usage.output_tokens, _max_tokens)
 
-                try:
-                    completion = complete_prose(generate)
-                except Exception as e:
-                    # 失败也落收据：重试时知道此块曾失败，completed 块不受影响
-                    if journal:
-                        journal.append(ChunkReceipt(index=i, x_hash=x_hash, y="",
-                                                    status="failed", error=str(e)[:300]))
-                    raise
+                # === 生成→后处理→硬门禁→（正文层）软评审，P0 触发带 hints 重写（最多 2 轮）===
+                quality_rounds = 0
+                max_quality_rounds = 3  # 首轮 + 最多 2 次重写
+                hard_review: HardGateResult | None = None
+                soft_review: SoftReviewResult | None = None
+                extra_directive: str | None = None
+                completion = None
+                while quality_rounds < max_quality_rounds:
+                    try:
+                        completion = complete_prose(
+                            lambda acc, _d=extra_directive: generate(acc, _extra_directive=_d)
+                        )
+                    except Exception as e:
+                        if journal:
+                            journal.append(ChunkReceipt(index=i, x_hash=x_hash, y="",
+                                                        status="failed", error=str(e)[:300]))
+                        raise
+                    # 活人感硬规则后处理
+                    cleaned_text = humanize_postprocess(completion.text)
+                    completion = ProseCompletion(
+                        text=cleaned_text,
+                        status=completion.status,
+                        attempts=completion.attempts,
+                        dedup_overlaps=completion.dedup_overlaps,
+                    )
+                    # 硬门禁（字数/重复率/AI 句式密度/残留标点等，零 token）
+                    prev_tail = anchor_text[-200:] if anchor_text else ""
+                    hard_review = hard_gate(
+                        completion.text, prev_tail=prev_tail,
+                        target_chars=spec.target_chars,
+                    )
+                    if on_event:
+                        on_event("quality", {
+                            "index": i, "round": quality_rounds,
+                            "kind": "hard", "p0": hard_review.p0, "p1": hard_review.p1,
+                            "stats": hard_review.stats,
+                        })
+                    if hard_review.passed:
+                        break
+                    quality_rounds += 1
+                    if quality_rounds >= max_quality_rounds:
+                        break
+                    # 把 P0 问题拼成 extra_directive 下一轮注入
+                    extra_directive = "【质量门禁问题】\n" + "\n".join(f"- {x}" for x in hard_review.p0)
+                    extra_directive += "\n\n请重写这一段，修正以上问题，严格保留剧情骨架。"
+                    if on_event:
+                        on_event("notice", {"text": f"[质量门禁] 第 {i} 块硬门禁未通过，重写第 {quality_rounds} 轮："
+                                                   + "；".join(hard_review.p0)[:80]})
+
+                # 正文/润色层：软评审（LLM 8 维打分，1 次非流式调用）。
+                # 仅在硬门禁通过后才做；P0 问题再触发一轮带 fix_hints 的重写。
+                if (not hard_review or hard_review.passed) and spec.name in ("draft", "polish") and completion:
+                    try:
+                        plot_brief = chunk.x_chunk  # x_chunk 即本块的剧情输入
+                        sr_msgs = build_soft_review_messages(
+                            plot_brief=plot_brief, prev_tail=anchor_text or "",
+                            text=completion.text,
+                        )
+                        # 关闭 reasoning（评审用 JSON 模式不需要深思考），用短输出
+                        sr_resp = self.provider.chat(
+                            sr_msgs, model=self.model, max_tokens=1200,
+                            extra={"reasoning_effort": "low"},
+                        )
+                        soft_review = parse_soft_review(sr_resp.text)
+                        if on_event:
+                            on_event("quality", {
+                                "index": i, "kind": "soft",
+                                "total": soft_review.total,
+                                "scores": soft_review.scores,
+                                "p0": soft_review.p0, "p1": soft_review.p1,
+                            })
+                        if (not soft_review.passed) and quality_rounds < max_quality_rounds:
+                            quality_rounds += 1
+                            extra_directive = rewrite_prompt_with_hints(
+                                extra_directive or "", soft_review
+                            )
+                            if on_event:
+                                on_event("notice", {"text": f"[质量评审] 第 {i} 块 {soft_review.total} 分"
+                                                           f"（P0 {len(soft_review.p0)} 项），带提示重写"})
+                            try:
+                                completion2 = complete_prose(
+                                    lambda acc, _d=extra_directive: generate(acc, _extra_directive=_d)
+                                )
+                                cleaned2 = humanize_postprocess(completion2.text)
+                                # 重写后再跑一次硬门禁，仍 P0 就保留原版本
+                                hard2 = hard_gate(cleaned2, prev_tail=anchor_text[-200:] if anchor_text else "",
+                                                  target_chars=spec.target_chars)
+                                if hard2.passed and len(cleaned2.strip()) > len(completion.text) * 0.5:
+                                    completion = ProseCompletion(
+                                        text=cleaned2, status=completion2.status,
+                                        attempts=completion.attempts + completion2.attempts,
+                                        dedup_overlaps=completion.dedup_overlaps,
+                                    )
+                                    if on_event:
+                                        on_event("notice", {"text": f"[质量评审] 重写完成"})
+                            except Exception as re_e:
+                                log.warning("soft-review rewrite failed: %s", re_e)
+                    except Exception as e:
+                        log.warning("soft review skipped for block %d: %s", i, e)
+                        soft_review = SoftReviewResult(error=str(e))
+
                 if journal:
                     journal.append(ChunkReceipt(
                         index=i, x_hash=x_hash, y=completion.text, status="completed",
