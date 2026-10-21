@@ -1,12 +1,16 @@
-"""描写轮换账本（lexicon.json）：跨章记录高频表达的位置与间隔。
+"""描写语义场账本（lexicon.json）：跨章记录「同一语义场」的重复。
 
-设计依据（圆桌共识）：
-- 生成前注入给「模型」当记忆，而不是禁令（叙事性注入 vs 管理性注入）
-- 每条记录带上下文（在第几段、什么场景），因为孤立频次会让模型收缩
-- 不做「签名/惰性」分类（同一批词两个属性），只按间隔排序
-- 不自动替换用词，只做排序 + Top6 提示
+设计依据（圆桌 + xt-webnovel-writing/oh-story 双向实证）：
+- 圆桌：生成前注入「你已经写过什么」当记忆，不是禁令；带上下文而非只给频次
+- xt-webnovel-writing B-补充：同一语义场 500 字窗内最多保留 1 次
+- oh-story banned-words.md：「禁止同义词轮换规避——同义词轮换消除不了模板」
 
-数据落盘：backend/data/projects/{pid}/lexicon.json（与 entities.json 平级）
+⚠️ 关键纠偏（2026-10-21）：
+前一版按「词」记账（嗓子/喉咙/舌根是三条），等价于鼓励同义词轮换——
+这在检测器眼里全是同一个「吞咽」语义场，属于第二层 AI 味。
+本版改为按**语义场**记账：同场的成员词共享一个额度。
+
+落盘：backend/data/projects/{pid}/lexicon.json（与 entities.json 同级）
 """
 from __future__ import annotations
 
@@ -17,43 +21,49 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-# ---- 描写类别词表（零 token，纯正则/词表匹配） ----
+# ============================================================
+# 语义场定义：同一感受/动作的不同写法，共享一个额度
+# 场名 -> 成员词（成员之间互相顶替额度，不是互相补充）
+# ============================================================
 
-# 身体部位与感官动作（AI 最爱复用的那一批）
-BODY_PARTS = [
-    "指腹", "指尖", "手指", "指节", "指缝", "掌心", "手心", "手背", "虎口", "腕骨",
-    "手腕", "手肘", "拳头", "指头", "拇指", "小指",
-    "喉咙", "嗓子", "嗓子眼", "舌根", "舌头", "咽口", "口腔", "下颌", "下巴", "牙关",
-    "脖颈", "脖子", "后颈", "颈椎", "肩膀", "肩胛", "锁骨", "胸口", "心口", "后背",
-    "脊背", "腰椎", "肋骨", "后腰", "小腹", "胃部", "太阳穴", "额头", "眉心", "眼角",
-    "眼皮", "眼睫", "瞳孔", "眼球", "脸颊", "腮帮",
-]
+SEMANTIC_FIELDS: dict[str, list[str]] = {
+    # ── 身体：吞咽/干呕 ──
+    "吞咽紧张": ["喉咙", "嗓子", "嗓子眼", "舌根", "咽口", "吞咽", "咽了口唾沫",
+                 "口腔发干", "唾沫", "干呕", "喉结"],
+    # ── 身体：手部动作 ──
+    "手部小动作": ["指腹", "指尖", "手指", "指节", "指缝", "拇指", "掌心", "手心",
+                   "手背", "虎口", "腕骨", "手腕"],
+    # ── 身体：视线 ──
+    "视线打量": ["眼神", "目光", "视线", "盯着", "看着", "扫了一眼", "打量"],
+    # ── 身体：僵/紧 ──
+    "肌肉紧绷": ["发僵", "僵住", "绷紧", "紧绷", "发紧", "僵硬"],
+    # ── 感官：冷 ──
+    "寒冷": ["凉", "冷", "冰", "湿冷", "透凉", "冰凉", "寒意", "起鸡皮疙瘩"],
+    # ── 感官：潮/湿 ──
+    "潮湿": ["湿", "潮", "潮气", "返潮", "发潮", "黏"],
+    # ── 感官：干燥 ──
+    "干燥": ["干", "燥", "干涩", "发干", "口干"],
+    # ── 感官：热 ──
+    "温热": ["热", "烫", "温", "暖", "灼"],
+    # ── 感官：重/沉 ──
+    "沉重": ["沉", "重", "坠", "压"],
+    # ── 情绪：抽象概括（AI 高发区） ──
+    "抽象情绪": ["涌上", "涌起", "五味杂陈", "百感交集", "难以言喻", "不寒而栗",
+                 "毛骨悚然", "心口一紧", "泛起"],
+    # ── 环境：门/入口 ──
+    "门口": ["门口", "门缝", "门框", "门前", "门槛", "防盗门", "单元门", "大门"],
+    # ── 环境：灯 ──
+    "灯具": ["声控灯", "灯管", "灯泡", "路灯", "台灯", "应急灯", "走廊灯", "灯"],
+    # ── 环境：窗 ──
+    "窗户": ["窗外", "窗台", "窗帘", "窗玻璃", "窗户"],
+    # ── 环境：楼道 ──
+    "楼道": ["楼道", "走廊", "过道", "楼梯", "台阶"],
+}
 
-SENSATION_WORDS = [
-    "凉", "冷", "冰", "湿", "潮", "干", "热", "烫", "温", "暖", "燥", "黏", "涩", "滑",
-    "麻", "痒", "疼", "痛", "胀", "紧", "松", "沉", "轻", "空", "满",
-]
-
-# 环境与物件（场景锚点，AI 会反复抓同一个）
-ENV_WORDS = [
-    "窗外", "门口", "门缝", "门框", "走廊", "楼道", "楼梯", "台阶", "电梯", "天花板",
-    "地板", "墙面", "墙角", "窗台", "阳台", "路灯", "声控灯", "灯管", "灯泡",
-    "走廊灯", "应急灯", "扶手", "栏杆", "通风口", "垃圾袋", "快递箱", "鞋柜",
-    "楼道灯", "单元门", "铁门", "木门", "防盗门", "窗玻璃", "窗帘",
-]
-
-# 比喻句式模板（结构级重复，不是用词）
-SIMILE_PATTERNS = [
-    ("像+程序/代码类", re.compile(r"像[^，。！？]{0,10}(程序|代码|报错|指令|参数|bug|系统|数据|算法)")),
-    ("像+自然类", re.compile(r"像[^，。！？]{0,8}(风|浪|水|雪|火|冰|雷|雨|云|树|山)")),
-    ("像+人/角色类", re.compile(r"像[^，。！？]{0,8}(人|母亲|父亲|老师|医生|孩子|老人|傻子)")),
-    ("仿佛/仿似", re.compile(r"(仿佛|仿似|好像|似乎)[^，。！？]{1,16}")),
-]
-
-# 副词堆叠检测（程度副词）
-DEGREE_ADVERBS = [
-    "很", "非常", "十分", "极其", "极为", "格外", "尤其", "相当", "颇", "尤其",
-    "有些", "略微", "稍稍", "极度", "无比", "异常", "格外地",
+# 抽象气场词（xt B-补充「气场词簇」）：这些是模板复读的重灾区
+AURA_TOKENS = [
+    "掠食者", "猩红", "宿命", "战栗", "冷冽", "深渊", "幽暗", "诡异", "可怖",
+    "压迫感", "窒息", "凝固", "弥漫", "笼罩", "弥漫着",
 ]
 
 _ACTION_VERBS = [
@@ -63,23 +73,16 @@ _ACTION_VERBS = [
     "按住", "踩", "盯着", "扫了眼", "顿了顿", "皱了", "叹了",
 ]
 
+# 一个语义场的额度窗口（字）；超出即视为语义场复读
+FIELD_WINDOW_CHARS = 500
+
 
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _han(n: int) -> str:
-    return "[\u4e00-\u9fff]"
-
-
-def _count_terms(text: str, terms: list[str]) -> dict[str, int]:
-    return {t: text.count(t) for t in terms if text.count(t) > 0}
-
-
-# ---- 场景标注（启发式，零 token） ----
-
 def _scene_label(para: str) -> str:
-    """用启发式给段落打一个粗粒度场景标签（用于 Top6 提示的可读性）。"""
+    """段落场景标签（用于 Top6 提示的可读性）。"""
     has_dialog = ("「" in para) or ("」" in para)
     has_action = any(v in para for v in _ACTION_VERBS)
     has_digit = bool(re.search(r"\d", para))
@@ -96,83 +99,67 @@ def _scene_label(para: str) -> str:
     return "叙述"
 
 
+# 场 -> 成员词的快速索引
+_TERM_TO_FIELD: dict[str, str] = {}
+for _fname, _members in SEMANTIC_FIELDS.items():
+    for _m in _members:
+        _TERM_TO_FIELD.setdefault(_m, _fname)
+for _a in AURA_TOKENS:
+    _TERM_TO_FIELD.setdefault(_a, "抽象气场词")
+
+
 @dataclass
-class LexEntry:
-    """一个高频表达的跨章记录。"""
-    term: str
-    category: str          # body / sensation / env / simile
-    total: int = 0
-    chapters: set[int] = field(default_factory=set)
-    # chapter_no -> list of (para_idx, scene_label)
-    spots: dict[int, list[tuple[int, str]]] = field(default_factory=dict)
+class FieldUsage:
+    """一个语义场在某一章的使用记录。"""
+    field: str
+    chapter: int
+    hits: list[dict] = field(default_factory=list)   # [{para, char_pos, term, scene}]
 
     def as_dict(self) -> dict:
-        return {
-            "term": self.term,
-            "category": self.category,
-            "total": self.total,
-            "chapters": sorted(self.chapters),
-            "spots": {str(k): [[i, s] for i, s in v] for k, v in sorted(self.spots.items())},
-        }
+        return {"field": self.field, "chapter": self.chapter, "hits": self.hits}
 
     @classmethod
-    def from_dict(cls, d: dict) -> "LexEntry":
-        spots = {}
-        for k, v in (d.get("spots") or {}).items():
-            try:
-                spots[int(k)] = [(int(a), str(b)) for a, b in v]
-            except (TypeError, ValueError):
-                continue
-        return cls(
-            term=d.get("term", ""),
-            category=d.get("category", "body"),
-            total=int(d.get("total", 0) or 0),
-            chapters=set(int(c) for c in (d.get("chapters") or [])),
-            spots=spots,
-        )
-
-    def last_para_in(self, chapter: int) -> int:
-        lst = self.spots.get(chapter) or []
-        return max((i for i, _ in lst), default=-1)
-
-    def density_in(self, chapter: int) -> int:
-        return len(self.spots.get(chapter) or [])
+    def from_dict(cls, d: dict) -> "FieldUsage":
+        return cls(field=d.get("field", ""), chapter=int(d.get("chapter", 0) or 0),
+                   hits=list(d.get("hits") or []))
 
 
 class LexiconStore:
-    """描写轮换账本：跨章累积 + Top6 排序 + 记忆式注入文本生成。"""
+    """语义场账本：按语义场记账 + 窗口内重复判定 + 记忆式注入。"""
 
-    # 单章内单术语出现次数超过此值，才纳入账本（避免噪声）
-    MIN_PER_CHAPTER = 3
-    # 进入 Top6 提示的门槛（单章内次数）
+    # 单章内某语义场命中次数 ≥ 此值才纳入账本（避免噪声）
+    MIN_HITS_PER_CHAPTER = 3
+    # Top-N 提示数量
     TOP_N = 6
-    # 「密集」判定：同一章内出现 >= 此值，且占该章段落比例 > ratio
-    DENSE_COUNT = 4
-    DENSE_RATIO = 0.06
-    # 注入时每个类别最多列几个（控 token）
-    INJECT_PER_CATEGORY = 6
+    # 注入时每个场最多列几个成员词
+    INJECT_MEMBERS = 4
 
     def __init__(self, path: Path | str):
         self.path = Path(path)
-        self.entries: dict[str, LexEntry] = {}
+        # field_name -> {chapter -> FieldUsage}
+        self.data: dict[str, dict[int, FieldUsage]] = defaultdict(dict)
         if self.path.exists():
             try:
                 raw = self.path.read_text(encoding="utf-8-sig")
-                data = json.loads(raw)
-                for d in data.get("entries", []):
-                    e = LexEntry.from_dict(d)
-                    if e.term:
-                        self.entries[e.term] = e
-            except (json.JSONDecodeError, TypeError, OSError, AttributeError):
+                payload = json.loads(raw)
+                for fname, chs in (payload.get("fields") or {}).items():
+                    for chs_i, u in (chs or {}).items():
+                        fu = FieldUsage.from_dict(u)
+                        self.data[fname][int(chs_i)] = fu
+            except (json.JSONDecodeError, TypeError, OSError, AttributeError, ValueError):
                 pass
 
     def _flush(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "version": 1,
+            "version": 2,
+            "note": "语义场账本：同场成员词共享额度，禁止同义词轮换规避",
             "updated_at": _now(),
-            "entries": [e.as_dict() for e in
-                        sorted(self.entries.values(), key=lambda x: -x.total)],
+            "field_window_chars": FIELD_WINDOW_CHARS,
+            "fields": {
+                fname: {str(ch): fu.as_dict() for ch, fu in sorted(chs.items())}
+                for fname, chs in sorted(self.data.items())
+            },
         }
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -181,162 +168,170 @@ class LexiconStore:
     # ---- 记录 ----
 
     def record_chapter(self, text: str, chapter: int) -> dict:
-        """扫描一章正文，更新账本。返回本章的统计摘要。"""
+        """扫描一章，按语义场记账（不是按词）。返回本章摘要。"""
         if not text or not text.strip():
-            return {"recorded": 0, "terms": []}
+            return {"recorded": 0, "fields": [], "violations": []}
         paras = [p.strip() for p in text.split("\n") if p.strip()]
-        n_paras = max(len(paras), 1)
-        found: dict[str, tuple[str, list[tuple[int, str]]]] = {}
+        # 累计每个场在本章的命中（按字符位置记录，用于窗口判定）
+        field_hits: dict[str, list[dict]] = defaultdict(list)
+        offset = 0
+        for pi, para in enumerate(paras):
+            for term, fname in _TERM_TO_FIELD.items():
+                start = 0
+                while True:
+                    idx = para.find(term, start)
+                    if idx < 0:
+                        break
+                    field_hits[fname].append({
+                        "para": pi,
+                        "char_pos": offset + idx,
+                        "term": term,
+                        "scene": _scene_label(para),
+                    })
+                    start = idx + len(term)
+            offset += len(para) + 1  # +1 for newline
 
-        for cat, terms in (("body", BODY_PARTS), ("sensation", SENSATION_WORDS),
-                           ("env", ENV_WORDS)):
-            for t in terms:
-                cnt = text.count(t)
-                if cnt < self.MIN_PER_CHAPTER:
-                    continue
-                spots: list[tuple[int, str]] = []
-                for i, para in enumerate(paras):
-                    c = para.count(t)
-                    if c:
-                        spots.append((i, _scene_label(para)))
-                if spots:
-                    found[t] = (cat, spots)
+        recorded = []
+        for fname, hits in field_hits.items():
+            if len(hits) < self.MIN_HITS_PER_CHAPTER:
+                continue
+            hits.sort(key=lambda h: h["char_pos"])
+            self.data[fname][chapter] = FieldUsage(field=fname, chapter=chapter, hits=hits)
+            recorded.append(fname)
 
-        for t, (cat, spots) in found.items():
-            e = self.entries.get(t)
-            if e is None:
-                e = LexEntry(term=t, category=cat)
-                self.entries[t] = e
-            # 若已存在于其它章，重置本章 spots 但累计 total
-            e.total += sum(1 for _ in spots)
-            e.chapters.add(chapter)
-            e.spots[chapter] = spots
+        # 窗口内重复检测（同一场内两次命中间隔 < 500 字 = 复读）
+        violations = []
+        for fname in recorded:
+            fu = self.data[fname][chapter]
+            positions = [h["char_pos"] for h in fu.hits]
+            for a, b in zip(positions, positions[1:]):
+                if b - a < FIELD_WINDOW_CHARS:
+                    hit_a = fu.hits[positions.index(a)]
+                    hit_b = fu.hits[positions.index(b)]
+                    violations.append({
+                        "field": fname,
+                        "gap": b - a,
+                        "a": {"para": hit_a["para"], "term": hit_a["term"]},
+                        "b": {"para": hit_b["para"], "term": hit_b["term"]},
+                    })
 
-        if found:
+        if recorded:
             self._flush()
         return {
-            "recorded": len(found),
-            "terms": sorted(found.keys(), key=lambda t: -len(found[t][1])),
-            "para_count": n_paras,
+            "recorded": len(recorded),
+            "fields": sorted(recorded, key=lambda f: -len(self.data[f][chapter].hits)),
+            "violations": violations,
         }
 
     # ---- 查询 ----
 
-    def dense_terms(self, chapter: int, exclude_current: bool = False) -> list[dict]:
-        """返回该章（或历史）内「密集」的表达：单章次数高且分布集中。"""
+    def window_violations(self, chapter: int) -> list[dict]:
+        """本章内所有语义场窗口复读违规（跨章累计次数也一并看）。"""
         out = []
-        for e in self.entries.values():
-            if exclude_current and chapter in e.spots:
+        for fname, chs in self.data.items():
+            fu = chs.get(chapter)
+            if not fu:
                 continue
-            for ch, spots in e.spots.items():
-                if exclude_current and ch == chapter:
-                    continue
-                if len(spots) < self.DENSE_COUNT:
-                    continue
-                idxs = [i for i, _ in spots]
-                span = max(idxs) - min(idxs) + 1
-                ratio = len(spots) / max(span, 1)
-                if ratio >= self.DENSE_RATIO or len(spots) >= self.DENSE_COUNT + 2:
+            positions = [h["char_pos"] for h in fu.hits]
+            total_across = sum(len(v.hits) for v in chs.values())
+            for i, (a, b) in enumerate(zip(positions, positions[1:])):
+                if b - a < FIELD_WINDOW_CHARS:
                     out.append({
-                        "term": e.term,
-                        "category": e.category,
-                        "chapter": ch,
-                        "count": len(spots),
-                        "span": span,
-                        "ratio": round(ratio, 3),
-                        "samples": spots[:3],
-                        "total_across_book": e.total,
+                        "field": fname,
+                        "gap": b - a,
+                        "term_a": fu.hits[i]["term"],
+                        "para_a": fu.hits[i]["para"],
+                        "term_b": fu.hits[i + 1]["term"],
+                        "para_b": fu.hits[i + 1]["para"],
+                        "total_across_book": total_across,
                     })
-        out.sort(key=lambda x: (-x["count"], x["span"]))
+        out.sort(key=lambda x: x["gap"])
         return out
 
     def top_n_for_chapter(self, chapter: int, n: int | None = None) -> list[dict]:
-        """给作者看的 Top-N 提示：按「单章次数 + 分布集中度」排序。"""
+        """Top-N 提示：按「本章违规次数 + 累计次数」排序。"""
         n = n or self.TOP_N
-        cands = self.dense_terms(chapter)
-        # 同 term 多次出现的只保留最密集的一次
-        seen: set[str] = set()
-        uniq: list[dict] = []
-        for c in cands:
-            if c["term"] in seen:
-                continue
-            seen.add(c["term"])
-            uniq.append(c)
-            if len(uniq) >= n:
-                break
-        return uniq
+        agg: dict[str, dict] = {}
+        for v in self.window_violations(chapter):
+            f = v["field"]
+            if f not in agg:
+                agg[f] = {
+                    "field": f, "violations": 0, "min_gap": v["gap"],
+                    "total_across_book": v["total_across_book"],
+                    "samples": [], "members": SEMANTIC_FIELDS.get(f, [])[:6],
+                }
+            agg[f]["violations"] += 1
+            agg[f]["min_gap"] = min(agg[f]["min_gap"], v["gap"])
+            if len(agg[f]["samples"]) < 3:
+                agg[f]["samples"].append(
+                    f"第{v['para_a']}段「{v['term_a']}」/ 第{v['para_b']}段「{v['term_b']}」")
+        out = sorted(agg.values(), key=lambda x: (-x["violations"], x["min_gap"]))
+        return out[:n]
 
     # ---- 生成前注入（给模型当记忆） ----
 
     def memory_block(self, chapter: int, max_chars: int = 900) -> str:
-        """生成注入 prompt 的记忆块：只讲「你已经写过什么」，不带禁令口吻。
+        """生成注入 prompt 的记忆块：叙事性措辞，不是禁令。
 
-        关键：措辞是叙事性的（记忆），不是管理性的（禁令）。
+        关键：不说「这些词不要用」，而说「这些感受你已经写过，读者记得；
+        再写同一类感受时，换成具体的动作或场景证据，不要换个近义词再写一遍」。
         """
-        if not self.entries:
+        prev: dict[str, int] = defaultdict(int)
+        samples: dict[str, list[str]] = defaultdict(list)
+        for fname, chs in self.data.items():
+            for ch, fu in chs.items():
+                if ch >= chapter:
+                    continue
+                total = len(fu.hits)
+                prev[fname] += total
+                for h in fu.hits[:2]:
+                    if len(samples[fname]) < 3:
+                        samples[fname].append(
+                            f"第{ch}章·{h['scene']}·{h['term']}")
+        if not prev:
             return ""
-        by_cat: dict[str, list[LexEntry]] = defaultdict(list)
-        for e in self.entries.values():
-            # 只统计本章之前出现的（不含本章刚写的）
-            prev_chs = [c for c in e.spots if c < chapter]
-            if not prev_chs:
-                continue
-            total = sum(len(e.spots[c]) for c in prev_chs)
-            if total < self.MIN_PER_CHAPTER:
-                continue
-            by_cat[e.category].append(e)
-        if not by_cat:
+        ranked = sorted(prev.items(), key=lambda x: -x[1])[:8]
+        if not ranked:
             return ""
 
-        cat_label = {
-            "body": "身体部位与身体动作",
-            "sensation": "感官与体感形容",
-            "env": "环境与场景物件",
-        }
-        lines = ["【你在这个故事里已经用过的描写（供你回忆，不是禁用清单）】"]
-        for cat in ("body", "sensation", "env"):
-            items = sorted(by_cat.get(cat, []), key=lambda x: -x.total)[: self.INJECT_PER_CATEGORY]
-            if not items:
-                continue
-            descs = []
-            for e in items:
-                # 给出 1-2 个实际用过的位置，带场景，模型才能回忆而不是被禁
-                samples = []
-                for c in sorted(e.spots):
-                    if c >= chapter:
-                        continue
-                    for i, s in e.spots[c][:1]:
-                        samples.append(f"第{c}章·{s}")
-                    if len(samples) >= 2:
-                        break
-                loc = "、".join(samples) if samples else "前面章节"
-                descs.append(f"{e.term}（{loc}）")
-            lines.append(f"- {cat_label[cat]}：{'；'.join(descs)}")
+        lines = ["【你已经写过的感受与场景（供你回忆）】"]
+        for fname, cnt in ranked:
+            members = SEMANTIC_FIELDS.get(fname, [])
+            mem = "/".join(members[: self.INJECT_MEMBERS])
+            samp = "、".join(samples[fname][:2]) if samples.get(fname) else "前面章节"
+            lines.append(f"· {fname}（{mem}）：已写 {cnt} 次，例如 {samp}")
         lines.append(
-            "写作提示：这些是你已经写过的，读者的印象里已经有了。"
-            "同一段场景里不必反复重申它们；"
-            "如果这次情绪确实需要更强的力度，可以换一个更具体的说法，"
-            "或者干脆用动作/物件的变化来承担，而不是重复同一个词。"
+            "写作提示：读者已经记住这些感受了。同一段场景里如果要写同一类感受，"
+            "**不要换个近义词再写一遍**（那只会变成套路的另一种说法）——"
+            "改用具体的动作、物件变化或环境证据来承担。"
+            "签名级的重复（某个角色的专属习惯、某个线索的固定意象）可以保留，"
+            "但不要在 500 字内重复同一类抽象感受。"
         )
         block = "\n".join(lines)
         if len(block) > max_chars:
             block = block[:max_chars] + "…"
         return block
 
-    # ---- 生成后 Top6 提示（给人看） ----
+    # ---- 生成后 Top-N 提示（给人看） ----
 
     def report_block(self, chapter: int, n: int | None = None) -> str:
         tops = self.top_n_for_chapter(chapter, n)
         if not tops:
             return ""
-        lines = [f"【重复描写提示·第{chapter}章】以下表达在本章出现较密，请确认是刻意重复（签名/线索）还是无意复读："]
+        lines = [f"【语义场复读提示·第{chapter}章】以下感受在本章 500 字窗内重复出现，"
+                 f"请确认是刻意签名还是模板复读："]
         for t in tops:
-            locs = "、".join(f"第{i}段（{s}）" for i, s in t["samples"][:3])
+            mem = "/".join(t["members"][:5])
             lines.append(
-                f"- 「{t['term']}」本章 {t['count']} 处（{locs}），"
-                f"全书累计 {t['total_across_book']} 次"
+                f"- {t['field']}（{mem}）：{t['violations']} 次窗内复读"
+                f"（最近间隔 {t['min_gap']} 字，全书累计 {t['total_across_book']} 次）；"
+                f"例如 {'；'.join(t['samples'][:2])}"
             )
-        lines.append("→ 若是刻意的（角色标识/悬念线索/仪式感节奏），保持；若是无意复读，替换其中 1-2 处为不同的写法即可。")
+        lines.append(
+            "→ 若是签名（角色标识/线索意象），保持；"
+            "若是模板复读，**把其中 1-2 处换成具体的动作或环境证据，"
+            "不要只换一个近义词**。"
+        )
         return "\n".join(lines)
 
 
@@ -347,17 +342,13 @@ def load_lexicon(pid: str, projects_root: Path | str) -> LexiconStore:
 
 
 def mechanical_redundancy(text: str) -> list[dict]:
-    """纯机械冗余：同一表达在同一段内出现 >=2 次（无需任何审美判断）。
-
-    这是唯一可以自动改的情况——它不是审美问题，是笔误级冗余。
-    """
+    """纯机械冗余：同一表达在同一段内出现 >=2 次（笔误级，无需审美判断）。"""
     out: list[dict] = []
     paras = [p.strip() for p in (text or "").split("\n") if p.strip()]
     for i, para in enumerate(paras):
-        for cat, terms in (("body", BODY_PARTS), ("sensation", SENSATION_WORDS),
-                           ("env", ENV_WORDS)):
-            for t in terms:
-                c = para.count(t)
-                if c >= 2:
-                    out.append({"term": t, "category": cat, "para": i, "count": c})
+        for term in _TERM_TO_FIELD:
+            c = para.count(term)
+            if c >= 2:
+                out.append({"term": term, "field": _TERM_TO_FIELD[term],
+                            "para": i, "count": c})
     return out

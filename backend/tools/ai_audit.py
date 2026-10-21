@@ -20,7 +20,10 @@ BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND))
 
 try:
-    from app.generation.humanize import _burstiness_stats
+    from app.generation.humanize import (
+        _burstiness_stats, _rhythm_metrics, _lieflat_ai_signals,
+        _detect_opening_template,
+    )
 except Exception:  # 独立运行兜底
     def _burstiness_stats(text: str) -> dict:
         chars = len(text.strip())
@@ -42,6 +45,9 @@ except Exception:  # 独立运行兜底
             "number_density": 0.0, "time_anchor_density": 0.0,
             "zero_anaphora_hits": 0, "personified_simile": 0,
         }
+    def _rhythm_metrics(text: str) -> dict: return {}
+    def _lieflat_ai_signals(text: str) -> dict: return {}
+    def _detect_opening_template(text: str): return ("", "")
 
 
 # ── 传统 AI 套话（表面信号，弱） ──────────────────────────────────
@@ -109,7 +115,9 @@ def audit(text: str, label: str = "") -> dict:
     if not text:
         return {"label": label, "字数": 0}
     stats = _burstiness_stats(text)
-    rh = rhythm_metrics(text)
+    rh = _rhythm_metrics(text)
+    lf = _lieflat_ai_signals(text)
+    tmpl, tmpl_ev = _detect_opening_template(text)
     per_k = lambda x: round(x * 1000 / len(text), 2)
     hits = {w: text.count(w) for w in CLICHES if text.count(w) > 0}
 
@@ -124,6 +132,9 @@ def audit(text: str, label: str = "") -> dict:
         "时间锚点密度": stats.get("time_anchor_density", 0),
         "拟人化喻体": stats.get("personified_simile", 0),
         "零回指命中": stats.get("zero_anaphora_hits", 0),
+        # ── lieflat 11 项 AI 指纹 ──
+        "AI指纹": lf,
+        "章首模板": tmpl,
         # ── 传统套话 ──
         "叙事过滤词": len(NARRATIVE_FILTER.findall(text)),
         "万能生理反应": len(UNIVERSAL_PHYSIO.findall(text)),
@@ -131,7 +142,7 @@ def audit(text: str, label: str = "") -> dict:
         "套话禁词": sum(hits.values()),
         "套话明细": hits,
         "千字感叹号": per_k(text.count("！") + text.count("!")),
-        # ── 活人节奏 ──
+        # ── 段长阶梯（xt K 条款） ──
         **{k: v for k, v in rh.items() if k != "段长分布"},
     }
     r["判定"] = judge(r)
@@ -154,21 +165,57 @@ def judge(r: dict) -> list[str]:
         v.append("P0 字种密度<0.25")
     elif ct < 0.35:
         v.append("P1 字种偏低")
-    if r["拟人化喻体"] > 0:
-        v.append("P1 拟人化褒义喻体（R=12.6×）")
-    if r["万能生理反应"] > 2:
+
+    # 段长阶梯（xt K 条款）
+    if r.get("段落数", 0) >= 8:
+        if r.get("长段数(>80字)", 0) < 3:
+            v.append(f"P0 节奏：长段仅 {r.get('长段数(>80字)')} 个（要求 ≥3）"
+                     f"——全是中短段拼起来的匀速机感，这是最严重的节奏问题")
+        elif r.get("超长段数(>120字)", 0) == 0:
+            v.append(f"P1 节奏：无 >120 字长段（建议 ≥1）")
+        if r.get("最长连续单句段", 0) >= 6:
+            v.append(f"P0 节奏：连续 {r.get('最长连续单句段')} 段单句成段"
+                     f"（≥6 是典型 AI 瀑布体）")
+        elif r.get("单句成段占比", 0) > 50:
+            v.append(f"P1 节奏：单句成段占比 {r.get('单句成段占比')}%（上限 30%）")
+        if r.get("动作收尾占比", 100) < 8:
+            v.append(f"P1 动作收尾仅 {r.get('动作收尾占比')}%（建议 ≥10%）")
+
+    # lieflat AI 指纹
+    lf = r.get("AI指纹") or {}
+    for k, n in lf.items():
+        if k == "冒号-空转句引列表" and n >= 2:
+            v.append(f"P0 AI指纹·冒号空转句引列表 {n} 处（R=9.4，最强）")
+        elif k == "拟人化褒义喻体" and n >= 1:
+            v.append(f"P1 AI指纹·拟人化褒义喻体 {n} 处（R=7.3）")
+        elif k == "对举结构(不是A而是B)" and n >= 3:
+            v.append(f"P1 AI指纹·对举结构 {n} 处（R=3.4，上限 2）")
+        elif k == "冒号-提示语引出内容" and n >= 2:
+            v.append(f"P1 AI指纹·冒号提示语 {n} 处（R=3.8）")
+        elif k == "起首语(说白了)" and n >= 2:
+            v.append(f"P1 AI指纹·起首语 {n} 处（R=3.2）")
+        elif k == "序数词当小标题" and n >= 2:
+            v.append(f"P1 AI指纹·序数词当小标题 {n} 处（R=3.1）")
+        elif k == "相邻句结构同构" and n >= 4:
+            v.append(f"P1 AI指纹·相邻句结构同构 {n} 处（R=2.0）")
+        elif k.startswith("译文-") and n >= 2:
+            v.append(f"P1 AI指纹·{k} {n} 处（R=2.6-5.3）")
+
+    if r.get("章首模板"):
+        t = r["章首模板"]
+        if t == "醒来开头":
+            v.append(f"P1 章首模板：{t}（最典型的 AI 开场，近 10 章 ≥4 即 FAIL）")
+        else:
+            v.append(f"P1 章首模板：{t}（注意不要连续多章同模板）")
+
+    if r.get("万能生理反应", 0) > 2:
         v.append(f"P1 万能生理反应 {r['万能生理反应']} 处")
-    if r["叙事过滤词"] > 3:
+    if r.get("叙事过滤词", 0) > 3:
         v.append(f"P1 叙事过滤词 {r['叙事过滤词']} 处")
-    if r["段尾抽象总结"] > 0:
+    if r.get("段尾抽象总结", 0) > 0:
         v.append(f"P1 段尾抽象总结 {r['段尾抽象总结']} 处")
-    if r["套话禁词"] > 5:
+    if r.get("套话禁词", 0) > 5:
         v.append(f"P1 AI 套话 {r['套话禁词']} 处")
-    # 活人节奏红线
-    if r.get("极短段占比", 100) < 15:
-        v.append(f"节奏警告 极短段仅 {r['极短段占比']}%（<15% 说明缺少 2-5 字极短段，朗读感平）")
-    if r.get("动作收尾占比", 0) < 10:
-        v.append(f"节奏警告 动作收尾仅 {r['动作收尾占比']}%（<10% 说明段尾爱落在抽象总结）")
     return v or ["通过：无显著 AI 信号"]
 
 
@@ -180,16 +227,26 @@ def fmt(r: dict) -> str:
     for k in ("问号密度", "句长CV", "字种密度", "数字密度", "时间锚点密度",
               "拟人化喻体", "零回指命中", "千字感叹号"):
         L.append(f"   {k:<12} {r[k]}")
+    L.append("【lieflat 11 项 AI 指纹】")
+    lf = r.get("AI指纹") or {}
+    if lf:
+        for k, n in sorted(lf.items(), key=lambda x: -x[1]):
+            L.append(f"   {k:<26} {n}")
+    else:
+        L.append(f"   （无命中）")
+    L.append(f"   {'章首入场模板':<24} {r.get('章首模板') or '（未识别）'}")
     L.append("【传统套话】")
     for k in ("套话禁词", "叙事过滤词", "万能生理反应", "段尾抽象总结"):
         L.append(f"   {k:<12} {r[k]}")
     if r["套话明细"]:
         top = sorted(r["套话明细"].items(), key=lambda x: -x[1])[:8]
         L.append(f"   {'明细':<12} " + ", ".join(f"{w}×{c}" for w, c in top))
-    L.append("【活人节奏】")
-    for k in ("段落数", "段落均长", "段落CV", "极短段(≤12字)", "极短段占比",
-              "超短段(2-6字)", "单句成段占比", "动作收尾占比", "对白收尾占比"):
-        L.append(f"   {k:<14} {r[k]}")
+    L.append("【段长阶梯】")
+    for k in ("段落数", "段落均长", "短段占比(<30字)", "中段占比(30-80字)",
+              "长段数(>80字)", "超长段数(>120字)", "单句成段占比",
+              "最长连续单句段", "动作收尾占比"):
+        if k in r:
+            L.append(f"   {k:<20} {r[k]}")
     L.append(f"【判定】{len(r['判定'])} 项")
     for x in r["判定"]:
         L.append(f"   ⚠ {x}" if x != "通过：无显著 AI 信号" else f"   ✔ {x}")
@@ -244,31 +301,40 @@ def ab_compare(ch: int = 2, pid: str | None = None) -> None:
     if not dt or not pt:
         print(f"ch{ch} 缺 draft 或 polish，无法对比")
         return
-    rd, rp = rhythm_metrics(dt), rhythm_metrics(pt)
-    keys = ["段落数", "段落均长", "段落CV", "极短段(≤12字)", "极短段占比",
-            "超短段(2-6字)", "动作收尾占比"]
+    rd, rp = _rhythm_metrics(dt), _rhythm_metrics(pt)
+    keys = ["段落数", "短段占比(<30字)", "中段占比(30-80字)", "长段数(>80字)",
+            "超长段数(>120字)", "单句成段占比", "最长连续单句段", "动作收尾占比"]
     print(f"═══ ch{ch} 润色 A/B 对比（draft → polish）═══")
-    print(f"{'指标':<16}{'draft':>10}{'polish':>10}{'变化':>12}  结论")
+    print(f"{'指标':<22}{'draft':>10}{'polish':>10}{'变化':>12}  结论")
     verdicts = []
     for k in keys:
         a, b = rd.get(k, 0), rp.get(k, 0)
-        if isinstance(a, (int, float)) and a:
-            delta = (b - a) / a * 100
-            if k in ("极短段(≤12字)", "极短段占比", "超短段(2-6字)", "动作收尾占比"):
-                bad = "⚠ 磨掉了活人感" if delta < -30 else ("↓ 略降" if delta < 0 else "↑ 好")
-            elif k == "段落均长":
-                bad = "⚠ 段变长变平" if delta > 25 else ("↓" if delta < 0 else "↑ 好")
-            else:
-                bad = "⚠ 合并过多" if k == "段落数" and delta < -20 else ""
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            delta = (b - a) / a * 100 if a else (100 if b else 0)
+            bad = ""
+            if k == "长段数(>80字)":
+                bad = "⚠ 长段被削碎" if delta < -20 else ("↑ 好" if delta > 0 else "")
+            elif k == "超长段数(>120字)":
+                bad = "⚠ 超长段丢失" if b == 0 and a > 0 else ""
+            elif k == "单句成段占比":
+                bad = "⚠ 全是单句段" if b > 50 else ("⚠ 上升" if delta > 20 else "")
+            elif k == "最长连续单句段":
+                bad = "⚠ 瀑布体" if b >= 6 else ("⚠ 上升" if delta > 30 else "")
+            elif k == "短段占比(<30字)":
+                bad = "⚠ 变碎" if delta > 25 else ""
+            elif k == "动作收尾占比":
+                bad = "⚠ 段尾变抽象" if delta < -30 else ("↑ 好" if delta > 0 else "")
+            elif k == "段落数":
+                bad = "⚠ 合并过多" if delta < -20 else ""
             verdicts.append((k, bad))
-            print(f"{k:<16}{a:>10}{b:>10}{delta:>+11.1f}%  {bad}")
+            print(f"{k:<22}{a:>10}{b:>10}{delta:>+11.1f}%  {bad}")
     print()
     worse = [v for v in verdicts if "⚠" in v[1]]
     if worse:
-        print("诊断：润色层磨掉了活人节奏 → 新版 polish 增法六原则正是为此设计")
-        print("建议：用新版 polish prompt 重跑，或对该章执行 refine 补回极短段")
+        print("诊断：润色破坏了段长阶梯 / 动作落点 → 新版 polish prompt 的【节奏保护纪律】正是为此设计")
+        print("建议：用新版 polish 重跑，或对该章执行 refine 补回长段与动作收尾")
     else:
-        print("诊断：润色保留了活人节奏 ✔")
+        print("诊断：润色保留了段长阶梯 ✔")
 
 
 if __name__ == "__main__":

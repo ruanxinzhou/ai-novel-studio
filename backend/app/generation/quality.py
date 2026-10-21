@@ -29,6 +29,8 @@ from app.generation.humanize import (
     _HALF_DOUBLE_RE,
     _SAFE_REPLACES,
     _burstiness_stats,
+    _detect_opening_template,
+    _lieflat_ai_signals,
     _rhythm_metrics,
     diagnosis_score,
 )
@@ -189,6 +191,53 @@ def hard_gate(
     if long_para_no_dialog >= 2:
         p1.append(f"存在 {long_para_no_dialog} 段超过 300 字无对白的长段（可能信息倾倒）")
 
+    # 章首入场模板池（xt A 条款）：连续同模板 = AI 味
+    tmpl_name, tmpl_ev = _detect_opening_template(text)
+    if tmpl_name:
+        stats["opening_template"] = {"name": tmpl_name, "evidence": tmpl_ev}
+        if tmpl_name == "醒来开头":
+            p1.append(
+                f"章首入场模板：识别为「醒来开头」（{tmpl_ev[:20]}…）。"
+                f"这是最典型的 AI 开场——近 10 章「醒来开头」≥4 即 FAIL。"
+                f"换一个入场方式：从动作中途开始、从对话开始、从某个具体物件开始，"
+                f"或直接跳到最有戏的那一刻"
+            )
+        else:
+            p1.append(
+                f"章首入场模板：识别为「{tmpl_name}」（{tmpl_ev[:20]}…）。"
+                f"注意不要连续多章用同一种入场模板"
+            )
+
+    # lieflat 11 项 AI 痕迹检测（283 万字人机对照实证，R = 生成 ÷ 人类）
+    lieflat = _lieflat_ai_signals(text)
+    if lieflat:
+        stats["lieflat"] = lieflat
+        per_k_lf = {k: round(v * 1000 / max(chars, 1), 2) for k, v in lieflat.items()}
+        stats["lieflat_per_k"] = per_k_lf
+        # 回滚级：R≥7 的强区分项
+        for k, v in lieflat.items():
+            if k == "冒号-空转句引列表" and v >= 2:
+                p0.append(f"AI 痕迹回滚级·冒号空转句引列表 {v} 处（R=9.4）：「我见过的几种典型场景：」"
+                          f"这种总起句是 AI 强指纹——直接给内容，不要预告")
+            elif k == "拟人化褒义喻体" and v >= 1:
+                p1.append(f"AI 痕迹·拟人化褒义喻体 {v} 处（R=7.3，带褒义 12.6）："
+                          f"「像一位智慧的导师」这类，改写为具体动作或感官")
+            elif k == "对举结构(不是A而是B)" and v >= 3:
+                p1.append(f"AI 痕迹·对举结构「不是A而是B」{v} 处（R=3.4，上限 2）——"
+                          f"这是命中率最高的 AI 指纹之一")
+            elif k == "冒号-提示语引出内容" and v >= 2:
+                p1.append(f"AI 痕迹·冒号提示语 {v} 处（R=3.8）：「他解释道：」"
+                          f"用提示语代替了动作锚定，改成 ≤7 字身体动作")
+            elif k == "起首语(说白了)" and v >= 2:
+                p1.append(f"AI 痕迹·起首语 {v} 处（R=3.2）：「说白了」「也就是说」——直接说，不用预告")
+            elif k == "序数词当小标题" and v >= 2:
+                p1.append(f"AI 痕迹·序数词当小标题 {v} 处（R=3.1）：正文里出现「第一」「首先」当段落序号")
+            elif k == "相邻句结构同构" and v >= 4:
+                p1.append(f"AI 痕迹·相邻句结构同构 {v} 处（R=2.0）：连续两句逗号数相同且长度接近——"
+                          f"打乱句法骨架，别让节奏变成等距")
+            elif k.startswith("译文-") and v >= 2:
+                p1.append(f"AI 痕迹·{k} {v} 处（R=2.6-5.3）：译文腔，改成中文自然语序")
+
     # burstiness/材料密度指标（基于 lieflat 283 万字人机对照实证）
     burst = _burstiness_stats(text)
     stats["burstiness"] = burst
@@ -254,24 +303,36 @@ def hard_gate(
             for r in _redundant[:6])
         p1.append(f"机械冗余：同一段内重复用词 {_red_desc}——同一段里同一个表达出现两次以上属于笔误级冗余，请改掉其中一处")
 
-    # 活人节奏红线：润色层最容易磨掉这些（合并段落、砍掉极短段）
+    # 节奏门禁：段长阶梯 + 单句段瀑布
+    # 依据 xt-webnovel-writing K/C 条款：句长均匀度人机无差异（R=0.87），
+    # 「拆短句制造节奏」是错的去味手段；真正的匀速机感来自「全章没有长段」。
     _rhythm = _rhythm_metrics(text)
     stats["rhythm"] = _rhythm
     if _rhythm["段落数"] >= 8:
-        if _rhythm["极短段占比"] < 20:
+        if _rhythm["长段数(>80字)"] < 3:
+            p0.append(
+                f"节奏回滚级：全章只有 {_rhythm['长段数(>80字)']} 个 >80 字的长段（要求 ≥3，其中至少 1 段 >120 字）。"
+                f"全是中短段拼起来的匀速机感——请补写承担描写/心理/环境的长段，"
+                f"不要靠拆短句制造节奏（句长均匀度人机无差异，拆短句无效）"
+            )
+        elif _rhythm["超长段数(>120字)"] == 0:
             p1.append(
-                f"活人节奏：极短段（≤12字）仅 {_rhythm['极短段占比']}%（{_rhythm['极短段(≤12字)']} 段），"
-                f"建议 ≥20%——在情绪转折点砍出 2-5 字极短句独立成段；"
-                f"**如果原文有更多极短段而这里变少，说明润色把它们合并了，必须还原**"
+                f"节奏：{_rhythm['长段数(>80字)']} 个长段但没有 >120 字的（建议至少 1 段），"
+                f"长段要真正承担描写/心理/环境，不是拉长句子"
+            )
+        if _rhythm["最长连续单句段"] >= 6:
+            p0.append(
+                f"节奏回滚级：连续 {_rhythm['最长连续单句段']} 段单句成段（上限 3，≥6 是典型 AI 瀑布体）。"
+                f"把其中至少一半并入相邻段——单句成段必须有显式理由（情绪顶点/打断/转场锚点/对话重击）"
+            )
+        elif _rhythm["单句成段占比"] > 50:
+            p1.append(
+                f"节奏：单句成段占比 {_rhythm['单句成段占比']}%（上限 30%），全章像流水账"
             )
         if _rhythm["动作收尾占比"] < 8:
             p1.append(
                 f"活人节奏：动作收尾段仅 {_rhythm['动作收尾占比']}%（建议 ≥10%）"
                 f"——段尾爱落在抽象总结，改为落在具体动作/物件/短句"
-            )
-        if _rhythm["段落均长"] > 60:
-            p1.append(
-                f"活人节奏：段落均长 {_rhythm['段落均长']} 字（>60 偏长），适当把长段拆出短段"
             )
 
     return HardGateResult(p0=p0, p1=p1, stats=stats)
