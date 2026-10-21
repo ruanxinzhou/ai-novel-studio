@@ -928,6 +928,17 @@ def run_chapter_stage(
         if _style:
             materials.insert(0, _style)
 
+    # 角色声音档案（习惯动作/口癖/口音）：角色辨识度的唯一来源，跟实体库走，
+    # 不写死在文风卡里。REQUIRED——优先级高于通用去 AI 味规则。
+    if entity_store is not None and stage in ("plot", "draft", "polish"):
+        try:
+            from app.context.ledger import _voiceprint_material
+            _vp = _voiceprint_material(entity_store, chapter)
+            if _vp is not None:
+                materials.insert(0, _vp)
+        except Exception:
+            pass
+
     # 描写轮换账本（圆桌方案）：生成前把「你已经写过什么」当记忆注入给模型，
     # 措辞是叙事性的（记忆）而非管理性的（禁令）——这是它能起作用的关键。
     if stage in ("draft", "polish"):

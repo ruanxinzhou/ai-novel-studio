@@ -472,6 +472,7 @@ export interface EntityInfo {
   appearances: number[]
   created_at: string
   updated_at: string
+  voiceprint?: Voiceprint
 }
 export interface EntitiesSummary {
   project: string
@@ -492,6 +493,49 @@ export interface VaultExportResult {
   entities: number
   layers_exported: string[]
   warnings: string[]
+}
+
+export interface Voiceprint {
+  habits: string[]
+  catchphrases: string[]
+  dialect: string[]
+  register: string
+  psychology: string
+  silence: string
+  speech_pattern: string
+  taboos: string[]
+}
+export type VoiceprintInput = Partial<Record<keyof Voiceprint, string[] | string>>
+export interface VoiceprintRow {
+  id: string
+  name: string
+  is_protagonist: boolean
+  status: string
+  appearances: number[]
+  coverage: string
+  voiceprint: Voiceprint
+}
+export interface VoiceprintsSummary {
+  project: string
+  items: VoiceprintRow[]
+  total: number
+  unconfigured: number
+}
+export interface VoiceprintDetail extends VoiceprintRow {
+  labels: Record<string, string>
+  min_habits: number
+  min_catchphrases: number
+}
+
+export const voiceprintsApi = {
+  list: (pid: string) => req<VoiceprintsSummary>(`/api/projects/${pid}/voiceprints`),
+  get: (pid: string, eid: string) =>
+    req<VoiceprintDetail>(`/api/projects/${pid}/voiceprints/${encodeURIComponent(eid)}`),
+  save: (pid: string, eid: string, body: VoiceprintInput) =>
+    req<{ ok: boolean; id: string; coverage: string; voiceprint: Voiceprint }>(
+      `/api/projects/${pid}/voiceprints/${encodeURIComponent(eid)}`,
+      { method: 'PUT', body: JSON.stringify(body) },
+    ),
 }
 
 export const entitiesApi = {

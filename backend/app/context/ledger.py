@@ -140,14 +140,62 @@ def _entity_ledger(store: EntityStore) -> Material | None:
                     title="实体账本（角色/地点/道具/情节线/未回收伏笔）")
 
 
+def _voiceprint_material(store: EntityStore, chapter: int | None) -> Material | None:
+    """角色声音档案（习惯动作/口癖/口音/语气/心理/沉默习惯）。
+
+    这是「角色怎么说话」的唯一来源，REQUIRED 家族——通用去 AI 味规则和书级文风卡
+    都不得覆盖它，也不得自己给角色编动作。档案为空的角色不硬造，只在末尾提示缺配置。
+    """
+    lines: list[str] = []
+    missing: list[str] = []
+
+    # 主角（不在 entities 里，单独取）
+    pv = store.protagonist.voiceprint
+    pname = store.protagonist.current_body_name or "主角"
+    line = pv.render(pname)
+    if line:
+        lines.append(line)
+    if not pv.has_minimum():
+        missing.append(f"{pname}（动作 {len(pv.habits)}/3、口癖 {len(pv.catchphrases)}/1）")
+
+    for e in store.characters_in_chapter(chapter):
+        # 主角可能也建了同名 character 实体（历史数据），跳过避免重复注入
+        if pname and e.name == pname:
+            continue
+        line = e.voiceprint.render(e.name)
+        if line:
+            lines.append(line)
+        if not e.voiceprint.has_minimum():
+            missing.append(f"{e.name}（动作 {len(e.voiceprint.habits)}/3、口癖 {len(e.voiceprint.catchphrases)}/1）")
+
+    if not lines:
+        return None
+
+    head = (
+        "本书在场角色的固定写法特征（角色声音档案，来自实体库，REQUIRED）。\n"
+        "这些是角色的辨识度，不是可选装饰：写到这个角色时必须用他自己的习惯动作和口癖，"
+        "不允许所有角色共用同一套动作，也不允许临时编一个不属于他的动作。\n"
+        "用法：两句对白之间插入该角色的一个习惯动作（≤7 字）；情绪外化优先走他的习惯动作"
+        "而不是通用生理反应；口癖少量点缀，不要每句都用。\n"
+        "档案为空的角色：先按「目标-阻碍-选择-代价」写功能性的行为，不要硬套别人的动作库。"
+    )
+    if missing:
+        head += f"\n【尚未配齐声音档案的角色】{'、'.join(missing)}（可在实体库编辑补全）"
+    return Material(source_id="state:voiceprint", family=MaterialFamily.REQUIRED,
+                    content=head + "\n\n" + "\n".join(lines),
+                    title="角色声音档案（习惯动作/口癖/口音）")
+
+
 def build_state_materials(project_store, entity_store: EntityStore,
                           desk: DeskStore, pid: str,
-                          book_store=None, field_store=None) -> list[Material]:
+                          book_store=None, field_store=None,
+                          chapter: int | None = None) -> list[Material]:
     """项目已写状态 → 三类材料（有什么带什么，没有的不硬造）。
     book_store/field_store 传 None 时不注入书卡（旧项目/通用项目兼容）。"""
     mats: list[Material] = []
     for m in (_plot_digest(desk), _draft_recent(project_store, desk, pid),
-              _entity_ledger(entity_store)):
+              _entity_ledger(entity_store),
+              _voiceprint_material(entity_store, chapter)):
         if m is not None:
             mats.append(m)
     if book_store is not None:

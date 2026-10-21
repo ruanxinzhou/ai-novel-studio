@@ -1,4 +1,4 @@
-﻿"""Novel Studio API 骨架（M0）：健康检查 + 通道状态 + 路由生成测试。
+"""Novel Studio API 骨架（M0）：健康检查 + 通道状态 + 路由生成测试。
 
 M1-T5：Prompt 工坊（查看/编辑/重置/干跑）。
 """
@@ -30,6 +30,7 @@ from ..corpus import replace_article as corpus_replace_article
 from ..entities import (
     ENTITY_TYPES, TYPE_LABELS, EntityStore, PROTAGONIST_ID,
     StateChange, StateDiff, ProtagonistState, Relation,
+    VOICEPRINT_LABELS, VOICEPRINT_MIN_ACTIONS, VOICEPRINT_MIN_CATCHPHRASES,
     extract_entities,
 )
 from ..entities.vault import export_vault
@@ -469,7 +470,8 @@ def _prepare_layer(layer: str, body: LayerRunIn) -> dict:
             raise HTTPException(status_code=422, detail="project_state 需要同时提供 project")
         state_mats = build_state_materials(
             _project_store, _entities_for(body.project), _desk_for(body.project), body.project,
-            book_store=_book_for(body.project), field_store=_fields_for(body.project))
+            book_store=_book_for(body.project), field_store=_fields_for(body.project),
+            chapter=body.chapter_no)
     if body.chapter_no is not None:
         marker_mat = markers_material(
             _markers_for(body.project).pending_for(body.chapter_no), body.chapter_no)
@@ -978,6 +980,19 @@ class EntityUpdateIn(BaseModel):
     summary: str | None = None
     details: str | None = None
     status: str | None = None
+    voiceprint: dict | None = None
+
+
+class VoiceprintIn(BaseModel):
+    """角色声音档案。字段全部可选；传空串/空数组表示清空该字段。"""
+    habits: list[str] | str | None = None
+    catchphrases: list[str] | str | None = None
+    dialect: list[str] | str | None = None
+    register: str | None = None
+    psychology: str | None = None
+    silence: str | None = None
+    speech_pattern: str | None = None
+    taboos: list[str] | str | None = None
 
 
 class EntityExtractIn(BaseModel):
@@ -1079,9 +1094,67 @@ def entities_update(pid: str, eid: str, body: EntityUpdateIn) -> dict:
     _require_project(pid)
     try:
         return _entities_for(pid).update(
-            eid, body.name, body.summary, body.details, body.status).as_dict()
+            eid, body.name, body.summary, body.details, body.status,
+            voiceprint=body.voiceprint).as_dict()
     except ValueError as ex:
         raise HTTPException(status_code=404 if "不存在" in str(ex) else 422, detail=str(ex))
+
+
+# ---- 角色声音档案（voiceprint）----
+# 角色的习惯动作/口癖/口音是「这个角色是谁」的一部分，所以存实体库跟人走，
+# 不写死在 style_dna.md 或任何 prompt 里。主角走 PROTAGONIST_ID，同一套接口。
+
+
+@app.get("/api/projects/{pid}/voiceprints")
+def voiceprints_list(pid: str) -> dict:
+    """全书角色的声音档案 + 覆盖情况（UI 提示作者补哪些角色）。"""
+    _require_project(pid)
+    store = _entities_for(pid)
+    items = store.voiceprint_coverage()
+    return {
+        "project": pid,
+        "items": items,
+        "total": len(items),
+        "unconfigured": sum(1 for i in items if i["coverage"] != "完整"),
+    }
+
+
+@app.get("/api/projects/{pid}/voiceprints/{eid}")
+def voiceprint_get(pid: str, eid: str) -> dict:
+    _require_project(pid)
+    store = _entities_for(pid)
+    try:
+        vp = store.get_voiceprint(eid)
+    except ValueError as ex:
+        raise HTTPException(status_code=404, detail=str(ex))
+    name = ""
+    if eid == PROTAGONIST_ID:
+        name = store.protagonist.current_body_name or "主角"
+    else:
+        try:
+            name = store.get(eid).name
+        except ValueError:
+            name = eid
+    return {
+        "id": eid, "name": name, "coverage": vp.coverage(),
+        "voiceprint": vp.as_dict(), "labels": VOICEPRINT_LABELS,
+        "min_habits": VOICEPRINT_MIN_ACTIONS,
+        "min_catchphrases": VOICEPRINT_MIN_CATCHPHRASES,
+    }
+
+
+@app.put("/api/projects/{pid}/voiceprints/{eid}")
+def voiceprint_put(pid: str, eid: str, body: VoiceprintIn) -> dict:
+    _require_project(pid)
+    store = _entities_for(pid)
+    data = body.model_dump(exclude_unset=True) if hasattr(body, "model_dump") \
+        else body.dict(exclude_unset=True)
+    try:
+        vp = store.set_voiceprint(eid, data)
+    except ValueError as ex:
+        raise HTTPException(status_code=404, detail=str(ex))
+    return {"ok": True, "id": eid, "coverage": vp.coverage(),
+            "voiceprint": vp.as_dict()}
 
 
 @app.delete("/api/projects/{pid}/entities/{eid}")

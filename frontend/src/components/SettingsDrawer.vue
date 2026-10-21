@@ -21,6 +21,7 @@ import {
   type EntityInfo,
   type SkillModule,
 } from '../api'
+import VoiceprintEditor from './VoiceprintEditor.vue'
 
 const open = computed({
   get: () => drawerOpen.value,
@@ -194,6 +195,15 @@ async function addEntity() {
     /* cancel */
   }
 }
+
+// ============== 角色声音档案 Dialog ==============
+const voiceprintDialogOpen = ref(false)
+function openVoiceprints(presetId?: string) {
+  voiceprintDialogOpen.value = true
+  // 组件内自己按 presetId 预选
+  if (presetId) voiceprintPreset.value = presetId
+}
+const voiceprintPreset = ref<string | undefined>(undefined)
 
 // ============== 完整实体库 Dialog ==============
 const vaultDialogOpen = ref(false)
@@ -515,6 +525,9 @@ function layerCompleted(layer: string): boolean {
           <el-button size="small" type="primary" plain @click="openVault">
             📖 打开实体库
           </el-button>
+          <el-button size="small" type="warning" plain @click="openVoiceprints">
+            🎭 角色声音档案
+          </el-button>
         </div>
         <div
           v-loading="loading.entities"
@@ -660,6 +673,22 @@ function layerCompleted(layer: string): boolean {
       </el-collapse-item>
     </el-collapse>
   </el-drawer>
+
+  <!-- 角色声音档案 Dialog -->
+  <el-dialog
+    v-model="voiceprintDialogOpen"
+    title="🎭 角色声音档案"
+    width="1000px"
+    top="5vh"
+    destroy-on-close
+  >
+    <VoiceprintEditor
+      v-if="currentProjectId"
+      :pid="currentProjectId"
+      :preset-id="voiceprintPreset"
+      @close="voiceprintDialogOpen = false"
+    />
+  </el-dialog>
 
   <!-- 实体库 Dialog -->
   <el-dialog v-model="vaultDialogOpen" title="🗂 实体库" width="960px" top="5vh" destroy-on-close>

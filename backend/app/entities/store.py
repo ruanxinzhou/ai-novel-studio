@@ -41,6 +41,130 @@ TYPE_STATUS_DEFAULT = {"foreshadow": "planted"}
 
 PROTAGONIST_ID = "character-protagonist-tangchi"
 
+# ============================================================
+# 角色声音档案（voiceprint）
+# 角色的辨识度属于「角色」而不是「文风」，所以存在实体库里跟人走，
+# 不写死在 style_dna.md 或任何 skill / prompt 里。
+# 与 state_attrs（会随剧情变动的状态）分离：voiceprint 是恒定的创作设定。
+# ============================================================
+
+# 习惯动作 3-5 个 / 口癖 1-2 个是「能不能写活这个角色」的下限，
+# 所以下限卡在 3 和 1（低于就是没有辨识度），上限留给作者。
+VOICEPRINT_MIN_ACTIONS = 3
+VOICEPRINT_MIN_CATCHPHRASES = 1
+
+VOICEPRINT_LABELS = {
+    "habits": "习惯动作",
+    "catchphrases": "口癖",
+    "dialect": "口音",
+    "register": "语气基调",
+    "psychology": "心理基调",
+    "silence": "沉默习惯",
+    "speech_pattern": "说话方式",
+    "taboos": "语言禁忌",
+}
+
+VOICEPRINT_FIELDS = tuple(VOICEPRINT_LABELS.keys())
+
+
+def _as_list(value, limit: int = 8) -> list[str]:
+    """把 str / list 统一成去空去重的短句列表（作者手输时常见裸字符串）。"""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        items = [x.strip() for x in value.replace("，", "\n").replace("、", "\n").splitlines()]
+    elif isinstance(value, (list, tuple)):
+        items = []
+        for v in value:
+            if isinstance(v, dict):
+                v = str(v.get("habit") or v.get("text") or v.get("value") or "")
+            items.extend(_as_list(v, limit))
+        return items[:limit]
+    else:
+        items = [str(value).strip()]
+    out: list[str] = []
+    for x in items:
+        x = str(x).strip()
+        if x and x not in out:
+            out.append(x)
+    return out[:limit]
+
+
+@dataclass
+class Voiceprint:
+    """一个角色的固定写法特征。空字段表示「还没设计」，不是「没有」。"""
+    habits: list[str] = field(default_factory=list)        # 习惯动作 3-5 个
+    catchphrases: list[str] = field(default_factory=list)   # 口癖/口头禅 1-2 个
+    dialect: list[str] = field(default_factory=list)        # 口音/语序特征
+    register: str = ""                                      # 语气基调（短句/懒散/尖刻…）
+    psychology: str = ""                                    # 心理基调（怎么想事情）
+    silence: str = ""                                       # 沉默/回避习惯
+    speech_pattern: str = ""                                # 说话方式（长短句/省略/反问）
+    taboos: list[str] = field(default_factory=list)         # 这个角色绝不会说的话
+
+    def is_empty(self) -> bool:
+        return not (self.habits or self.catchphrases or self.dialect
+                    or self.register or self.psychology or self.silence
+                    or self.speech_pattern or self.taboos)
+
+    def has_minimum(self) -> bool:
+        """是否达到「能写活」的最低配置。"""
+        return (len(self.habits) >= VOICEPRINT_MIN_ACTIONS
+                and len(self.catchphrases) >= VOICEPRINT_MIN_CATCHPHRASES)
+
+    def coverage(self) -> str:
+        if self.is_empty():
+            return "空"
+        if self.has_minimum():
+            return "完整"
+        miss = []
+        if len(self.habits) < VOICEPRINT_MIN_ACTIONS:
+            miss.append(f"动作缺 {VOICEPRINT_MIN_ACTIONS - len(self.habits)} 个")
+        if not self.catchphrases:
+            miss.append("缺口癖")
+        return "待补：" + "、".join(miss) if miss else "完整"
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+    def render(self, name: str = "") -> str:
+        """渲染成注入 prompt 的一行/几行描述。空档案返回空串（不硬造）。"""
+        if self.is_empty():
+            return ""
+        head = f"· {name}：" if name else ""
+        parts: list[str] = []
+        if self.habits:
+            parts.append(f"习惯动作 {'、'.join(self.habits)}")
+        if self.catchphrases:
+            parts.append(f"口癖 {'、'.join(self.catchphrases)}")
+        if self.dialect:
+            parts.append(f"口音 {'、'.join(self.dialect)}")
+        for key, label in (("register", "语气"), ("psychology", "心理"),
+                           ("silence", "沉默"), ("speech_pattern", "说话方式")):
+            v = getattr(self, key)
+            if v:
+                parts.append(f"{label} {v}")
+        if self.taboos:
+            parts.append(f"绝不会说 {'、'.join(self.taboos)}")
+        return head + "；".join(parts)
+
+    @classmethod
+    def from_dict(cls, d) -> "Voiceprint":
+        if isinstance(d, Voiceprint):
+            return d
+        if not isinstance(d, dict):
+            return cls()
+        return cls(
+            habits=_as_list(d.get("habits")),
+            catchphrases=_as_list(d.get("catchphrases")),
+            dialect=_as_list(d.get("dialect")),
+            register=str(d.get("register", "") or "").strip(),
+            psychology=str(d.get("psychology", "") or "").strip(),
+            silence=str(d.get("silence", "") or "").strip(),
+            speech_pattern=str(d.get("speech_pattern", "") or "").strip(),
+            taboos=_as_list(d.get("taboos")),
+        )
+
 # 实体可追踪属性白名单（非强制，允许自定义 attr；用于 UI 聚组 + LLM prompt 稳定）
 ENTITY_ATTRS = {
     "character": {
@@ -137,9 +261,21 @@ class Entity:
     # M1 新增
     state_attrs: dict[str, str] = field(default_factory=dict)
     state_log: list[str] = field(default_factory=list)  # change ids in time order
+    # 角色声音档案（仅 character 用；其他类型恒为空）
+    voiceprint: Voiceprint = field(default_factory=Voiceprint)
+
+    def __post_init__(self) -> None:
+        # Entity(**d) 不走 from_dict，voiceprint 可能是裸 dict；统一收敛成 Voiceprint，
+        # 否则调用方拿到 dict 会踩 AttributeError。
+        if not isinstance(self.voiceprint, Voiceprint):
+            self.voiceprint = Voiceprint.from_dict(self.voiceprint)
+        if self.type != "character":
+            self.voiceprint = Voiceprint()
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d["voiceprint"] = self.voiceprint.as_dict()
+        return d
 
     def as_summary(self) -> dict:
         return {
@@ -147,6 +283,7 @@ class Entity:
             "summary": self.summary, "status": self.status,
             "appearances": self.appearances,
             "state_attrs": dict(self.state_attrs),
+            "voiceprint": self.voiceprint.as_dict(),
         }
 
 
@@ -246,6 +383,7 @@ class ProtagonistState:
     kill_record: list[str] = field(default_factory=list)          # 杀青账（每场一行，简短）
     contamination_level: int = 0                                  # 累积污染度（0-100，跨卷）
     field_count: int = 0                                          # 已完成副本数
+    voiceprint: Voiceprint = field(default_factory=Voiceprint)    # 主角固定写法特征
     updated_at: str = ""
     updated_from_chapter: int | None = None
 
@@ -275,6 +413,7 @@ class ProtagonistState:
             kill_record=list(d.get("kill_record", []) or []),
             contamination_level=int(d.get("contamination_level", 0) or 0),
             field_count=int(d.get("field_count", 0) or 0),
+            voiceprint=Voiceprint.from_dict(d.get("voiceprint")),
             updated_at=d.get("updated_at", ""),
             updated_from_chapter=d.get("updated_from_chapter"),
         )
@@ -579,12 +718,76 @@ class EntityStore:
             "relations": [r.as_dict() for r in self.relations if r.active],
         }
 
+    # ---- 角色声音档案（voiceprint）----
+    # 主角不在 entities 里（走 PROTAGONIST_ID），但作者希望「每个角色」
+    # 都能配声音档案，所以这里对主角和普通角色用同一套接口。
+
+    def get_voiceprint(self, eid: str) -> Voiceprint:
+        if eid == PROTAGONIST_ID:
+            return self.protagonist.voiceprint
+        return self.get(eid).voiceprint
+
+    def set_voiceprint(self, eid: str, data: dict | Voiceprint) -> Voiceprint:
+        vp = Voiceprint.from_dict(data)
+        if eid == PROTAGONIST_ID:
+            self.protagonist.voiceprint = vp
+            self.protagonist.updated_at = _now()
+        else:
+            e = self.get(eid)
+            if e.type != "character":
+                # 只有角色能配声音档案；地点/道具等保持空档案
+                raise ValueError(f"只有角色能配声音档案：{e.name}（{TYPE_LABELS.get(e.type, e.type)}）")
+            e.voiceprint = vp
+            e.updated_at = _now()
+        self._flush()
+        return vp
+
+    def voiceprint_coverage(self) -> list[dict]:
+        """全书角色的声音档案覆盖情况，供 UI 提示作者补哪些角色。"""
+        out = [{
+            "id": PROTAGONIST_ID,
+            "name": self.protagonist.current_body_name or "主角",
+            "is_protagonist": True,
+            "status": "active",
+            "appearances": [],
+            "coverage": self.protagonist.voiceprint.coverage(),
+            "voiceprint": self.protagonist.voiceprint.as_dict(),
+        }]
+        for e in self.list(type="character"):
+            # 主角同名实体（历史数据）不重复列出——声音档案走 PROTAGONIST_ID
+            if self.protagonist.current_body_name and e.name == self.protagonist.current_body_name:
+                continue
+            out.append({
+                "id": e.id, "name": e.name, "is_protagonist": False,
+                "status": e.status, "appearances": list(e.appearances),
+                "coverage": e.voiceprint.coverage(),
+                "voiceprint": e.voiceprint.as_dict(),
+            })
+        return out
+
+    def characters_in_chapter(self, chapter: int | None,
+                               window: int = 1) -> list[Entity]:
+        """本章在场的角色：appearance 落在 [chapter-window, chapter+window]，
+        外加全书累计出场过的 active 角色（防止新章新配角漏配）。"""
+        out: list[Entity] = []
+        for e in self.list(type="character"):
+            if e.status != "active":
+                continue
+            if chapter is None or window <= 0:
+                out.append(e)
+                continue
+            lo, hi = chapter - window, chapter + window
+            if any(lo <= c <= hi for c in e.appearances):
+                out.append(e)
+        return out
+
     # ---- 写入 ----
 
     def add(self, type: str, name: str, summary: str = "", details: str = "",
             status: str | None = None, source: str = "manual",
             chapter: int | None = None,
-            state_attrs: dict[str, str] | None = None) -> Entity:
+            state_attrs: dict[str, str] | None = None,
+            voiceprint: dict | Voiceprint | None = None) -> Entity:
         if type not in ENTITY_TYPES:
             raise ValueError(f"未知实体类型：{type}")
         name = name.strip()
@@ -602,6 +805,8 @@ class EntityStore:
             source=source,
             appearances=appearances,
             state_attrs=dict(state_attrs or {}),
+            voiceprint=(Voiceprint.from_dict(voiceprint)
+                        if type == "character" else Voiceprint()),
             created_at=now, updated_at=now,
         )
         self.entities.append(entity)
@@ -610,7 +815,8 @@ class EntityStore:
 
     def update(self, eid: str, name: str | None = None, summary: str | None = None,
                details: str | None = None, status: str | None = None,
-               state_attrs: dict[str, str] | None = None) -> Entity:
+               state_attrs: dict[str, str] | None = None,
+               voiceprint: dict | Voiceprint | None = None) -> Entity:
         e = self.get(eid)
         if name is not None:
             name = name.strip()
@@ -634,6 +840,8 @@ class EntityStore:
                     e.state_attrs.pop(k, None)
                 else:
                     e.state_attrs[k] = v
+        if voiceprint is not None and e.type == "character":
+            e.voiceprint = Voiceprint.from_dict(voiceprint)
         e.updated_at = _now()
         self._flush()
         return e
@@ -1243,8 +1451,13 @@ class EntityStore:
 # 但这里写个 helper 容错） ----
 
 def _entity_from_legacy(d: dict) -> dict:
-    """确保旧 entity dict 补齐 M1 新字段，喂给 Entity(**d) 不报错。"""
+    """确保旧 entity dict 补齐 M1 新字段，喂给 Entity(**d) 不报错。
+
+    voiceprint 必须转成 dict 再交给 dataclass——__init__ 不走 from_dict，
+    否则 Entity(**d) 会把裸 dict 塞进字段，调用方拿到 dict 而不是 Voiceprint。
+    """
     d = dict(d)
     d.setdefault("state_attrs", {})
     d.setdefault("state_log", [])
+    d["voiceprint"] = Voiceprint.from_dict(d.get("voiceprint")).as_dict()
     return d

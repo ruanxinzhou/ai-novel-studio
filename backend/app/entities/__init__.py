@@ -16,6 +16,10 @@ from app.entities.store import (
     STATUS_LABELS,
     TYPE_LABELS,
     VALID_REL_TYPES,
+    VOICEPRINT_FIELDS,
+    VOICEPRINT_LABELS,
+    VOICEPRINT_MIN_ACTIONS,
+    VOICEPRINT_MIN_CATCHPHRASES,
     Entity,
     EntityStore,
     ForeshadowSuggestion,
@@ -26,6 +30,7 @@ from app.entities.store import (
     StateChange,
     StateChangeSuggestion,
     StateDiff,
+    Voiceprint,
 )
 
 __all__ = [
@@ -38,6 +43,10 @@ __all__ = [
     "STATUS_LABELS",
     "TYPE_LABELS",
     "VALID_REL_TYPES",
+    "VOICEPRINT_FIELDS",
+    "VOICEPRINT_LABELS",
+    "VOICEPRINT_MIN_ACTIONS",
+    "VOICEPRINT_MIN_CATCHPHRASES",
     "Entity",
     "EntityStore",
     "ExtractionResult",
@@ -51,6 +60,7 @@ __all__ = [
     "StateChange",
     "StateChangeSuggestion",
     "StateDiff",
+    "Voiceprint",
     "extract_entities",
     "reconcile_foreshadows",
 ]
