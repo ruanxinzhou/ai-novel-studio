@@ -28,6 +28,7 @@ from app.generation.humanize import (
     _FULL_DOUBLE_RE,
     _HALF_DOUBLE_RE,
     _SAFE_REPLACES,
+    _burstiness_stats,
     diagnosis_score,
 )
 
@@ -127,7 +128,10 @@ def hard_gate(
     if half_dq + full_dq > 0:
         p1.append(f"残留半/全角双引号 {half_dq + full_dq} 处（应用「」）")
     if dashes > 0:
-        p1.append(f"残留破折号 {dashes} 处（应用逗号/句号）")
+        # 破折号按用途管，不按密度管（跨模型差异 40 倍）——用途错的已被 postprocess 换成逗号/句号。
+        # 这里只做统计提示，不卡 P0/P1。
+        per_k_d = dashes * 1000 / max(chars, 1)
+        stats["dashes_per_k"] = round(per_k_d, 2)
 
     # AI 句式命中数
     ai_hits: dict[str, int] = {}
@@ -184,6 +188,61 @@ def hard_gate(
     if long_para_no_dialog >= 2:
         p1.append(f"存在 {long_para_no_dialog} 段超过 300 字无对白的长段（可能信息倾倒）")
 
+    # burstiness/材料密度指标（基于 lieflat 283 万字人机对照实证）
+    burst = _burstiness_stats(text)
+    stats["burstiness"] = burst
+    q_d = burst["question_density"]
+    cv = burst["sentence_cv"]
+    ct = burst["char_type_density"]
+    cm = burst["comma_density"]
+    num_d = burst["number_density"]
+    t_d = burst["time_anchor_density"]
+    za = burst["zero_anaphora_hits"]
+    ps = burst["personified_simile"]
+    # 问号密度 < 2/千字 P0（R=0.05，人机差 17 倍，区分力最强），< 5 P1
+    if q_d < 2.0:
+        p0.append(f"问号密度过低：{q_d:.1f}/千字（< 2，人类稿是 AI 的 17 倍，请加入内心反问/对白问句/不确定自问）")
+    elif q_d < 5.0:
+        p1.append(f"问号偏少：{q_d:.1f}/千字（建议 5-8，加入内心反问/对白问句）")
+    elif q_d > 15.0:
+        p1.append(f"问号过密：{q_d:.1f}/千字（建议 5-8，过多像审讯）")
+    # 句长 CV —— 撤回 P0（lieflat 实证 R=0.87 人机差异不显著），< 0.2 才给 P1 提示
+    if cv < 0.2:
+        p1.append(f"句长极度均匀：CV={cv:.2f}（< 0.2，建议在情绪转折点砍 2-5 字极短句打断，但不要为变速而变速）")
+    elif cv < 0.4:
+        pass  # 不提示，避免误伤（0.4-0.7 都在人机重叠区）
+    # 字种密度 < 0.25 P0（套话堆砌），< 0.35 P1
+    if ct < 0.25:
+        p0.append(f"字种密度过低：{ct:.2f}（< 0.25，套话/高频重复词堆砌，请用具体名词动词替换）")
+    elif ct < 0.35:
+        p1.append(f"字种偏低：{ct:.2f}（建议 > 0.35，增加具体名词/动词，减少套话）")
+    # 逗号密度
+    if cm < 25:
+        p1.append(f"逗号偏少：{cm:.1f}/千字（可能短句过少或无停顿）")
+    elif cm > 100:
+        p1.append(f"逗号过密：{cm:.1f}/千字（可能长句连写，请适当断句）")
+    # 数字密度 < 2/千字 P1（人类 17.9 vs AI 6.3，R=2.8×）
+    if num_d < 2.0:
+        p1.append(f"具体数字偏少：{num_d:.1f}/千字（建议 ≥ 2，加入房号/时间/价格/年龄/楼层/次数等具体数字，避免「很久/不少」等模糊词）")
+    # 时间锚点密度 < 1/千字 P1（人类是 AI 的 2.6 倍）
+    if t_d < 1.0:
+        p1.append(f"时间锚点偏少：{t_d:.1f}/千字（建议 ≥ 1，加入三点钟/第二天/上周/分钟/秒等具体时间词）")
+    # 拟人化褒义喻体（像一位智慧的导师）命中即 P1（R=12.6× AI 重灾区）
+    if ps > 0:
+        p1.append(f"拟人化褒义喻体 {ps} 处（AI 高频特征，改写为具体动作/感官描写）")
+    # 段首零回指命中（postprocess 已自动修复；残留 > 2 处提示）
+    if za > 2:
+        p1.append(f"段首零回指评论 {za} 处（已自动补'但'字衔接，建议下次写时直接带回指）")
+
+    # 块间接缝（与 prev_tail 衔接）：首句用空泛过渡词强行衔接 = 接缝断裂信号
+    if prev_tail:
+        first_sent = re.split(r"[。！？!?\n]", text.lstrip(), maxsplit=1)[0].strip()
+        _SEAM_BAD_STARTS = re.compile(
+            r"^(与此同时|话音刚落|话音未落|就在这时|就在这一刻|霎时间|刹那间|下一秒|紧接着|随后)"
+        )
+        if _SEAM_BAD_STARTS.match(first_sent):
+            p1.append(f"块间接缝：本段以空泛过渡词「{first_sent[:10]}…」开头，建议改为动作/物件/时间锚点承接上一段")
+
     return HardGateResult(p0=p0, p1=p1, stats=stats)
 
 
@@ -191,7 +250,7 @@ def hard_gate(
 
 SOFT_REVIEW_SYSTEM = """你是中文克苏鲁无限流小说的资深编审，只做评分与问题诊断，不代写、不润色。
 评审对象：作者刚写完的一章正文。你将收到：章节大纲（plot）、前章结尾摘要（prev_tail）、本章正文（text）。
-请按下述 12 个维度为正文打分（每项 0-10 整数，10 为完美）：
+请按下述 13 个维度为正文打分（每项 0-10 整数，10 为完美）：
 1. foreshadowing 伏笔：是否埋下具体的钩子/异常/悬念，不是空泛预告
 2. consistency 一致性：与大纲/前文/人设是否一致，有没有 OOC 或自相矛盾
 3. character_voice 角色声口：对白/反应是否符合角色身份，主角是否有辨识度
@@ -204,6 +263,12 @@ SOFT_REVIEW_SYSTEM = """你是中文克苏鲁无限流小说的资深编审，�
 10. agency 人物能动性：关键选择是否有代价；人物不是被剧情推着走，而是做了推动剧情的决定
 11. hook_quality 钩子质量：章末/段末钩子是具体事件/发现/动作，不是空泛预告（"真正的危机才刚开始""他不知道的是"为 0 分）
 12. pov_discipline 视角纪律：细节是否跟着视角走，没有上帝视角越界；设定是否等到人物碰到才讲
+13. sentence_variance 句长节律【负向扣分项】：
+   - 10 分：长短句错落明显，情绪转折点有 2-5 字极短句打断，有反问/自问，有半截话/沉默/口癖停顿，有具体数字/时间锚点，段首评论有回指（"但奇怪的是"而非悬空"奇怪的是"），读起来像人说话喘气
+   - 7-8 分：整体有节奏，偶有匀速段但不致命
+   - 4-6 分：缺问号/缺极短句/缺具体锚点，段首有悬空评论，读起来像在匀速写作文
+   - 0-3 分（P0）：全程匀速且缺问号/缺数字锚点/段首大量零回指评论/无打断无半截话；或长句一逗到底；AI 流水账感明显
+   评分要点：这一项判的是"节律像不像人"，不是"文笔好不好"。注意：单纯的句长均匀不是 AI 强特征（人机差异只有 13%）；真正的强信号是"问号少+材料稀薄（无具体数字/时间）+段首零回指+无打断无半截话"的组合。请按综合信号打分。
 
 同时检测下列问题：
 - p0_fatal（必须重写的致命问题，字符串数组）：
@@ -212,17 +277,21 @@ SOFT_REVIEW_SYSTEM = """你是中文克苏鲁无限流小说的资深编审，�
   c. 重复循环：同一种"看到异象→怀疑自己→否定→再看到"节奏出现 2 次以上
   d. 空章末钩子：章末用"他不知道的是/更大的风暴/命运的齿轮/故事才刚刚开始"等空预告收尾
   e. 信息倾倒：>300 字纯旁白解释设定/世界观，无动作或对白打断
+  f. AI 节律：sentence_variance ≤ 3，全程匀速流水账，缺问号/缺具体锚点/段首零回指/无打断
+  g. 块间接缝断裂（本章为分段生成）：本段开头与上一段结尾节奏/语气/视角突变，或开头用空泛过渡句强行衔接（"与此同时""话音刚落"），或与上一段末句的动作/情绪不连贯
 - p1_warnings（建议修改但不致命的问题，字符串数组）：
-  a. 万能反应：同一情绪多次用同一生理反应
+  a. 万能反应：同一情绪多次用同一生理反应（心跳加速/后背发凉/瞳孔收缩）
   b. 对白标签单调：连 5 句以上"XX 说"无穿插
   c. 对白汇报：人物互相说双方已知信息只为给读者解释
   d. 译文句式：句首"然而"/"不是A而是B"/"这意味着"/"对于…来说"出现 ≥2 次
-  e. 其他具体可改进点
-- fix_hints（给重写模型的具体修复建议，字符串数组；只写"怎么改"，不要复述问题）
+  e. 句长偏匀：sentence_variance ≤ 6，部分段落缺少短句变速或反问
+  f. 其他具体可改进点
+- fix_hints（给重写模型的具体修复建议，字符串数组；只写"怎么改"，不要复述问题；
+  必须针对 sentence_variance 给出可操作建议：哪里插入极短句/哪里加反问/哪里用半截话打断/哪里把长句砍开）
 
 只输出一个 JSON 对象，字段为：
-{"scores":{foreshadowing,consistency,character_voice,cthulhu_vibe,pacing,imagery,dialogue,brevity,scene_arc,agency,hook_quality,pov_discipline},
- "total":0-100整数（12项均值×10，四舍五入）,
+{"scores":{foreshadowing,consistency,character_voice,cthulhu_vibe,pacing,imagery,dialogue,brevity,scene_arc,agency,hook_quality,pov_discipline,sentence_variance},
+ "total":0-100整数（13项均值×10，四舍五入）,
  "p0_fatal":[...], "p1_warnings":[...], "fix_hints":[...]}
 不要输出 JSON 以外的任何字符、不要使用 ```json 标记。"""
 
@@ -288,6 +357,7 @@ def parse_soft_review(raw: str) -> SoftReviewResult:
         "dialogue": "对白", "brevity": "简洁度",
         "scene_arc": "场景完整", "agency": "人物能动性",
         "hook_quality": "钩子质量", "pov_discipline": "视角纪律",
+        "sentence_variance": "句长节律",
     }
     for en, zh in key_map.items():
         v = scores.get(en)
@@ -299,7 +369,7 @@ def parse_soft_review(raw: str) -> SoftReviewResult:
     try:
         res.total = max(0, min(100, int(total)))
     except (TypeError, ValueError):
-        res.total = int(sum(res.scores.values()) * 10 / 12) if res.scores else 0
+        res.total = int(sum(res.scores.values()) * 10 / 13) if res.scores else 0
     res.p0 = [str(x) for x in (data.get("p0_fatal") or []) if str(x).strip()]
     res.p1 = [str(x) for x in (data.get("p1_warnings") or []) if str(x).strip()]
     res.fix_hints = [str(x) for x in (data.get("fix_hints") or []) if str(x).strip()]

@@ -289,6 +289,54 @@ class PipelineRunner:
                 soft_review: SoftReviewResult | None = None
                 extra_directive: str | None = None
                 completion = None
+                # burstiness 重试护栏：单项指标连续 2 轮 P0 且无改善，则降级为 P1，避免死循环
+                _burst_streak: dict[str, int] = {}
+                _burst_prev: dict[str, float] = {}
+                _BURST_P0_KEYS = {  # p0_msg 子串 -> stats key -> 改善方向（越大越好/越小越好）
+                    # 注意：句长 CV 已撤回 P0（lieflat 实证 R=0.87 人机差异不显著），
+                    # 只剩问号密度、字种密度两项真正的 P0 burstiness 指标。
+                    "问号密度过低": ("question_density", "up"),
+                    "字种密度过低": ("char_type_density", "up"),
+                }
+
+                def _apply_burstiness_guard(review: HardGateResult) -> HardGateResult:
+                    """把连续 2 轮未改善的 burstiness P0 降级为 P1。"""
+                    nonlocal _burst_streak, _burst_prev
+                    burst = (review.stats or {}).get("burstiness") or {}
+                    remaining_p0: list[str] = []
+                    demoted_p1: list[str] = []
+                    for msg in review.p0:
+                        matched = False
+                        for needle, (key, direction) in _BURST_P0_KEYS.items():
+                            if needle in msg:
+                                cur = float(burst.get(key, 0) or 0)
+                                prev = _burst_prev.get(key)
+                                improved = (
+                                    prev is None
+                                    or (direction == "up" and cur > prev + 0.01)
+                                    or (direction == "down" and cur < prev - 0.01)
+                                )
+                                if improved:
+                                    _burst_streak[key] = 1
+                                else:
+                                    _burst_streak[key] = _burst_streak.get(key, 0) + 1
+                                _burst_prev[key] = cur
+                                if _burst_streak[key] >= 3:  # 首轮+2轮重写共3次机会
+                                    demoted_p1.append(
+                                        f"{msg}（已重写 {_burst_streak[key]-1} 轮未改善，降级为建议项）"
+                                    )
+                                    matched = True
+                                break
+                        if not matched:
+                            remaining_p0.append(msg)
+                    if demoted_p1:
+                        review = HardGateResult(
+                            p0=remaining_p0,
+                            p1=list(review.p1) + demoted_p1,
+                            stats=review.stats,
+                        )
+                    return review
+
                 while quality_rounds < max_quality_rounds:
                     try:
                         completion = complete_prose(
@@ -307,17 +355,21 @@ class PipelineRunner:
                         attempts=completion.attempts,
                         dedup_overlaps=completion.dedup_overlaps,
                     )
-                    # 硬门禁（字数/重复率/AI 句式密度/残留标点等，零 token）
+                    # 硬门禁（字数/重复率/AI 句式密度/残留标点/burstiness 等，零 token）
                     prev_tail = anchor_text[-200:] if anchor_text else ""
                     hard_review = hard_gate(
                         completion.text, prev_tail=prev_tail,
                         target_chars=spec.target_chars,
                     )
+                    # burstiness 重试护栏：单项连续未改善则降级，防止死循环
+                    hard_review = _apply_burstiness_guard(hard_review)
+                    burst_stats = (hard_review.stats or {}).get("burstiness") or {}
                     if on_event:
                         on_event("quality", {
                             "index": i, "round": quality_rounds,
                             "kind": "hard", "p0": hard_review.p0, "p1": hard_review.p1,
                             "stats": hard_review.stats,
+                            "burstiness": burst_stats,
                         })
                     if hard_review.passed:
                         break
@@ -326,12 +378,29 @@ class PipelineRunner:
                         break
                     # 把 P0 问题拼成 extra_directive 下一轮注入
                     extra_directive = "【质量门禁问题】\n" + "\n".join(f"- {x}" for x in hard_review.p0)
+                    # 如果本轮有 burstiness 相关 P0/P1，额外注入具体修复方向
+                    burst_hints: list[str] = []
+                    for msg in hard_review.p0 + hard_review.p1:
+                        if "问号密度" in msg or "问号偏少" in msg:
+                            burst_hints.append("在内心戏/对白处加 3-5 个反问句或问句（自然出现，不要每段都问；人类稿问号是 AI 的 17 倍）")
+                        elif "字种密度" in msg:
+                            burst_hints.append("用具体名词/动词替换套话（不要用「仿佛/似乎/某种」模糊词，直接写具体物件与动作）")
+                        elif "具体数字偏少" in msg:
+                            burst_hints.append("每 500 字加 1-2 个具体数字（房号/楼层/年龄/时间/价格/次数/公里数），替换「很久/不少/很多」")
+                        elif "时间锚点偏少" in msg:
+                            burst_hints.append("加入具体时间词（三点钟/第二天/上周/秒/分钟/小时），不要全用「一会儿/后来/不久」")
+                        elif "拟人化" in msg:
+                            burst_hints.append("删掉「像一位智慧的导师」这类带褒义拟人化喻体，改写为具体动作或感官")
+                        elif "零回指" in msg:
+                            burst_hints.append("段首评论句前补「但/可/这」等指示代词，不要让评价直接悬空起笔")
+                    if burst_hints:
+                        extra_directive += "\n\n【burstiness 具体修复方向】\n" + "\n".join(f"- {x}" for x in burst_hints)
                     extra_directive += "\n\n请重写这一段，修正以上问题，严格保留剧情骨架。"
                     if on_event:
                         on_event("notice", {"text": f"[质量门禁] 第 {i} 块硬门禁未通过，重写第 {quality_rounds} 轮："
                                                    + "；".join(hard_review.p0)[:80]})
 
-                # 正文/润色层：软评审（LLM 8 维打分，1 次非流式调用）。
+                # 正文/润色层：软评审（LLM 13 维打分，1 次非流式调用）。
                 # 仅在硬门禁通过后才做；P0 问题再触发一轮带 fix_hints 的重写。
                 if (not hard_review or hard_review.passed) and spec.name in ("draft", "polish") and completion:
                     try:
@@ -352,6 +421,7 @@ class PipelineRunner:
                                 "total": soft_review.total,
                                 "scores": soft_review.scores,
                                 "p0": soft_review.p0, "p1": soft_review.p1,
+                                "burstiness": burst_stats,
                             })
                         if (not soft_review.passed) and quality_rounds < max_quality_rounds:
                             quality_rounds += 1
@@ -375,7 +445,12 @@ class PipelineRunner:
                                         attempts=completion.attempts + completion2.attempts,
                                         dedup_overlaps=completion.dedup_overlaps,
                                     )
+                                    burst_stats2 = (hard2.stats or {}).get("burstiness") or {}
                                     if on_event:
+                                        on_event("quality", {
+                                            "index": i, "kind": "soft_rewrite",
+                                            "burstiness": burst_stats2,
+                                        })
                                         on_event("notice", {"text": f"[质量评审] 重写完成"})
                             except Exception as re_e:
                                 log.warning("soft-review rewrite failed: %s", re_e)
