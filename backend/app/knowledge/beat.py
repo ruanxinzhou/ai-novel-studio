@@ -48,9 +48,13 @@ _FALLBACK = "engine"
 
 
 def beat_bounds(beat_type: str) -> dict:
-    """取某 beat_type 的分档；未知/空值回退到 engine 档。"""
+    """取某 beat_type 的分档；未知/空值回退到 engine 档。
+
+    返回**副本**：调用方就地改 dict 不会污染 BEAT_BOUNDS 这张全局唯一真值
+    （Task 8 的门禁与 prompt 都直接读这张表，一处被改就全线偏移）。
+    """
     key = str(beat_type or "").strip().lower()
-    return BEAT_BOUNDS.get(key, BEAT_BOUNDS[_FALLBACK])
+    return dict(BEAT_BOUNDS.get(key, BEAT_BOUNDS[_FALLBACK]))
 
 
 def chapter_words_target(beat_type: str) -> int:
