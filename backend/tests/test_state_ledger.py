@@ -66,7 +66,7 @@ def test_three_materials_from_written_state(env):
     assert ledger.family == MaterialFamily.REQUIRED
     for frag in ("【角色】", "陆离：主角，剪辑师（第1-2章）", "老王", "〔已退场〕",
                  "【地点】", "【道具】", "【情节线】", "【未回收伏笔】",
-                 "床下的朋友：布偶诡异归位（第2章埋）", "已回收 1 条"):
+                 "床下的朋友：布偶诡异归位（第2章埋，从未推进）", "已回收 1 条"):
         assert frag in ledger.content, frag
     # 已回收的不进未回收清单
     assert "面板暗纹" not in ledger.content

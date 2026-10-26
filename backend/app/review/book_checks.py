@@ -1,13 +1,14 @@
 """《第七日的亡者》书专属审稿检查（纯数据推导，不走 LLM）。
 
-七条书规硬检：
+八条书规硬检：
 1. 唐迟入戏日号锚：章节标注 day=N（指唐迟入戏第 N 天 / T-(7-N)）时，正文不能出现「第N+1天」及之后的入戏日号
 2. 8:2 间章脊柱：is_interlude 的章节必须出现暗线（残页/其他选中者/下一场暗示）关键词
 3. 执念代价延迟：同场使用执念金手指后 1-2 章内必须有副作用迹象
-4. 唐迟 POV 泄漏：非间章正文不能出现唐迟视角以外的全知叙述（软检：点名检查"他不知道/他没发现"类叙述者越界词）
+4. 唐迟 POV 泄漏：正文（含间章）不能出现唐迟视角以外的全知叙述（软检：点名检查"他不知道/他没发现"类叙述者越界词）
 5. 终局种子审计：每场至少埋一颗对应层级的终局种子（按 endgame 锚点 pending 数）
 6. 力量升级克制：侵蚀度 ≥40 后不能再出现唐迟单方面轻松碾压的描写（强金手指必有代价描写）
 7. 伏笔兑现兜底：章前方向卡声明的 foreshadow_advance 子串命中 <50% → 软提醒（不阻断交稿）
+8. 角色知情边界：声明为「不知情」的角色不得在本章表现出知道（软提醒，spec 3）
 
 注：副本原剧本时间线（小时/天/月/年自由跨度）与此锚无关——"入戏第 N 天"是唐迟自己的倒计时，
    不是原剧本的日历天；原剧本事件可按自身节奏在任何入戏日推进。
@@ -21,11 +22,36 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.book import BookStore
+    from app.entities.store import EntityStore
     from app.fields import FieldStore
     from app.wizard import DeskStore
 
+# 知情边界检查的成稿门槛（同 check_foreshadow_payoff 的先例）：
+# 启发式关键词匹配天然误判率高，半成品/draft 阶段一律不报。
+KNOWLEDGE_MIN_CHARS = 600
 
-# ---- 4) POV 越界关键词（非间章出现 → 报警） ----
+# ---- 8) 知情边界：角色「表现出知道」他被声明为不知情的东西 ----
+# 越界信号必须**紧挨角色名**：知识边界是「谁」的边界，同一个秘密在场上有
+# 别的角色知道是合法的，只有「被声明不知情的那个人表现出知道」才叫越界。
+_KNOWLEDGE_LEAK_TMPL = (
+    r"{name}[^。！？\n]{{0,20}}?"
+    r"(?:竟然|居然|知道|清楚|明白|认定|看穿|看破|洞穿|心里有数|早就|不就是)"
+)
+# 反向信号：不知情角色的合理表现（困惑、被蒙在鼓里、追问）——命中则视为合法
+_KNOWLEDGE_BLESSED_TMPL = (
+    r"{name}[^。！？\n]{{0,16}}?"
+    r"(?:不知道|不懂|不明白|没听说|没提过|一头雾水|莫名其妙|不知所以|怔住|愣住|皱眉|困惑)"
+)
+# 关键词切分：blinded_to 是人写的自由文本，用顿号/逗号/分号/换行切成多个候选
+_KNOWLEDGE_SPLIT_RE = re.compile(r"[、，,；;/\n]+|(?:以及|还有|和)")
+
+# 关键词长度下限：单字关键词（「命」「局」）在正文里撞车率极高，一律不查
+_KNOWLEDGE_KW_MIN = 2
+# 关键词长度上限：超长句不是「信息点」，无法作为可校验的边界
+_KNOWLEDGE_KW_MAX = 12
+
+
+# ---- 4) POV 越界关键词（副本章与间章出现 → 报警） ----
 _POV_LEAK_PATTERNS = [
     (re.compile(r"他(?:却|并)?不知道"), "POV 越界：「他不知道」类叙述者全知——唐迟限知视角不应由叙述者替读者揭秘"),
     (re.compile(r"他(?:完全|丝毫)?没有 (?:发现|察觉|意识到|注意到)"), "POV 越界：「他没发现」类全知提示——限知视角下读者应和主角一起被蒙在鼓里"),
@@ -179,18 +205,24 @@ def check_obsession_cost_delay(desk, chapter: int, book_store=None, field_store=
 
 
 def check_tang_pov(desk, chapter: int, book_store=None, field_store=None) -> str | None:
-    """检查4：唐迟 POV 泄漏——非间章不能出现全知叙述。"""
+    """检查4：唐迟 POV 泄漏——副本章与间章都必须锁定唐迟限知视角。
+
+    早前这里对间章直接 return None（认为「间章允许 NPC 视角/全知」），
+    但全书 POV 铁律是唐迟限知，间章只是场景换到蓝星，叙述者没换——
+    读者仍然只能通过唐迟的眼睛看这个世界。放开间章等于给模型开了
+    「间章可以切全知旁白」的口子，它会真的这么写。
+    """
     w = desk.get(chapter)
     if w is None:
         return None
-    if bool(getattr(w, "is_interlude", False)):
-        return None     # 间章允许 NPC 视角/全知
     text = _chapter_text(desk, chapter)
     if not text:
         return None
     for pat, msg in _POV_LEAK_PATTERNS:
         if pat.search(text):
-            return f"POV 泄漏报警：{msg}。非间章必须严格锁定唐迟限知视角。"
+            kind = "间章" if bool(getattr(w, "is_interlude", False)) else "本章"
+            return (f"POV 泄漏报警：{msg}。{kind}必须严格锁定唐迟限知视角——"
+                    "间章只是场景换到蓝星，叙述者仍然是唐迟，不能借『间章』切全知旁白。")
     return None
 
 
@@ -324,9 +356,80 @@ def check_foreshadow_payoff(desk, chapter: int, book_store=None, field_store=Non
               "可在前端手动标记忽略此提醒。")
 
 
+def _knowledge_keywords(raw: str) -> list[str]:
+    """把 blinded_to 自由文本切成可校验的关键词列表。
+
+    只保留长度在 [2, 12] 的词：单字撞车率极高（「命」「局」「他」），
+    超长句根本不是可校验的信息点。
+    """
+    out: list[str] = []
+    for piece in _KNOWLEDGE_SPLIT_RE.split(raw or ""):
+        kw = piece.strip().strip("「」\"'（）()【】[]")
+        if _KNOWLEDGE_KW_MIN <= len(kw) <= _KNOWLEDGE_KW_MAX:
+            out.append(kw)
+    return out
+
+
+def check_knowledge_boundary(desk, chapter: int, book_store=None,
+                             field_store=None,
+                             entity_store: "EntityStore | None" = None) -> str | None:
+    """检查8：角色知情边界——被显式声明为「不知情」的角色不得在本章表现出知道。
+
+    只查**明确声明**的边界（character.state_attrs["blinded_to"]），空值不检查——
+    不自动推断「他应该知道却不知道」，那需要世界模型，成本与误判率都不可控。
+
+    判定要求三个条件同时成立，宁可漏报不可误报：
+    1. 本章是成稿（≥ KNOWLEDGE_MIN_CHARS 字），半成品一律放过；
+    2. 关键词 K 出现在正文中；
+    3. 角色名附近出现认知动词（知道/看穿/早就…）且**没有**困惑类反向信号。
+
+    为什么是软提醒：启发式匹配误判率天然高（关键词可能只是巧合同名、
+    「早就」也可能修饰别的事）。按 check_foreshadow_payoff 的先例，
+    只在成稿且命中明确时报，不阻断交稿。
+    """
+    if entity_store is None:
+        return None
+    w = desk.get(chapter)
+    if w is None:
+        return None
+    text = _chapter_text(desk, chapter)
+    if not text or len(text) < KNOWLEDGE_MIN_CHARS:
+        return None
+
+    violations: list[str] = []
+    for e in entity_store.list(type="character"):
+        raw = (e.state_attrs or {}).get("blinded_to") or ""
+        if not str(raw).strip():
+            continue                      # 没声明 = 不检查
+        for kw in _knowledge_keywords(str(raw)):
+            if kw not in text:
+                continue
+            name = re.escape(e.name)
+            leak = re.search(_KNOWLEDGE_LEAK_TMPL.format(name=name), text)
+            if not leak:
+                continue
+            # 同一句里出现困惑类信号 → 合法的「不知道」，放过
+            sent_start = max(text.rfind("。", 0, leak.start()),
+                             text.rfind("\n", 0, leak.start())) + 1
+            sentence = text[sent_start:leak.end() + 12]
+            if re.search(_KNOWLEDGE_BLESSED_TMPL.format(name=name), sentence):
+                continue
+            violations.append(f"{e.name}×「{kw}」")
+
+    if not violations:
+        return None
+    detail = "、".join(violations[:4]) + ("…" if len(violations) > 4 else "")
+    return (f"角色知情边界报警（软提醒）：{detail} —— 该信息在实体库里被显式登记为"
+            "此角色「不知情」，但本章里他表现出知道/看穿了它。"
+            "无限流设定的张力全靠信息不对称撑着：NPC 不能说出他不该知道的事。"
+            "若这是本章刚揭晓的转折（角色刚得知），请在实体库更新他的知情状态后再审；"
+            "若是刻意误导（他其实早知道），删掉该角色的 blinded_to 声明即可。")
+
+
 def book_review_checks(desk, chapter: int,
-                       book_store=None, field_store=None) -> list[str]:
-    """运行全部七条书规检查，返回报警列表（空=全部通过）。"""
+                       book_store=None, field_store=None,
+                       entity_store=None) -> list[str]:
+    """运行全部八条书规检查，返回报警列表（空=全部通过）。"""
     warnings: list[str] = []
     for fn in (check_seven_day_anchor, check_interlude_spine,
                check_obsession_cost_delay, check_tang_pov,
@@ -338,4 +441,12 @@ def book_review_checks(desk, chapter: int,
             msg = None
         if msg:
             warnings.append(msg)
+    try:
+        msg = check_knowledge_boundary(desk, chapter, book_store=book_store,
+                                       field_store=field_store,
+                                       entity_store=entity_store)
+    except Exception:
+        msg = None
+    if msg:
+        warnings.append(msg)
     return warnings

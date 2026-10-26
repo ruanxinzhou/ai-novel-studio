@@ -430,17 +430,19 @@ defineExpose({ refresh: loadPhase })
           <WritingDeskView v-else-if="phase === 'writing-desk'" />
 
           <!-- adapt / adapt_empty 阶段：上传 PDF + 并行改编 + 选版 -->
+          <!-- @done 必须带当前卷号：不带参数会跳到「最新活跃卷」，
+               表现为选完版点「下一阶段」却跳进了别的卷的章节编辑页。 -->
           <ModuleAdaptView
             v-else-if="phase === 'adapt' || phase === 'adapt_empty'"
             :vol-no="currentVolumeNo"
-            @done="loadPhase"
+            @done="loadPhase(currentVolumeNo)"
           />
 
           <!-- simulate 阶段：3场并行 COC 跑团 + 单选/拼贴 -->
           <CocSimView
             v-else-if="phase === 'simulate'"
             :vol-no="currentVolumeNo"
-            @done="loadPhase"
+            @done="loadPhase(currentVolumeNo)"
             @back-to-adapt="onBackToAdapt"
           />
 
@@ -448,7 +450,7 @@ defineExpose({ refresh: loadPhase })
           <EmbodyView
             v-else-if="phase === 'embody'"
             :vol-no="currentVolumeNo"
-            @done="loadPhase"
+            @done="loadPhase(currentVolumeNo)"
             @back-to-simulate="onBackToSimulate"
           />
 
@@ -456,14 +458,14 @@ defineExpose({ refresh: loadPhase })
           <DungeonScaffoldView
             v-else-if="phase === 'scaffold'"
             :vol-no="currentVolumeNo"
-            @done="loadPhase"
+            @done="loadPhase(currentVolumeNo)"
           />
 
           <!-- rhythm 阶段：节奏骨架 -->
           <RhythmView
             v-else-if="phase === 'rhythm'"
             :vol-no="currentVolumeNo"
-            @done="loadPhase"
+            @done="loadPhase(currentVolumeNo)"
           />
 
           <!-- briefing / desk / mainline-brief 阶段：章前 5 分钟卡 Modal + 章台 -->

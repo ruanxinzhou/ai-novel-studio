@@ -280,28 +280,79 @@ def _start_sim(pid: str, vol_no: int, body: _StartIn) -> dict:
     import random as _r
     _brng = _r.Random()
     variant_configs = []
-    flavor_tags = ["good", "bad", "distinct"]
-    flavor_labels = ["好运线", "残酷线", "身份洗牌线"]
-    flavor_descs = [
-        "运气偏向顺利，代价较轻，调查员更容易彼此信任",
-        "厄运连连，代价沉重，人物关系易走向猜忌",
-        "PL 组合与另两盘完全不同，走出不同的破局路径",
-    ]
+    # **不再预设 flavor 基调**（方案 B）。旧实现给三场硬写
+    # good/bad/distinct，等于提前钦定「这场必须幸运/必须惨」，
+    # 既与剧本无关，又限制了 KP 的发挥空间。差异化改为由
+    # LLM 基于副本核生成的支线设定（llm_seed）提供。
     for i in range(NS):
         ss = _brng.randint(1, 2**30)
         variant_configs.append({
-            "flavor": flavor_tags[i],
-            "label": flavor_labels[i],
-            "desc": flavor_descs[i],
+            "flavor": None,
+            "label": f"平行宇宙 #{i+1}",
+            "desc": "同一副本核下的一条独立支线，差异化由 LLM 生成的支线设定提供",
             "rng_seed": ss,
         })
 
     progress_lock = threading.Lock()
     session_state = {i: {"day": 1, "turn": 0, "done": False, "finalizing": False} for i in range(3)}
+    # delta 合并缓冲：{session: {"text": 未落库的尾巴}}。
+    # 逐 token append 会让 live_log 迅速吃满配额，三场并发时只有第一场
+    # 留下记录，后两场看起来像「从没开场」。攒够一段再落库即可。
+    _DELTA_CHUNK_CHARS = 200
+    _delta_buffers: dict[int, dict] = {}
+
+    def _flush_delta_buffers() -> None:
+        """把各场未落库的 delta 尾巴冲刷进 live_log。
+
+        必须在批次结束前调用，否则每场最后一段输出会永久丢失。
+        """
+        with progress_lock:
+            for sess, buf in list(_delta_buffers.items()):
+                tail = buf.get("text") or ""
+                if tail.strip():
+                    job.append_live("delta", tail, session=sess)
+                buf["text"] = ""
 
     def _on_event(kind: str, payload: dict):
         with progress_lock:
             try:
+                # ---- LLM 流式输出实时透出（第四步）----
+                # 作者等的是「模型此刻在干什么」。thinking 是模型的思考流，
+                # delta 是正在吐的字——两者都直接落进 job.live_log，
+                # SSE 每秒推一次，前端就能实时看到，不用干等。
+                if kind == "thinking":
+                    txt = str(payload.get("text") or "")
+                    if txt.strip():
+                        job.append_live("thinking", txt.rstrip()[-160:],
+                                        session=int(payload.get("session", 1) or 1))
+                    return
+                if kind == "delta":
+                    txt = str(payload.get("text") or "")
+                    if txt.strip():
+                        # **合并写入**：模型逐 token 吐字，逐条 append 会让
+                        # live_log 瞬间膨胀到上限（单场 27+ 次只是小 prompt，
+                        # 真实一拍能到几百次），三场并发时把配额吃光。
+                        # 同一场的连续 delta 拼到同一行，超过阈值再封口。
+                        sess = int(payload.get("session", 1) or 1)
+                        _buf = _delta_buffers.setdefault(sess, {"text": ""})
+                        _buf["text"] += txt
+                        if len(_buf["text"]) >= _DELTA_CHUNK_CHARS:
+                            job.append_live("delta", _buf["text"], session=sess)
+                            _buf["text"] = ""
+                    return
+                # 每拍裁决结果：作者最想看的一行（动作 → 判定 → 后果）
+                if kind == "coc_turn_done" and payload.get("role") == "beat":
+                    act = str(payload.get("action") or "")
+                    chk = str(payload.get("check") or "")
+                    if act or chk:
+                        job.append_live(
+                            "verdict",
+                            f"{payload.get('beat', '?')}拍 · {act}"
+                            + (f"　[{chk}]" if chk else ""),
+                            session=int(payload.get("session", 1) or 1),
+                        )
+                    return
+
                 sess_idx = int(payload.get("session", 1)) - 1
                 if not (0 <= sess_idx < NS):
                     return
@@ -390,7 +441,7 @@ def _start_sim(pid: str, vol_no: int, body: _StartIn) -> dict:
 
         # ---- 真实路径 ----
         from ..pipeline.sushi_generator import generate_investigators
-        from ..pipeline.coc_simulator import run_coc_parallel_batch
+        from ..pipeline.coc_simulator import run_coc_parallel_batch, generate_branch_seeds
         from ..fields.coc_run import _normalize_player_cards
         import copy as _copy
 
@@ -426,6 +477,35 @@ def _start_sim(pid: str, vol_no: int, body: _StartIn) -> dict:
                 player_sets.append(fallback)
                 player_sets_meta.append({"investigators": fallback, "team_composition_note": "（回退卡）"})
 
+        # 方案 B：开场前用一次 LLM 调用，基于副本核生成三条支线的差异化设定。
+        #
+        # 为什么在这里而不是每场内部：三条线必须**互相可见地不同**，如果各场
+        # 独立生成，模型很可能给出三个雷同方案。集中生成一次才能保证分化。
+        #
+        # 失败不阻塞：generate_branch_seeds 内部兜底返回空素材 seed，
+        # 三场会退化成「同源 + 靠骰子分化」，仍可用。
+        update(progress=8, message="正在为三条支线生成差异化设定…")
+        try:
+            branch_seeds = generate_branch_seeds(
+                _coc_runner_factory(),
+                adapt_parsed,
+                n_branches=NS,
+                player_sets_meta=player_sets_meta,
+            )
+        except Exception as e:
+            log.warning("generate_branch_seeds 失败：%s；退回无素材种子", e)
+            branch_seeds = []
+        for i, bs in enumerate(branch_seeds):
+            variant_configs[i]["llm_seed"] = bs
+            # 三栏标签直接用 LLM 给的线名，作者一眼能分清三条线
+            if bs.get("ending_label") and bs.get("source") == "llm":
+                variant_configs[i]["label"] = bs["ending_label"]
+            elif bs.get("core_twist"):
+                variant_configs[i]["label"] = f"支线 {i+1}"
+        log.info("支线种子来源：%s",
+                 [b.get("source") for b in branch_seeds] or ["none"])
+        update(progress=8, message="三条支线设定已就绪，开始跑团…")
+
         # 把本场 PL 组合注入 adapt_parsed（每场 copy 一份，避免并行相互污染）
         runner_factory = d.coc_runner_factory
         variants = run_coc_parallel_batch(
@@ -442,9 +522,22 @@ def _start_sim(pid: str, vol_no: int, body: _StartIn) -> dict:
             user_directive=user_dir,
             max_workers=3,
         )
+        # 三场跑完，先把各场delta 尾巴冲进 live_log——
+        # 否则每场最后一段输出永远留在缓冲里，作者看不到收尾。
+        _flush_delta_buffers()
         for i, v in enumerate(variants):
-            # 优先用 LLM 跑出来的 ending_label，fallback 到 variant_config 的占位 label
-            v["label"] = v.get("ending_label") or _session_labels[i] if i < len(_session_labels) else (v.get("ending_label") or f"第{i+1}场")
+            # 优先用 LLM 跑出来的 ending_label，fallback 到 variant_config 的占位 label。
+            #
+            # **不要把 fallback 写成三元表达式**：
+            # `a or b if c else d` 的实际结构是 `(a or b) if c else d`，
+            # 三元优先级高于 or，写在一起极易读错并埋下坑。这里显式分行。
+            label = v.get("ending_label") or ""
+            if not label:
+                if i < len(_session_labels):
+                    label = _session_labels[i]
+                else:
+                    label = f"平行宇宙 #{i + 1}"
+            v["label"] = label
             v["flavor"] = v.get("ending_bias") or v.get("flavor")
             v["index"] = i
             job_store.append_sub_result(job.job_id, v)
@@ -496,6 +589,11 @@ def _pick_one(pid: str, vol_no: int, body: _PickOneIn) -> dict:
         "collage": None,
     }
     v.simulated_run = main_record
+    # 原剧本归一化：选定这一刻就把三份形态收成一份权威结构，
+    # 让下游（正文注入/记忆碎片生成/前端展示）只读 origin_novel 一个字段。
+    # 旧卷没有这一列，读时 origin_novel_of() 会从 selected_variant 惰性重建。
+    from ..book.volume import build_origin_novel
+    v.origin_novel = build_origin_novel(picked, mode="pick_one", full_log=full_log)
     v.stage_completed["simulate"] = True
     # 选盘完成 → 清除阶段视图覆盖，恢复按真实进度判定（下一阶段是 embody）
     if isinstance(v.stage_completed, dict) and "_view" in v.stage_completed:
@@ -520,6 +618,8 @@ def _save_custom_variant(pid: str, vol_no: int, body: _SaveCustomVariantIn) -> d
         "collage": None,
     }
     v.simulated_run = main_record
+    from ..book.volume import build_origin_novel
+    v.origin_novel = build_origin_novel(variant, mode="custom", full_log=full_log)
     v.stage_completed["simulate"] = True
     if isinstance(v.stage_completed, dict) and "_view" in v.stage_completed:
         v.stage_completed.pop("_view", None)
@@ -557,6 +657,7 @@ def _back_to_adapt(pid: str, vol_no: int) -> dict:
         pass
     # 清空跑团结果以及跑团之后的魂穿产物（换改编稿后这些都失效）
     v.simulated_run = None
+    v.origin_novel = None      # 由旧改编稿跑出来的原剧本，跟着一起失效
     sc = dict(v.stage_completed or {})
     # 用 _view 覆盖让前端回到 adapt 页，不硬重置各阶段完成标记
     sc["_view"] = "adapt"
@@ -666,6 +767,11 @@ def _collage(pid: str, vol_no: int, body: _CollageIn) -> dict:
         "collage": collage,
     }
     v.simulated_run = main_record
+    # 拼贴的正文在 full_log（人工拼的段落），但 selected_variant 是基线那一版。
+    # 归一化时把 merged_log 当 full_log 传下去，好让 summary 兜底能取到梗概段。
+    from ..book.volume import build_origin_novel
+    v.origin_novel = build_origin_novel(variants[base_idx], mode="custom",
+                                        full_log=merged_log)
     v.stage_completed["simulate"] = True
     if isinstance(v.stage_completed, dict) and "_view" in v.stage_completed:
         v.stage_completed.pop("_view", None)

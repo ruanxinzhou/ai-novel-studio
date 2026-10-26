@@ -216,56 +216,99 @@ function restoreFromVolume() {
   const v = volume.value
   if (!v) return
   const sc = v.scaffold_cards || {}
-  const dnAll = v.death_nodes
-  const cnAll = v.climax_nodes
-  const clAll = v.clue_nodes
-
-  const hasListVariants = (k: string) => Array.isArray((v as any)[k]) && Array.isArray((v as any)[k][0])
 
   cards.value = {}
   extraCards.value = {}
   picked.value = {}
   locked.value = {}
 
-  const buildList = (key: string, list3d: any[] | undefined) => {
-    if (!Array.isArray(list3d)) return []
-    return list3d.map((arr: any, i: number) => ({
+  /**
+   * list 类卡的候选构造。
+   *
+   * **必须从 `scaffold_cards[key].variants` 取，不能从顶层 `v[key]` 取**。
+   *
+   * 后端权威结构（scaffold_routes._normalize_list_card）：
+   *   scaffold_cards[key].variants = [{rhythm_intent, nodes: [...]}, ...]
+   * 而顶层 `v[key]` 是**已锁定的那一版的扁平节点数组**（v[0] 是 dict 不是 list）。
+   * 旧实现把 `v[key]` 当三维数组用：
+   *   list3d.map(arr => ({preview: Array.isArray(arr) ? arr : []}))
+   * 每个 arr 其实是 dict → Array.isArray 为 false → preview 全是空数组。
+   * 结果就是**三张列表卡（死亡节点/高潮转折/线索）每张下面一条内容都不显示**，
+   * 而三张文本卡正常——因为 buildText 走的是对的路径。
+   *
+   * 兼容两种历史形状：
+   *   · 新格式 variants[i] = {rhythm_intent, nodes}
+   *   · 旧格式 variants[i] = [{...节点}]（改 prompt 前的数据/mock）
+   */
+  const nodesOfVersion = (ver: any): any[] => {
+    if (ver && typeof ver === 'object' && !Array.isArray(ver)) {
+      const n = ver.nodes
+      return Array.isArray(n) ? n : []
+    }
+    return Array.isArray(ver) ? ver : []
+  }
+  const intentOfVersion = (ver: any): string => {
+    if (ver && typeof ver === 'object' && !Array.isArray(ver)) {
+      return String(ver.rhythm_intent || '').trim()
+    }
+    return ''
+  }
+  const buildList = (key: string) => {
+    const variants = sc?.[key]?.variants
+    if (!Array.isArray(variants)) return []
+    return variants.map((ver: any, i: number) => ({
       id: String(i),
       version_label: `第${i + 1}版`,
-      preview: Array.isArray(arr) ? arr : [],
+      preview: nodesOfVersion(ver),
+      rhythm_intent: intentOfVersion(ver),
     }))
   }
   const buildText = (key: string) => {
     const variants = sc?.[key]?.variants
     if (!Array.isArray(variants)) return []
-    return variants.map((t: string, i: number) => ({
+    return variants.map((t: any, i: number) => ({
       id: String(i),
       version_label: `第${i + 1}版`,
-      content: t || '',
+      content: typeof t === 'string' ? t : '',
     }))
   }
 
-  cards.value.death_nodes = buildList('death_nodes', dnAll)
-  cards.value.climax_nodes = buildList('climax_nodes', cnAll)
-  cards.value.clue_nodes = buildList('clue_nodes', clAll)
+  cards.value.death_nodes = buildList('death_nodes')
+  cards.value.climax_nodes = buildList('climax_nodes')
+  cards.value.clue_nodes = buildList('clue_nodes')
   cards.value.core_twist = buildText('core_twist')
   cards.value.tangchi_start = buildText('tangchi_start')
   cards.value.cost_cap = buildText('cost_cap')
 
   for (const def of CARD_DEFS) {
     const entry = sc?.[def.key]
-    if (!entry?.locked_at) continue
+    if (!entry) continue
+    const idx = typeof entry.picked_idx === 'number' ? entry.picked_idx : 0
+    const isCustom = entry.picked_idx === -1 || entry.is_custom
+
     if (def.kind === 'list') {
-      const arr = (v as any)[def.key]
-      const idx = typeof entry.picked_idx === 'number' ? entry.picked_idx : 0
-      const isCustom = entry.picked_idx === -1 || entry.is_custom
-      locked.value[def.key] = { idx: isCustom ? -1 : idx, value: arr, locked_at: entry.locked_at, is_custom: isCustom }
-      if (!isCustom) picked.value[def.key] = idx
+      // **锁定值取「选中版的 nodes」，不是顶层 v[key]**：
+      // 顶层 v[key] 是已锁定那一版的扁平数组，只有在真的锁过时才是权威；
+      // 未锁定时它是上一轮残留，指纹会指错版。这里统一走同一套 nodesOfVersion。
+      const ver = Array.isArray(entry.variants) ? entry.variants[idx] : undefined
+      const value = nodesOfVersion(ver)
+      // 没锁但已经有选中版（picked_idx 有效）→ 记为「已选未锁」，
+      // 页面显示候选而不是空白。
+      const hasPick = typeof entry.picked_idx === 'number' && entry.picked_idx >= 0
+      if (entry.locked_at) {
+        locked.value[def.key] = { idx: isCustom ? -1 : idx, value, locked_at: entry.locked_at, is_custom: isCustom }
+      }
+      if (!isCustom && hasPick) picked.value[def.key] = idx
     } else {
-      const idx = typeof entry.picked_idx === 'number' ? entry.picked_idx : 0
-      const isCustom = entry.picked_idx === -1 || entry.is_custom
-      locked.value[def.key] = { idx: isCustom ? -1 : idx, value: entry.text, locked_at: entry.locked_at, is_custom: isCustom }
-      if (!isCustom) picked.value[def.key] = idx
+      const ver = Array.isArray(entry.variants) ? entry.variants[idx] : undefined
+      const value = typeof entry.text === 'string' && entry.text
+        ? entry.text
+        : (typeof ver === 'string' ? ver : '')
+      const hasPick = typeof entry.picked_idx === 'number' && entry.picked_idx >= 0
+      if (entry.locked_at) {
+        locked.value[def.key] = { idx: isCustom ? -1 : idx, value, locked_at: entry.locked_at, is_custom: isCustom }
+      }
+      if (!isCustom && hasPick) picked.value[def.key] = idx
     }
   }
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable
@@ -37,6 +38,12 @@ _BRIEF_SYSTEM = """你是一名克苏鲁风格无限流小说的章前方向卡�
       "hooks": "……20~40字章尾钩子（读者看完本章最后一段最想知道什么）……",
       "day": 1,
       "beat_type": "hook",
+      "plot_beats": {
+        "qi": "……起：开场瞬间发生什么（20~50字）……",
+        "cheng": "……承：信息如何展开、冲突如何升级（30~60字）……",
+        "zhuan": "……转：异常升级/认知反转/规则显形（30~60字）……",
+        "he": "……合：收尾状态与抛向下一章的悬念（20~50字）……"
+      },
       "foreshadow_advance": ["伏笔1", "伏笔2"],
       "entities_on_stage": ["角色名", "地点名"]
     },
@@ -52,9 +59,15 @@ _BRIEF_SYSTEM = """你是一名克苏鲁风格无限流小说的章前方向卡�
 - hooks 20~40 字，章尾钩子（留疑/反转/惊吓）。
 - day 必须等于输入 day。
 - beat_type 必须是 hook/sell/engine/climax/cooldown 之一，与输入一致。
+- plot_beats 是本章的起承转合四段骨架，**必填**，四个子字段 qi/cheng/zhuan/he 都要写：
+  * qi（起）：开场瞬间发生了什么——场景、时间、在场人物、第一个触发动作。不写背景铺垫，直接落在动作上；
+  * cheng（承）：沿着「起」往下推进，冲突或悬念如何一层层加码，主角做了什么尝试；
+  * zhuan（转）：本章的认知反转或规则显形——主角（和读者）以为是什么，发现其实是什么。转必须有一句「打脸」式的落差；
+  * he（合）：收尾状态，抛向下一章的具体悬念（一个画面/一句台词/一个数字，不要用「下章再说」这种空话）。
+  四段之间必须**有因果**：承是起的推进，转是承的爆发，合是转的余波加新钩子。不能四段各说各话。
 - foreshadow_advance 是本章要推进的伏笔名列表（可以空数组）。
 - entities_on_stage 是本章出场的实体（角色/地点/物品），3~6 个。
-- 三版要有明显差异：一版偏顺承推进、一版偏视角/信息差、一版偏冲击反转；不要三版雷同。
+- 三版要有明显差异：一版偏顺承推进、一版偏视角/信息差、一版偏冲击反转；不要三版雷同。三版的 plot_beats 必须走不同的转法。
 
 fate_layer 因果锁（硬约束）：
 上下文里的死亡/高潮节点按 fate_layer 分了三类，方向卡设计必须体现三层因果张力：
@@ -186,23 +199,47 @@ def _mock_options(cno: int, plan: dict | None) -> dict:
         f"手机屏幕亮起：47 个未接来电，全是他自己的号码。",
     ]
     entities_pool = ["唐迟", "林薇", "苏雅", "周凯", "刘保安", "宿管张姨", "辅导员", "校史馆", "宿舍楼", "海边"]
+    # 起承转合：mock 也必须给全四段，否则前端出现空框、select 兜底也无处可取
+    beats = [
+        {
+            "qi": f"唐迟在{focus[:6]}的现场醒来，手表比昨晚慢了 17 分钟。",
+            "cheng": "他按流程排查宿舍与水房，异常一点点渗出：镜子里的字、水管的响。",
+            "zhuan": f"他原以为{focus[:6]}是人为恶作剧，直到死者名单上出现了自己的名字。",
+            "he": "唐迟把名单撕碎，却听见身后有人用他母亲的语气叫他乳名。",
+        },
+        {
+            "qi": f"从宿管的视角开场：她第三次把同一袋垃圾拎下楼，却不记得走过楼梯。",
+            "cheng": "视角切回唐迟，他注意到宿管每次经过某扇门都会下意识屏住呼吸。",
+            "zhuan": "他以为宿管在躲避门里的人——门其实一直是开着的。",
+            "he": "唐迟伸手去推那扇门，门后站着的是他自己，晚了七天的自己。",
+        },
+        {
+            "qi": f"第{day}天清晨，整栋楼安静得反常：六点整没有一个闹钟响。",
+            "cheng": "唐迟挨个敲门，越敲越少，最后一间房的门牌上写着他的名字。",
+            "zhuan": "他以为活人越来越少，实则是他自己正在被逐个名字替换掉。",
+            "he": "倒计时归零那一刻，手机弹出讣告：死者一栏写着他的死因。",
+        },
+    ]
     return {
         "options": [
             {
                 "id": "a", "title": titles[0], "summary": summaries[0],
                 "hooks": hooks_opts[0], "day": day, "beat_type": beat,
+                "plot_beats": beats[0],
                 "foreshadow_advance": ["七次刻名", "影子先行"],
                 "entities_on_stage": entities_pool[:4],
             },
             {
                 "id": "b", "title": titles[1], "summary": summaries[1],
                 "hooks": hooks_opts[1], "day": day, "beat_type": beat,
+                "plot_beats": beats[1],
                 "foreshadow_advance": ["童谣血字", "辅导员的鳃"],
                 "entities_on_stage": entities_pool[2:6],
             },
             {
                 "id": "c", "title": titles[2], "summary": summaries[2],
                 "hooks": hooks_opts[2], "day": day, "beat_type": beat,
+                "plot_beats": beats[2],
                 "foreshadow_advance": ["无脚合唱", "海床点名"],
                 "entities_on_stage": [entities_pool[0], entities_pool[2], entities_pool[6], entities_pool[7]],
             },
@@ -224,6 +261,51 @@ def _chapter_plan_for(vol, cno: int) -> dict | None:
         if isinstance(p, dict) and int(p.get("chapter") or 0) == cno:
             return p
     return None
+
+
+# 起承转合四段的固定顺序与标签。前端按这个顺序渲染，别改。
+BEAT_KEYS: tuple[tuple[str, str], ...] = (
+    ("qi", "起"), ("cheng", "承"), ("zhuan", "转"), ("he", "合"),
+)
+
+
+def _clean_beat_text(v: Any) -> str:
+    """把模型可能吐出来的 '起：xxx' / '**起** xxx' 洗成纯文本。"""
+    if not isinstance(v, str):
+        return ""
+    s = v.strip()
+    # 去掉 markdown 强调（行首/行尾/包住标签的成对标记）与「起：」这类前缀标签
+    s = s.replace("**", "").replace("__", "").strip()
+    s = re.sub(r"^[（(]?[起承转合][）)]?\s*[:：、.．]?\s*", "", s).strip()
+    return s.strip()
+
+
+def normalize_plot_beats(raw: Any, fallback: dict | None = None) -> dict:
+    """把任意来源的起承转合洗成 {qi, cheng, zhuan, he}，缺的用 fallback 补。
+
+    为什么需要这一层：起承转合可能来自三个地方——
+    1. 节奏蓝图 chapter_plan[*].plot_beats（权威骨架）
+    2. brief 方向卡自己生成的 plot_beats（本章具体走法）
+    3. 模型漏字段 / 返回了字符串
+
+    三者形态不统一（有的带「起：」前缀，有的只填了两段），
+    直接渲染会出现半空的白框，所以统一在这里收口。
+    """
+    fb = fallback if isinstance(fallback, dict) else {}
+    src = raw if isinstance(raw, dict) else {}
+    out: dict[str, str] = {}
+    for key, label in BEAT_KEYS:
+        text = _clean_beat_text(src.get(key)) or _clean_beat_text(fb.get(key))
+        if text:
+            out[key] = text
+    return out
+
+
+def _beats_text(beats: dict) -> str:
+    """把起承转合渲染成给模型看的文本块。"""
+    return "\n".join(
+        f"  {label}：{beats[key]}" for key, label in BEAT_KEYS if beats.get(key)
+    )
 
 
 def _nodes_for_day(vol, attr: str, day: int) -> list[dict]:
@@ -355,7 +437,16 @@ def _brief_options(
         from ..generation import complete_structured
         parts: list[str] = []
         parts.append("===== 节奏蓝图·本章规划 =====")
-        parts.append(json.dumps(plan or {}, ensure_ascii=False))
+        # 骨架里的 plot_beats 单独抽出来人读，JSON 一坨模型容易忽略
+        plan_shown = {k: v for k, v in (plan or {}).items() if k != "plot_beats"}
+        parts.append(json.dumps(plan_shown, ensure_ascii=False))
+        skeleton = normalize_plot_beats((plan or {}).get("plot_beats"))
+        if skeleton:
+            parts.append(
+                "\n===== 节奏蓝图给本章定的起承转合骨架（**必须沿用**，"
+                "你只负责把骨架落到具体场景/人物/动作上，不得改写四段的走向）====="
+            )
+            parts.append(_beats_text(skeleton))
 
         if day or cross_day:
             if cross_day:
@@ -451,6 +542,10 @@ def _brief_options(
                     opts[i]["day"] = day
                 if not opts[i].get("beat_type"):
                     opts[i]["beat_type"] = beat_type
+                # 起承转合：洗格式 + 缺段用蓝图骨架兜底
+                beats = normalize_plot_beats(opts[i].get("plot_beats"), skeleton)
+                if beats:
+                    opts[i]["plot_beats"] = beats
         data = {
             "options": opts[:3],
             "day": day,
@@ -545,6 +640,17 @@ def _brief_select(
 
     if body.extra_edits and body.extra_edits.strip():
         selected["extra_edits"] = body.extra_edits.strip()
+
+    # ---- 起承转合兜底 ----
+    # 方向卡是 LLM 生成的，可能漏 plot_beats 或只填了一半。
+    # 锁定时统一收口：缺的段从节奏蓝图 chapter_plan 的骨架补，
+    # 保证 brief.selected 里四段始终齐全（前端细纲/正文都依赖它）。
+    _beats = normalize_plot_beats(
+        selected.get("plot_beats"),
+        (_chapter_plan_for(vol, cno) or {}).get("plot_beats"),
+    )
+    if _beats:
+        selected["plot_beats"] = _beats
 
     # 解析最终锁定的日序：select 体显式 story_day_override > selected option 自带 day > 已存 override
     locked_day: int | None = None

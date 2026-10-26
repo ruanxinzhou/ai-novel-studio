@@ -7,6 +7,7 @@ from app.generation.bounded import (
     StructuredCompletion,
     complete_prose,
     complete_structured,
+    find_rollback_span,
     strip_overlap,
 )
 from app.generation.budget import (
@@ -45,6 +46,7 @@ __all__ = [
     "complete_structured",
     "estimate_output_need_tokens",
     "estimate_prompt_tokens",
+    "find_rollback_span",
     "parse_repaired_json",
     "strip_code_fence",
     "plan_budget",

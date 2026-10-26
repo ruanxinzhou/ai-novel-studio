@@ -30,6 +30,18 @@ TYPE_LABELS = {
 
 ENTITY_STATUSES = ("active", "retired", "planted", "paid", "dropped")
 
+# 伏笔操作枚举（spec 3）。与 ENTITY_STATUSES 并列但**不是第四个状态**：
+# 状态机仍是 planted→paid/dropped，advance 是正交的一维（推进一步 ≠ 回收）。
+# 单列它是为了让 LLM 抽取与 UI 分桶时有稳定词表（见 StateDiff.foreshadow_advances）。
+FORESHADOW_OPS = ("plant", "advance", "pay", "drop")
+
+OP_LABELS = {
+    "plant": "埋设",
+    "advance": "推进",
+    "pay": "回收",
+    "drop": "弃用",
+}
+
 STATUS_LABELS = {
     "active": "活跃",
     "retired": "退场",
@@ -49,15 +61,19 @@ PROTAGONIST_ID = "character-protagonist-tangchi"
 # 与 state_attrs（会随剧情变动的状态）分离：voiceprint 是恒定的创作设定。
 # ============================================================
 
-# 习惯动作 3-5 个 / 口癖 1-2 个是「能不能写活这个角色」的下限，
+# 动作倾向 3-5 个 / 口头习惯 1-2 个是「能不能写活这个角色」的下限，
 # 所以下限卡在 3 和 1（低于就是没有辨识度），上限留给作者。
 VOICEPRINT_MIN_ACTIONS = 3
 VOICEPRINT_MIN_CATCHPHRASES = 1
 
+# 字段标签（作者侧）。措辞刻意用「倾向 / 习惯」而不是「动作 / 口癖」——
+# 作者照着「动作倾向」写出来的是方向（「手部有小动作」「把玩什么东西」），
+# 照着「习惯动作」写出来的是剧本（「拇指反复搓食指指腹」）。
+# 后者会被模型当成待抄写的清单，正文里逐字复现，突兀得像硬塞的。
 VOICEPRINT_LABELS = {
-    "habits": "习惯动作",
-    "catchphrases": "口癖",
-    "dialect": "口音",
+    "habits": "动作倾向",
+    "catchphrases": "口头习惯",
+    "dialect": "用语习惯",
     "register": "语气基调",
     "psychology": "心理基调",
     "silence": "沉默习惯",
@@ -130,6 +146,49 @@ class Voiceprint:
             miss.append("缺口癖")
         return "待补：" + "、".join(miss) if miss else "完整"
 
+    def over_specified(self) -> list[str]:
+        """列出「写得太死」的条目——写死具体动作/具体台词的档案。
+
+        档案会被原样注入写正文的提示词。如果某一条已经具体到
+        「拇指反复搓食指指腹」「第X天」这种粒度，写手只会把这句话原样搬进正文，
+        读起来就像硬要说一下——抽象成「手部有小动作」这类**方向**才对。
+
+        这里只提示不自动改：怎么抽象是作者的决定，系统替他猜会丢掉真正的设定。
+        """
+        out: list[str] = []
+        for h in self.habits:
+            if _is_over_specified_action(h):
+                out.append(h)
+        return out
+
+    def channel_balance(self) -> dict:
+        """统计动作倾向分布在哪些「身体通道」上。
+
+        ## 为什么需要这个
+
+        正文层有「两句对白之间插入一个身体小动作」的硬要求。
+        如果档案的倾向全集中在手部，写手的所有小动作只能往手部挤——
+        一章下来全是「他手指…他拇指…他掌心…」，就是复读。
+        档案必须**分布在多个通道**上，写手才有得选。
+
+        返回 {"channels": {通道: 条数}, "narrow": bool, "dominant": "手部"}。
+        """
+        channels: dict[str, int] = {}
+        for h in self.habits:
+            for ch_name, _words in _ACTION_CHANNELS:
+                if _channel_hit(h, ch_name):
+                    channels[ch_name] = channels.get(ch_name, 0) + 1
+                    break   # 一条只归一个通道，避免重复计数
+        # 「手部」是复读高发通道，单列出来看
+        dominant = max(channels, key=lambda k: channels[k]) if channels else ""
+        narrow = len(channels) <= 1 and len(self.habits) >= 2
+        return {
+            "channels": channels,
+            "narrow": narrow,
+            "dominant": dominant,
+            "n_channels": len(channels),
+        }
+
     def as_dict(self) -> dict:
         return asdict(self)
 
@@ -188,13 +247,17 @@ class Voiceprint:
                     out.append(x)
             return "、".join(out)
 
+        # 标签用「倾向/习惯」而不是「动作/口癖」：档案写的是**方向**，
+        # 注入时模型要按这个方向自己发明具体动作和措辞。
+        # 标签若叫「习惯动作」「口癖」，模型会当成「照着念的清单」，
+        # 正文里就会原样蹦出档案里的字面描述——那正是「硬要说一下」的机器味来源。
         parts: list[str] = []
         if self.habits:
-            parts.append(f"习惯动作 {_j(self.habits)}")
+            parts.append(f"动作倾向 {_j(self.habits)}")
         if self.catchphrases:
-            parts.append(f"口癖 {_strip_notes(self.catchphrases)}")
+            parts.append(f"口头习惯 {_strip_notes(self.catchphrases)}")
         if self.dialect:
-            parts.append(f"口音 {_strip_notes(self.dialect)}")
+            parts.append(f"用语习惯 {_strip_notes(self.dialect)}")
         for key, label in (("register", "语气"), ("psychology", "心理"),
                            ("silence", "沉默"), ("speech_pattern", "说话方式")):
             v = getattr(self, key)
@@ -221,6 +284,190 @@ class Voiceprint:
             taboos=_as_list(d.get("taboos")),
         )
 
+
+#: 判「写死了具体动作」的信号。
+#:
+#: 两个维度：
+#: 1. **出现了具体到没法替换的身体部位+动作链**（「拇指反复搓食指指腹」）；
+#: 2. **出现了具体的例词/台词/编号**（「第X天」「我先看下日志」）——这类一进正文
+#:    就会逐字复现，读起来像硬塞的设定。
+#:
+#: 反例（是「倾向」，不该被标出来）：
+#: 「手部常有下意识的小动作」「习惯把身边的事按时间或数量记下来」。
+_CONCRETE_ACTION_RE = re.compile(
+    r"(拇指|食指|中指|无名指|小指|指腹|指节|掌根|手腕|脚踝|后颈|肩胛)"
+    r".{0,10}(搓|摩挲|摩|捻|捏|抠|掐|旋|转|拨|敲|弹|掀|摸|按)"
+)
+_CONCRETE_TOKEN_RE = re.compile(
+    r"(第[0-9Xx]+天|「[^」]{1,12}」|\"[^\"]{1,12}\"|我先看下|这波不亏)")
+
+
+def _is_over_specified_action(text: str) -> bool:
+    s = str(text or "")
+    if not s:
+        return False
+    if _CONCRETE_ACTION_RE.search(s):
+        return True
+    # 带具体台词/具体编号的也算——它们一定会被原样搬进正文
+    if _CONCRETE_TOKEN_RE.search(s) and len(s) > 24:
+        return True
+    return False
+
+
+#: **动作通道**：角色的动作倾向可以落在哪些「通道」上。
+#:
+#: 正文层强制「两句对白之间插入一个身体小动作」，
+#: 所以档案必须给出多个通道，写手才有得选。
+#: 如果档案只写「手部常有下意识的小动作」，写手所有小动作只能往手部挤——
+#: 一章下来全是「他手指…他拇指…他掌心…」，读者读到的就是复读。
+#:
+#: 顺序有意义：先匹配到的通道胜出（一条倾向只归一个通道）。
+_ACTION_CHANNELS: list[tuple[str, tuple[str, ...]]] = [
+    ("手部", ("手", "指", "掌", "腕", "虎口", "拇指", "手指", "指尖")),
+    ("视线", ("视线", "目光", "眼神", "打量", "扫", "看", "盯", "瞅")),
+    ("呼吸", ("呼吸", "气", "喘", "吐气", "吸气", "屏息", "气息")),
+    ("姿势", ("姿势", "重心", "肩", "腰", "背", "坐姿", "站姿", "蜷", "挺直")),
+    ("声线", ("声线", "声音", "嗓音", "嗓子", "语速", "音量", "压低声音", "嗓门")),
+    ("脚步", ("脚步", "走", "步子", "鞋", "落脚", "踮", "迈")),
+    ("距离感", ("距离", "半步", "靠近", "退开", "隔开", "贴身", "凑近")),
+    ("物件", ("物件", "东西", "摆", "桌上", "手边", "挪", "收拾", "掏")),
+]
+
+
+def _channel_hit(text: str, channel: str) -> bool:
+    """这条倾向是否落在指定通道上。"""
+    s = str(text or "")
+    if not s:
+        return False
+    for name, words in _ACTION_CHANNELS:
+        if name == channel:
+            return any(w in s for w in words)
+    return False
+
+
+# ============================================================
+# 角色记忆碎片（MemoryFragment）
+# ============================================================
+#
+# **为什么不能靠 details / state_attrs**：这两个都存在但都到不了正文。
+# - details 是唯一能放长文本的地方，但实体快照只注入 name + summary；
+# - state_attrs 注入了，但 ledger 的知情边界段只读 knows / blinded_to 两个键。
+# 结果是「唐迟附在这具身体上之前，这具身体经历过什么」模型完全看不到。
+#
+# **为什么必须按天解锁**：唐迟是带着别人的记忆碎片**逐渐醒过来**的。
+# 第 1 章就把 7 条全给模型，「原剧本第 7 幕零号归位」这种底牌会直接
+# 漏进第 1 章正文。所以每条碎片带 recovers_at（入戏第几天想起），
+# 注入时按本章所在的 Day 闸门过滤。
+
+#: recovers_at / revealed_at 的取值范围（唐迟入戏第 1..7 天）
+MEMORY_DAY_MIN = 1
+MEMORY_DAY_MAX = 7
+
+
+@dataclass
+class MemoryFragment:
+    """一条记忆碎片。空 text 表示「还没设计」，不是「没有」。"""
+    id: str = ""
+    text: str = ""                # 记忆内容，60-200 字
+    recovers_at: int = 1          # 唐迟入戏第几天想起（1..7）
+    revealed_at: int = 0          # 实际在正文里被写出来的章号；0 = 还没写出来
+    source: str = ""              # 溯源：来自 host_character 哪个字段 / 通稿哪一幕
+    note: str = ""                # 作者批注
+
+    def __post_init__(self) -> None:
+        if not self.id:
+            self.id = f"mem-{_new_id()}"
+        self.text = str(self.text or "").strip()
+        self.source = str(self.source or "").strip()
+        self.note = str(self.note or "").strip()
+        self.recovers_at = _clamp_day(self.recovers_at, default=1)
+        self.revealed_at = _clamp_chapter(self.revealed_at)
+
+    def unlocked_at(self, ch_day: int | None, ch_no: int | None = None) -> bool:
+        """这条碎片在本章是否该出现。
+
+        **双闸门**：已落地的（revealed_at > 0）以实际章号为准，不再回收；
+        没落地的以计划解锁日为准。两个闸门取或——任一满足就注入。
+
+        **ch_day 未知时按第 1 天处理**，而不是「一条都不给」。
+        这看着像放宽，其实是防一个更糟的静默故障：项目没填 day 时
+        （第一次写书、或章还没建），按「全不给」会变成记忆碎片**永远**
+        注入不进去——功能看起来上线了，实际一次都没生效。
+        按第 1 天闸门是最保守的**非空**子集：只有身体状态/旧伤这类
+        本来就该在第一天成立的事实，底牌（recovers_at 6-7）照样拦住。
+        """
+        if self.revealed_at:
+            return ch_no is None or self.revealed_at <= ch_no
+        day = MEMORY_DAY_MIN if ch_day is None else int(ch_day)
+        return self.recovers_at <= day
+
+    def render(self) -> str:
+        """渲染成注入 prompt 的一行。"""
+        if not self.text:
+            return ""
+        seg = self.text
+        if self.revealed_at:
+            seg += f"（第{self.revealed_at}章已写出）"
+        return seg
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d) -> "MemoryFragment":
+        if isinstance(d, MemoryFragment):
+            return d
+        if not isinstance(d, dict):
+            return cls()
+        return cls(
+            id=str(d.get("id") or ""),
+            text=str(d.get("text") or ""),
+            recovers_at=d.get("recovers_at", 1),
+            revealed_at=d.get("revealed_at", 0) or 0,
+            source=str(d.get("source") or ""),
+            note=str(d.get("note") or ""),
+        )
+
+
+def _clamp_day(value, *, default: int = MEMORY_DAY_MIN) -> int:
+    """把 recovers_at 收敛到 1..7。越界说明数据脏了，不能让它决定闸门。"""
+    try:
+        day = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(MEMORY_DAY_MIN, min(MEMORY_DAY_MAX, day))
+
+
+def _clamp_chapter(value) -> int:
+    """revealed_at 是章号，负数/非数一律当 0（未落地）。"""
+    try:
+        no = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, no)
+
+
+def memories_from_list(raw) -> list[MemoryFragment]:
+    """把任意形态（list[dict] / list[MemoryFragment] / None）归一成 list[MemoryFragment]。
+
+    去重按 text：同一段记忆重复出现没有意义（AI 生成偶尔会复述），
+    且重复注入会让模型以为它被强调了两遍。
+    """
+    if not raw:
+        return []
+    out: list[MemoryFragment] = []
+    seen: set[str] = set()
+    for item in raw:
+        m = MemoryFragment.from_dict(item)
+        if not m.text:
+            continue
+        key = re.sub(r"\s+", "", m.text)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(m)
+    return out
+
 # 实体可追踪属性白名单（非强制，允许自定义 attr；用于 UI 聚组 + LLM prompt 稳定）
 ENTITY_ATTRS = {
     "character": {
@@ -232,6 +479,11 @@ ENTITY_ATTRS = {
         "sanity": "理智值",
         "physical_state": "身体状态",
         "secret_known": "掌握的秘密",
+        # 知情边界（spec 3）。knows/blinded_to 与 knows_about 关系边不重复：
+        # 关系边记「谁认识谁」，这两个字段记**信息内容**——角色知道/不知道什么。
+        # 无限循环设定的核心是信息不对称，必须能被审稿检查读出来。
+        "knows": "已知信息（写他时他可以据此行动/说出口）",
+        "blinded_to": "不知情（他看不到、说不出、不会凭直觉猜到；章节里出现相关内容时只能表现为困惑或无知）",
     },
     "item": {
         "location": "当前位置",
@@ -319,6 +571,16 @@ class Entity:
     state_log: list[str] = field(default_factory=list)  # change ids in time order
     # 角色声音档案（仅 character 用；其他类型恒为空）
     voiceprint: Voiceprint = field(default_factory=Voiceprint)
+    # 魂穿记忆碎片（仅 character 用）：这具身体在被唐迟附身之前经历过什么。
+    # 按 recovers_at 逐日解锁注入——第 1 章不该看到第 7 天的底牌。
+    memories: list[MemoryFragment] = field(default_factory=list)
+    # 伏笔推进追踪（仅 foreshadow 用，spec 3）。
+    # 为什么单独存而不是靠 appearances：appearances 只记「出现过」，
+    # 分不清「被提到一句」和「真的往前推了一步」。一条每章都被提到但
+    # 从未推进的伏笔才是真正该被催的，而旧排序按 min(appearances)
+    # 会把它算成「刚埋」永远排最后。
+    last_advanced_ch: int = 0      # 最近一次推进的章号，0=从未推进
+    advance_count: int = 0         # 累计推进次数
 
     def __post_init__(self) -> None:
         # Entity(**d) 不走 from_dict，voiceprint 可能是裸 dict；统一收敛成 Voiceprint，
@@ -327,10 +589,25 @@ class Entity:
             self.voiceprint = Voiceprint.from_dict(self.voiceprint)
         if self.type != "character":
             self.voiceprint = Voiceprint()
+        # memories 同理：旧 JSON / API 传进来都可能是裸 dict 列表。
+        self.memories = memories_from_list(self.memories)
+        if self.type != "character":
+            self.memories = []
+        # 推进追踪字段可能从旧 JSON 读到 null/字符串，统一成 int，
+        # 否则 ledger 里的 `chapter - last_advanced_ch` 会炸 TypeError。
+        try:
+            self.last_advanced_ch = int(self.last_advanced_ch or 0)
+        except (TypeError, ValueError):
+            self.last_advanced_ch = 0
+        try:
+            self.advance_count = int(self.advance_count or 0)
+        except (TypeError, ValueError):
+            self.advance_count = 0
 
     def as_dict(self) -> dict:
         d = asdict(self)
         d["voiceprint"] = self.voiceprint.as_dict()
+        d["memories"] = [m.as_dict() for m in self.memories]
         return d
 
     def as_summary(self) -> dict:
@@ -340,6 +617,13 @@ class Entity:
             "appearances": self.appearances,
             "state_attrs": dict(self.state_attrs),
             "voiceprint": self.voiceprint.as_dict(),
+            # 记忆碎片：只给条数与解锁日分布，正文全文走 details/单独端点取——
+            # 实体列表接口可能被前端多处调用，十几条 200 字记忆塞进来太重。
+            "memory_count": len(self.memories),
+            # 伏笔推进追踪（spec 3）：只有 foreshadow 用得上，
+            # 其他类型恒为 0，前端按 type 忽略即可。
+            "last_advanced_ch": self.last_advanced_ch,
+            "advance_count": self.advance_count,
         }
 
 
@@ -440,6 +724,10 @@ class ProtagonistState:
     contamination_level: int = 0                                  # 累积污染度（0-100，跨卷）
     field_count: int = 0                                          # 已完成副本数
     voiceprint: Voiceprint = field(default_factory=Voiceprint)    # 主角固定写法特征
+    # 记忆碎片：主角唐迟自己逐步想起的「前世/原身」记忆。
+    # 与普通角色的 memories 同构（同一套按天解锁闸门），但走 protagonist 而非 entities，
+    # 因为主角不在 entities 列表里。
+    memories: list[MemoryFragment] = field(default_factory=list)
     updated_at: str = ""
     updated_from_chapter: int | None = None
 
@@ -470,6 +758,7 @@ class ProtagonistState:
             contamination_level=int(d.get("contamination_level", 0) or 0),
             field_count=int(d.get("field_count", 0) or 0),
             voiceprint=Voiceprint.from_dict(d.get("voiceprint")),
+            memories=memories_from_list(d.get("memories")),
             updated_at=d.get("updated_at", ""),
             updated_from_chapter=d.get("updated_from_chapter"),
         )
@@ -554,6 +843,9 @@ class StateDiff:
     state_changes: list[StateChangeSuggestion] = field(default_factory=list)
     new_foreshadows: list[ForeshadowSuggestion] = field(default_factory=list)
     foreshadow_payoffs: list[ForeshadowSuggestion] = field(default_factory=list)
+    # 伏笔「推进」（spec 3）。推进是**正交维度**不是第三状态：
+    # status 仍是 planted→paid/dropped，推进只更新 last_advanced_ch/advance_count。
+    foreshadow_advances: list[ForeshadowSuggestion] = field(default_factory=list)
     ripple_hints: list[RippleHint] = field(default_factory=list)
     confirmed_selections: dict[str, dict[int, bool]] = field(default_factory=dict)
     note: str = ""
@@ -580,6 +872,7 @@ class StateDiff:
             state_changes=_lst(StateChangeSuggestion, "state_changes"),
             new_foreshadows=_lst(ForeshadowSuggestion, "new_foreshadows"),
             foreshadow_payoffs=_lst(ForeshadowSuggestion, "foreshadow_payoffs"),
+            foreshadow_advances=_lst(ForeshadowSuggestion, "foreshadow_advances"),
             ripple_hints=_lst(RippleHint, "ripple_hints"),
             confirmed_selections=dict(d.get("confirmed_selections", {}) or {}),
             note=d.get("note", "") or "",
@@ -798,6 +1091,30 @@ class EntityStore:
         self._flush()
         return vp
 
+    def get_memories(self, eid: str) -> list[MemoryFragment]:
+        if eid == PROTAGONIST_ID:
+            return self.protagonist.memories
+        return self.get(eid).memories
+
+    def set_memories(self, eid: str, data) -> list[MemoryFragment]:
+        """整体覆盖某角色的记忆碎片（作者逐条勾选后一次性落库）。
+
+        与 set_voiceprint 同一套交互契约：**端点生成草稿不写库**，
+        真正落库只走这里，所以作者手写的碎片不会被一次 AI 生成冲掉。
+        """
+        frags = memories_from_list(data)
+        if eid == PROTAGONIST_ID:
+            self.protagonist.memories = frags
+            self.protagonist.updated_at = _now()
+        else:
+            e = self.get(eid)
+            if e.type != "character":
+                raise ValueError(f"只有角色能配记忆碎片：{e.name}（{TYPE_LABELS.get(e.type, e.type)}）")
+            e.memories = frags
+            e.updated_at = _now()
+        self._flush()
+        return frags
+
     def voiceprint_coverage(self) -> list[dict]:
         """全书角色的声音档案覆盖情况，供 UI 提示作者补哪些角色。"""
         out = [{
@@ -872,7 +1189,8 @@ class EntityStore:
     def update(self, eid: str, name: str | None = None, summary: str | None = None,
                details: str | None = None, status: str | None = None,
                state_attrs: dict[str, str] | None = None,
-               voiceprint: dict | Voiceprint | None = None) -> Entity:
+               voiceprint: dict | Voiceprint | None = None,
+               memories: list | None = None) -> Entity:
         e = self.get(eid)
         if name is not None:
             name = name.strip()
@@ -898,6 +1216,10 @@ class EntityStore:
                     e.state_attrs[k] = v
         if voiceprint is not None and e.type == "character":
             e.voiceprint = Voiceprint.from_dict(voiceprint)
+        if memories is not None and e.type == "character":
+            # 记忆碎片走整体覆盖（与 set_memories 同一套归一+去重），
+            # 不走 state_attrs 的逐键合并——碎片是列表，合并语义没有意义。
+            e.memories = memories_from_list(memories)
         e.updated_at = _now()
         self._flush()
         return e
@@ -917,6 +1239,30 @@ class EntityStore:
             e.appearances.sort()
             e.updated_at = _now()
             self._flush()
+        return e
+
+    def note_foreshadow_advance(self, eid: str, chapter: int | None) -> Entity:
+        """记一次伏笔「推进」（spec 3）。
+
+        推进**不改变 status**——伏笔状态机仍是 planted→paid/dropped，
+        推进一步不等于回收。这里只更新 last_advanced_ch/advance_count，
+        让「很久没推进」和「很久没出现」能被区分开：
+        一条每章都被提到一句但从没推进的伏笔，账龄算出来永远是 0，
+        按旧排序会永远排在到期榜最后，恰恰是最该被催的那条却永远不催。
+
+        幂等：同一章重复调用只累加一次，避免重跑定稿把推进次数刷爆。
+        """
+        e = self.get(eid)
+        if e.type != "foreshadow":
+            return e
+        ch = chapter or 0
+        # 同章重复推进只算一次（幂等）
+        if ch and ch == e.last_advanced_ch and e.advance_count > 0:
+            return e
+        e.last_advanced_ch = ch
+        e.advance_count += 1
+        e.updated_at = _now()
+        self._flush()
         return e
 
     def shift_chapter_refs(self, from_no: int, delta: int) -> None:
@@ -961,6 +1307,14 @@ class EntityStore:
                             raise ValueError(
                                 f"shift_chapter_refs: foreshadow {e.id} {k} "
                                 f"chapter {iv} would become {nv} (<=0)")
+                    # spec 3：last_advanced_ch 也是章号引用，删章后必须跟着偏移，
+                    # 否则账龄算成负数或凭空多出一章。
+                    if e.last_advanced_ch:
+                        nv = _shift_val(e.last_advanced_ch)
+                        if nv is not None and nv <= 0:
+                            raise ValueError(
+                                f"shift_chapter_refs: foreshadow {e.id} "
+                                f"last_advanced_ch {e.last_advanced_ch} would become {nv} (<=0)")
             for c in self.changes.values():
                 if c.chapter is None:
                     continue
@@ -997,6 +1351,10 @@ class EntityStore:
                 # 非 int 值保留原样（防御）
             e.appearances = sorted(set(new_apps))
             if e.type == "foreshadow":
+                # spec 3：同步偏移推进追踪章号（0=从未推进，不动）
+                if e.last_advanced_ch:
+                    nv = _shift_val(e.last_advanced_ch)
+                    e.last_advanced_ch = nv if isinstance(nv, int) else 0
                 for k in ("plant_chapter", "due_chapter", "payoff_chapter"):
                     v = e.state_attrs.get(k)
                     if v is None or v == "":
@@ -1406,6 +1764,22 @@ class EntityStore:
                     e.appearances.sort()
                 paid.append(e.as_summary())
 
+        # 伏笔推进（spec 3）：**推进不改变 status**，只更新推进追踪。
+        # 「推进了 3 次但还没回收」的伏笔仍是 planted，
+        # 这样回收状态与推进强度能各自独立演进（不做三态重构）。
+        advanced: list[dict] = []
+        for i, af in enumerate(diff.foreshadow_advances):
+            if not _selected("foreshadow_advances", i):
+                continue
+            e = self.find("foreshadow", af.name)
+            if e is None:
+                continue
+            if diff.chapter is not None and diff.chapter not in e.appearances:
+                e.appearances.append(diff.chapter)
+                e.appearances.sort()
+            self.note_foreshadow_advance(e.id, diff.chapter)
+            advanced.append(e.as_summary())
+
         # 涟漪（采纳后变成 ai_suggested 的状态变化）
         for i, rh in enumerate(diff.ripple_hints):
             if not _selected("ripple_hints", i):
@@ -1432,6 +1806,7 @@ class EntityStore:
             self.applied_diffs = self.applied_diffs[-self.MAX_APPLIED_DIFFS:]
         self._flush()
         return {"created": created, "changed": changed, "paid": paid,
+                "advanced": advanced,
                 "remaining_pending": len(self.pending_diffs)}
 
     def dismiss_diff(self, diff_id: str) -> None:
@@ -1539,11 +1914,13 @@ def _entity_from_legacy(d: dict) -> dict:
 
     voiceprint 必须转成 dict 再交给 dataclass——__init__ 不走 from_dict，
     否则 Entity(**d) 会把裸 dict 塞进字段，调用方拿到 dict 而不是 Voiceprint。
+    memories 交给 Entity.__post_init__ 的 memories_from_list 归一，这里只补默认值。
     """
     d = dict(d)
     d.setdefault("state_attrs", {})
     d.setdefault("state_log", [])
     d["voiceprint"] = Voiceprint.from_dict(d.get("voiceprint")).as_dict()
+    d.setdefault("memories", [])
     return d
 
 

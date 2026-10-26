@@ -28,6 +28,41 @@ PRICE_CNY_PER_MTOK = {
 DEFAULT_HOST = "https://api.minimax.chat/v1"
 
 
+# reasoning_effort 按层给。
+# 正文层（draft/polish）用 high：情节、伏笔、人物逻辑需要完整推敲。
+# 结构层用 low：章细纲/章纲/实体抽取的推理链很短，high 会让它反复推敲几分钟，
+# 把 max_tokens 全花在 reasoning_content 上，正文一个 token 都没吐出来，
+# finish_reason=length → 门禁报「正文为空」→ 下一轮又从头思考，反复几分钟。
+_REASONING_EFFORT_BY_LAYER: dict[str, str] = {
+    "draft": "high",
+    "polish": "high",
+    "refine": "medium",
+    "fix": "medium",
+    "coc_keeper": "medium",
+    "coc_investigator": "medium",
+    # 跑团决策链合并拍：medium。裁决要依据 NPC 动机/秘密做判断，low 会
+    # 明显变浅；但它每拍都要出，不能像 draft 那样烧几分钟推敲。
+    "coc_beat": "medium",
+    # 支线种子：要真正读懂副本核并想出三条不同的核心反转，需要完整推敲，
+    # low 会给出三个雷同方案。high 也可以，但一次调用代价不小——
+    # medium 是「能分化」与「不烧太久」之间的平衡点。
+    "coc_seed": "medium",
+    "coc_outcome": "medium",
+    # 通稿层：8000-12000 字长文，medium 已足够（high 在这个长度上极易
+    # 把 max_tokens 花在 reasoning 上导致正文被 length 截断）。
+    "coc_narrative": "medium",
+    "tang_outline": "medium",
+    "plot": "low",
+    "outline": "low",
+    "intro": "low",
+    "import_outline": "low",
+    "entities": "low",
+    "foreshadow": "low",
+    "review": "low",
+    "brainstorm": "low",
+}
+
+
 class ThinkSplitter:
     """跨 chunk 剥 <think> 块：正文与思考分流（思考透传给前端展示）。"""
 
@@ -89,14 +124,21 @@ class MiniMaxProvider(Provider):
                     max_tokens: int | None = None,
                     extra: dict | None = None) -> Iterator[StreamEvent]:
         model = model or self.default_model
+        extra = dict(extra or {})
+        layer_hint = str(extra.pop("_layer", "") or "")
         body: dict = {"model": model, "messages": messages, "stream": True,
                       "stream_options": {"include_usage": True},
-                      # 高推理强度：让模型充分铺排情节/伏笔/人物逻辑再落笔正文
-                      "reasoning_effort": "high"}
+                      # 推理强度按层给（见 _REASONING_EFFORT_BY_LAYER）：
+                      # 正文层要 high（情节/伏笔/人物逻辑需要完整推敲）；
+                      # 结构层（章细纲/章纲/抽取）用 low —— high 会让它反复推敲几分钟，
+                      # 把 max_tokens 全花在 reasoning_content 上，正文一字不出，
+                      # 门禁只能报「正文为空」，下一轮又从头思考一遍。
+                      "reasoning_effort": _REASONING_EFFORT_BY_LAYER.get(
+                          layer_hint, "high")}
         # max_tokens 不传时交给 API 模型默认（M3 ≥10K，远优于硬编码 2048 截断）
         if max_tokens:
             body["max_tokens"] = max_tokens
-        body.update(extra or {})
+        body.update(extra)
         # 529/429/503 集群过载：指数退避重试，不直接丢给上层 failover
         max_retries = 3
         last_err: Exception | None = None

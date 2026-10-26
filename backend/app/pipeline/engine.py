@@ -31,6 +31,7 @@ from app.generation import (
     complete_prose,
     plan_budget,
 )
+from app.generation.guard import guarded_postprocess
 from app.generation.humanize import postprocess as humanize_postprocess
 from app.generation.quality import (
     HardGateResult,
@@ -55,6 +56,16 @@ class PipelineSpec:
     y_chunk_length: int
     target_chars: int
     anchor_enabled: bool = False
+    # 跳过硬门禁重试（第三步）：跑团层用它把单拍调用数从最坏 3× 压回 1×。
+    #
+    # 为什么跑团层可以跳：硬门禁（字数/重复率/AI 句式/burstiness）在正文层
+    # 是质量保证，但在跑团层是**纯浪费**——这一层的产物是决策记录，
+    # 后面还要过梗概和通稿两道重写，门禁在这里判 P0 重写毫无意义，
+    # 却让每次拍的成本翻三倍（实测是慢的主要来源）。
+    #
+    # 跳过后仍然保留：hard_gate 的**检测**（供作者看到「这一拍有问题」），
+    # 只是不再触发重写。
+    skip_quality_retry: bool = False
 
 
 SPECS: dict[str, PipelineSpec] = {
@@ -64,14 +75,43 @@ SPECS: dict[str, PipelineSpec] = {
     # 作者统一字数要求：每章正文 4000-5000 字。
     # plot（剧情骨架）给 1800 字目标，draft（正文）给 4800 字目标（±400 浮动正好落在 4000-5000 区间），
     # polish 跟 draft 同长做全量润色，不缩不扩。
-    "plot": PipelineSpec("plot", x_chunk_length=2_000, y_chunk_length=5_000, target_chars=1_800),
+    # plot层是**章细纲**（编号场景块施工图），不是正文。
+    # y_chunk_length 给到 5000 是错的——那个预算本意是容纳正文，
+    # 但它会诱导模型把细纲写长（实测第2章写出了 5446 字正文）。
+    # 细纲上限 2600 字门禁，给 3200 的输出预算留足余量又不会诱发长文。
+    "plot": PipelineSpec("plot", x_chunk_length=2_000, y_chunk_length=3_200, target_chars=1_800),
     "draft": PipelineSpec("draft", x_chunk_length=4_500, y_chunk_length=12_000, target_chars=4_800, anchor_enabled=True),
     "polish": PipelineSpec("polish", x_chunk_length=6_000, y_chunk_length=12_000, target_chars=5_000),
     # 《第七日的亡者》场工作流步骤（Phase 1 书化）
     "adapt_scenario":     PipelineSpec("adapt_scenario",     x_chunk_length=3_000, y_chunk_length=6_000, target_chars=2_500),
-    "coc_keeper":         PipelineSpec("coc_keeper",         x_chunk_length=3_000, y_chunk_length=4_000, target_chars=1_500),
-    "coc_investigator":   PipelineSpec("coc_investigator",   x_chunk_length=3_000, y_chunk_length=4_000, target_chars=1_500),
+    "coc_keeper":         PipelineSpec("coc_keeper",         x_chunk_length=3_000, y_chunk_length=2_000, target_chars=600, skip_quality_retry=True),
+    "coc_investigator":   PipelineSpec("coc_investigator",   x_chunk_length=3_000, y_chunk_length=1_200, target_chars=300, skip_quality_retry=True),
+    # coc_beat = KP 裁决 + PL 动作声明，**一次调用出一拍**（第四步合并）。
+    #
+    # 为什么合并：旧实现里 PL 拍是在已知判定结果的前提下补一句「他为什么这么做」
+    # ——这不是决策，是事后合理化。两次调用之间还可能自相矛盾（KP 说 A、
+    # PL 当作 B 来反应）。合并后因果在同一上下文里想，更连贯。
+    #
+    # 为什么仍保留逐拍：一次性生成 8-10 拍会让模型跳过中段、跳掉伏笔回收。
+    # 逐拍强制推进才是「每拍都必须有信息增量」的保证。
+    "coc_beat":           PipelineSpec("coc_beat",           x_chunk_length=8_000, y_chunk_length=2_400, target_chars=700, skip_quality_retry=True),
+    # coc_seed = 一次性生成三条支线的差异化设定（方案B）。
+    #
+    # 为什么需要这一层：旧实现从**硬编码的通用池子**（TWIST_POOL /
+    # FORESHADOW_POOL / 五种结局标签）里随机抽，素材写死在代码里，
+    # 与当前副本核毫无关系——作者会看到「黑暗结局：巷子里多了一把伞」
+    # 这种与剧本无关的硬编码标签。更糟的是它**限制 KP**：让 KP 去凑一个
+    # 预设结局，而不是让故事自己长出来。
+    #
+    # 这一层改为：读副本核 + NPC 卡司，由 LLM 现场生成三份差异化设定。
+    # 素材从剧本长出来，不从代码池子里抽。
+    "coc_seed":           PipelineSpec("coc_seed",           x_chunk_length=8_000, y_chunk_length=3_000, target_chars=1_600, skip_quality_retry=True),
     "coc_outcome":        PipelineSpec("coc_outcome",        x_chunk_length=4_000, y_chunk_length=4_000, target_chars=2_000),
+    # 通稿层：一篇讲完的连续故事，不是分段梗概。x 要喂全部 beat 结构化
+    # 记录 + 全量叙事描写（远大于 coc_outcome 的单段），y 给足一次成稿的量。
+    # 8000-12000 字是硬要求，target_chars 设 10_000，y_chunk_length 给 14_000
+    # 留冗余，避免被截断后拉一个半截稿进 full_narrative。
+    "coc_narrative":      PipelineSpec("coc_narrative",      x_chunk_length=32_000, y_chunk_length=14_000, target_chars=10_000, anchor_enabled=True),
     "tang_outline":       PipelineSpec("tang_outline",       x_chunk_length=3_000, y_chunk_length=5_000, target_chars=2_500),
     "split_chapters":     PipelineSpec("split_chapters",     x_chunk_length=4_000, y_chunk_length=4_000, target_chars=2_000),
     "distill_world":      PipelineSpec("distill_world",      x_chunk_length=3_000, y_chunk_length=2_000, target_chars=1_200),
@@ -91,6 +131,61 @@ def _lexicon_root():
     except Exception:
         from pathlib import Path
         return Path(__file__).resolve().parents[2] / "data" / "projects"
+
+
+# 空产出后的重试引导语，按层给。
+# 关键：不能统一写「输出小说正文」——plot 层收到这句会被明确要求写正文，
+# 直接盖掉【产物格式】里「第N场 + 字段行」的形态要求。
+#
+# 还要明确说「上一轮全程在思考、没落笔」：推理模型看不到自己上轮把 max_tokens
+# 花在哪，不点破它会从头再推敲一遍，几个来回下来一个 token 都没出。
+_EMPTY_OUTPUT_DIRECTIVE: dict[str, str] = {
+    "plot": (
+        "上一轮你把全部推理额度都用完了，一个字的产物都没输出。\n"
+        "**不要再继续推敲，直接落笔。**现在开始输出章细纲，"
+        "第一个字符就是「第1场：」，随后按「- 场景：」「- POV：」「- 微观目标：」"
+        "「- 阻力：」「- 信息差：」「- 关键对白：」「- 关键动作：」「- 感官锚点：」"
+        "「- 情绪四拍：」「- 落点：」「- 转场桥：」「- 本场变化：」逐行填写。\n"
+        "全章 2-8 场，场数由内容决定；同一时空的连续事件用「转场桥：同场续」+「本场变化」区分。\n"
+        "不要输出任何正文段落、不要写场景描述、不要加解释或前后缀。"
+    ),
+    "outline": (
+        "上一轮你把全部推理额度都用完了，一个字的产物都没输出。\n"
+        "**不要再继续推敲，直接落笔。**现在输出章节大纲，"
+        "第一段以章节标签原文开头（如「第1章」），逐章往下写。\n"
+        "不要输出解释、不要写成连续故事正文。"
+    ),
+    "draft": (
+        "上一轮你把全部推理额度都用完了，一个字的正文都没输出。\n"
+        "**不要再继续推敲，直接开始写正文。**"
+    ),
+    "polish": (
+        "上一轮你把全部推理额度都用完了，一个字的正文都没输出。\n"
+        "**不要再继续推敲，直接输出润色后的完整正文。**"
+    ),
+}
+
+
+# reasoning 预留按层给（token）。缺省走 provider 的 reasoning_reserve_tokens。
+# 结构层产物只有一两千字，给正文层那套24576 预留等于放任模型反复推敲：
+# 实测 MiniMax 会花掉全部额度、finish_reason=length，正文一个 token 都没吐出，
+# 门禁只能报「正文为空」；下一轮又从头思考一遍，反复几分钟。
+_REASONING_RESERVE_BY_LAYER: dict[str, int] = {
+    "plot": 8_192,       # 章细纲：结构清晰、不需要长链锁推理
+    "outline": 8_192,    # 章纲：同上
+    "import_outline": 4_096,
+    "entities": 4_096,
+    "foreshadow": 4_096,
+    "review": 8_192,
+    "refine": 8_192,
+    "fix": 8_192,
+    # draft / polish 未单独配置 → 使用 provider.reasoning_reserve_tokens 默认值（正文需要完整推敲）
+}
+
+
+def _layer_extra(layer: str) -> dict | None:
+    """透传层名给 provider，用于按层选 reasoning_effort。"""
+    return {"_layer": layer} if layer else None
 
 
 def proxy_finish_reason(response_usage_output_tokens: int, max_tokens: int) -> str:
@@ -113,6 +208,11 @@ class LayerRunResult:
     calls: list[CallLog] = field(default_factory=list)
     snapshots: list = field(default_factory=list)
     resumed_indices: list[int] = field(default_factory=list)  # 从收据复用、未调 LLM 的块
+    # spec 4：重试用尽后仍未通过的 P0。**不静默放行**——把决定权交回作者。
+    # 这里只记录不阻断：引擎跑在后台线程里，挂起等确认需要 job 状态机 +
+    # 超时 + 断线恢复，成本远大于收益；而「结果先给、决定后补」在 UX 上等价。
+    gate_pending: list[str] = field(default_factory=list)
+    gate_demoted: list[str] = field(default_factory=list)
 
     @property
     def y(self) -> str:
@@ -121,6 +221,11 @@ class LayerRunResult:
     @property
     def total_attempts(self) -> int:
         return sum(c.attempts for c in self.calls)
+
+    @property
+    def gate_required(self) -> bool:
+        """是否需要作者表态（spec 4）。"""
+        return bool(self.gate_pending)
 
 
 @dataclass
@@ -171,10 +276,10 @@ class PipelineRunner:
             chunk=chunk,
             rendered=rendered,
             decision=decision,
-            max_tokens=self._budget_max_tokens(decision),
+            max_tokens=self._budget_max_tokens(decision, spec),
         )
 
-    def _budget_max_tokens(self, decision) -> int:
+    def _budget_max_tokens(self, decision, spec: PipelineSpec | None = None) -> int:
         """正文预算 + reasoning 预留。
 
         推理模型（M3.1-Flash / DeepSeek 等）会把链锁思考写入 reasoning_tokens，
@@ -182,9 +287,18 @@ class PipelineRunner:
         很容易把全部额度吃完、正文一字不出（之前的空 y bug 即此）。因此：
         - 基础预算走 plan_budget 算的 output_budget_tokens；
         - 若 provider 带 reasoning_reserve 属性，额外加上。
+
+        **预留按层给**（见 _REASONING_RESERVE_BY_LAYER）：结构层产物只有一两千字，
+        给 24576 的预留等于给它 30 倍正文的思考额度——实测 MiniMax 会把这额度
+        花在反复推敲上，几分钟后 finish_reason=length，正文一个 token 都没吐出。
+        结构层不需要长思考，8k 足够。
         """
         base = max(256, decision.output_budget_tokens or 2_048)
-        reserve = int(getattr(self.provider, "reasoning_reserve_tokens", 0) or 0)
+        if spec is not None:
+            reserve = _REASONING_RESERVE_BY_LAYER.get(
+                spec.name, int(getattr(self.provider, "reasoning_reserve_tokens", 0) or 0))
+        else:
+            reserve = int(getattr(self.provider, "reasoning_reserve_tokens", 0) or 0)
         return base + reserve
 
     def _base_materials(self, spec: PipelineSpec, materials: list[Material] | None) -> list[Material]:
@@ -248,6 +362,8 @@ class PipelineRunner:
         snapshots: list = []
         edited: list = []
         resumed: list[int] = []
+        gate_pending: list[str] = []      # spec 4：重试用尽仍存在的非格式 P0
+        gate_demoted: list[str] = []      # spec 4：被护栏降级的项（让作者知道发生过降级）
         anchor_text = initial_anchor
 
         for i, chunk in enumerate(chunks):
@@ -283,13 +399,16 @@ class PipelineRunner:
                         tail = acc[-CONTINUATION_TAIL_CHARS:]
                         msgs.append({"role": "user", "content": f"从断点处续写，不要重复已写内容：\n{tail}"})
                     elif acc is not None:
-                        # 上一轮返回空正文（模型只吐 reasoning 就 stop）。用 assistant 前缀引导它直接吐正文，
-                        # 再用 user 明确指令，避免再次陷入纯 reasoning。
+                        # 上一轮返回空产物（模型只吐 reasoning 就 stop，或被上游过载吞掉）。
+                        # 用 assistant 前缀引导它直接吐产物，再用 user 明确指令，避免再次陷入纯 reasoning。
+                        # **按层给引导语**：原来这句硬编码成「输出小说正文」，
+                        # plot 层收到等于被明确要求写正文，会直接盖掉【产物格式】的场块要求。
                         msgs.append({"role": "assistant", "content": ""})
-                        msgs.append({"role": "user",
-                                     "content": "请直接开始输出小说正文，不要额外思考或解释。"})
+                        msgs.append({"role": "user", "content": _EMPTY_OUTPUT_DIRECTIVE.get(
+                            spec.name, "请直接开始输出本层要求的产物，不要额外思考或解释。")})
                     if hasattr(self.provider, "chat_stream"):
-                        return self._generate_stream(msgs, _max_tokens, _index, on_event)
+                        return self._generate_stream(msgs, _max_tokens, _index, on_event,
+                                                    layer=spec.name)
                     resp = self.provider.chat(msgs, self.model, max_tokens=_max_tokens)
                     if on_event:
                         on_event("delta", {"index": _index, "text": resp.text})
@@ -298,6 +417,10 @@ class PipelineRunner:
                 # === 生成→后处理→硬门禁→（正文层）软评审，P0 触发带 hints 重写（最多 2 轮）===
                 quality_rounds = 0
                 max_quality_rounds = 3  # 首轮 + 最多 2 次重写
+                # P1 达到几项才触发重写（2026-10-24）。
+                # 1-2 项是吹毛求疵（字数偏长、逗号偏多），不值得多烧一次模型调用；
+                # ≥3 项说明这一版整体偏了（数字/时间/长段/字种密度同时不及格），该修。
+                P1_REWRITE_THRESHOLD = 3
                 hard_review: HardGateResult | None = None
                 soft_review: SoftReviewResult | None = None
                 extra_directive: str | None = None
@@ -325,6 +448,20 @@ class PipelineRunner:
 
                 demoted_msgs: list[str] = []
 
+                # 格式类 P0 绝不可降级：它判的是「输出形态错了」（细纲写成了正文），
+                # 不是「写得好不好」。子串匹配会误伤——例如「章细纲格式错误：…不能写成
+                # 连续散文…」里的「连续」会命中下面的节奏键，把格式错误降级成建议项，
+                # 于是 1654 字的散文细纲就能绕过门禁落库。
+                #
+                # 刻意**不含**「正文为空」：空响应是上游过载/纯 reasoning 造成的传输问题，
+                # 不是形态问题，混进来会让空响应被当成格式错误抛错、
+                # 报出误导性的「请检查 plot 层 prompt」。
+                _FORMAT_P0_NEEDLES = ("章细纲格式错误", "章细纲字段不全",
+                                      "章细纲过长", "章细纲过短")
+
+                def _is_format_p0(msg: str) -> bool:
+                    return any(n in msg for n in _FORMAT_P0_NEEDLES)
+
                 def _apply_burstiness_guard(review: HardGateResult) -> HardGateResult:
                     """把连续未改善的 burstiness / 节奏类 P0 降级为 P1。
 
@@ -338,6 +475,10 @@ class PipelineRunner:
                     remaining_p0: list[str] = []
                     demoted_p1: list[str] = []
                     for msg in review.p0:
+                        if _is_format_p0(msg):
+                            # 格式错 = 形态错，不进降级通道，原样留在 P0
+                            remaining_p0.append(msg)
+                            continue
                         matched = False
                         for needle, (key, direction) in _BURST_P0_KEYS.items():
                             if needle in msg:
@@ -408,8 +549,12 @@ class PipelineRunner:
                             journal.append(ChunkReceipt(index=i, x_hash=x_hash, y="",
                                                         status="failed", error=str(e)[:300]))
                         raise
-                    # 活人感硬规则后处理
-                    cleaned_text = humanize_postprocess(completion.text)
+                    # 活人感硬规则后处理（带护栏：崩了就退回原文，spec 2）
+                    cleaned_text, guard_res = guarded_postprocess(completion.text)
+                    if guard_res.rolled_back and on_event:
+                        # 静默回滚会让人以为规则生效了其实没有——必须让作者看见
+                        on_event("notice", {
+                            "text": f"[去AI味护栏] 后处理产生崩坏，已退回原文：{guard_res.reason}"})
                     completion = ProseCompletion(
                         text=cleaned_text,
                         status=completion.status,
@@ -426,6 +571,23 @@ class PipelineRunner:
                     # burstiness 重试护栏：单项连续未改善则降级，防止死循环
                     hard_review = _apply_burstiness_guard(hard_review)
                     burst_stats = (hard_review.stats or {}).get("burstiness") or {}
+
+                    # 质量账本：块级门禁后落库 status=draft（趋势用，spec 1）。
+                    # 必须落在 _apply_burstiness_guard 之后，这样 verdict.p0 是
+                    # 降级后的真实值而不是初判值。
+                    # 静默失败：账本写失败绝不能阻断生成（照抄 lexicon 的做法）。
+                    if project_id and chapter_no:
+                        try:
+                            from ..generation.ledger import record_quality
+                            record_quality(
+                                project_id, chapter_no, spec.name,
+                                hard_review, len(completion.text),
+                                run_key=x_hash,
+                                notes=f"round{quality_rounds}",
+                                guard=guard_res.as_dict(),
+                            )
+                        except Exception as led_e:
+                            log.debug("quality ledger record failed: %s", led_e)
 
                     # 描写轮换账本：本轮正文记入账本（供下一章生成前注入 + 本章 Top6 提示）
                     if project_id and chapter_no:
@@ -467,13 +629,100 @@ class PipelineRunner:
                                 "rhythm_current": dict(_rhythm_prev),
                             },
                         })
-                    if hard_review.passed:
+                    # 是否需要重写：
+                    #   · 有 P0 —— 必须重写（硬门禁）
+                    #   · 无 P0 但 P1 达到阈值 —— 也重写（2026-10-24）
+                    #     旧行为是 P1 只提示不重写，于是作者看到「P1 8 项」却什么都没发生，
+                    #     而这些问题（数字密度、时间锚点、长段不足、字种密度…）
+                    #     恰恰是正文质量的大头——不修就等于没检查。
+                    #     阈值取 3 项：1-2 项是吹毛求疵，3 项以上说明这一版整体偏了。
+                    _p1_rewrite = (not hard_review.p0
+                                   and len(hard_review.p1) >= P1_REWRITE_THRESHOLD)
+                    if hard_review.passed and not _p1_rewrite:
                         break
                     quality_rounds += 1
                     if quality_rounds >= max_quality_rounds:
+                        # 重试用尽：**格式类 P0 不能靠"重写"修复**（模型会继续写散文），
+                        # 保留的是最后一版，所以这里必须挡住坏结果落库。
+                        _fmt_p0 = [m for m in hard_review.p0
+                                   if "章细纲格式错误" in m or "章细纲字段不全" in m
+                                   or "章细纲过长" in m or "章细纲过短" in m
+                                   or "连续场缺" in m]
+                        if _fmt_p0:
+                            raise ValueError(
+                                f"章细纲连续 {max_quality_rounds} 轮未通过格式门禁，已中止以免把正文当细纲落库："
+                                + "；".join(_fmt_p0)[:300]
+                                + "。请检查 plot 层 prompt，或调高 max_quality_rounds。"
+                            )
+                        # 非格式 P0：不再静默 break（spec 4）。
+                        # 旧行为是直接落库，作者永远不知道这章被扣过分。
+                        # 现在把 P0 带出引擎，由前端要求作者表态（收下/重写/手改）。
+                        if hard_review.p0:
+                            gate_pending.extend(hard_review.p0)
+                        if demoted_msgs:
+                            gate_demoted.extend(demoted_msgs)
+                        if hard_review.p0 and on_event:
+                            on_event("notice", {
+                                "text": f"[质量门禁] 已重写 {max_quality_rounds} 轮，"
+                                        f"仍有 {len(hard_review.p0)} 项未达标——正文已生成，"
+                                        "但需要你确认是否收下（可选择再重写一次或自己改）"})
+                        elif _p1_rewrite and on_event:
+                            # P1 重写用尽：不算「未达标」，只是建议项没改干净。
+                            # 不弹「收下/重写/手改」——那会让作者以为这一版坏了。
+                            on_event("notice", {
+                                "text": f"[质量门禁] 已按 {len(hard_review.p1)} 项建议重写 {max_quality_rounds} 轮，"
+                                        "正文已生成（建议项未全部改净，可在正文里手改）"})
                         break
                     # 把 P0 问题拼成 extra_directive 下一轮注入
+                    #
+                    # 跑团层跳过重试（第三步）：hard_gate 照常检测，但**不再触发重写**。
+                    # 这一步是解决「本来就慢」的主要手段——最坏 3× 调用压回 1×。
+                    # 检测结果仍然要透出给作者（gate_pending），不能静默吞掉。
+                    if spec.skip_quality_retry:
+                        if hard_review.p0:
+                            gate_pending.extend(hard_review.p0)
+                            if on_event:
+                                on_event("notice", {
+                                    "text": f"[跑团层质量提示] 检出 {len(hard_review.p0)} 项问题"
+                                            f"（已跳过重写，跑团层不因门禁重试）："
+                                            + "；".join(hard_review.p0)[:200]})
+                        break
                     extra_directive = "【质量门禁问题】\n" + "\n".join(f"- {x}" for x in hard_review.p0)
+                    # P1 也要带进重写指令（2026-10-24）。
+                    # 旧行为：P1 只是显示给作者看，重写时模型完全不知道这些问题。
+                    # 于是「P1 8 项」看得见却改不掉——作者看到一串问题，
+                    # 点了重写，结果问题原封不动（因为模型没收到任何 P1 信息）。
+                    if hard_review.p1:
+                        extra_directive += (
+                            "\n【建议级问题（同样要修）】\n"
+                            + "\n".join(f"- {x}" for x in hard_review.p1))
+                    # 格式类 P0（写成正文而非细纲）需要**换输出形态**，
+                    # 不能只说「重写这一段」——那会让模型继续写散文。
+                    if any("章细纲格式错误" in m or "章细纲过长" in m
+                           or "章细纲字段不全" in m or "连续场缺" in m
+                           for m in hard_review.p0):
+                        extra_directive += (
+                            "\n\n【输出形态纠正（最高优先级，覆盖其他要求）】"
+                            "\n你上一轮把章细纲写成了连续正文散文，这是**错误的输出形态**。"
+                            "\n章细纲不是正文，是给写作者用的结构化施工图。"
+                            "\n现在必须输出编号场景块，每场严格用下列字段格式："
+                            "\n第1场：<场名>\n"
+                            "- 场景：<地点+时间，一句话>\n"
+                            "- 微观目标：<POV角色这一场想达成什么>\n"
+                            "- 阻力：<谁/什么在挡他>\n"
+                            "- 信息差：<读者知道而角色不知道的，或反之>\n"
+                            "- 关键对白：「…」\n"
+                            "- 关键动作：A→B→C\n"
+                            "- 感官锚点：<触觉/听觉/嗅觉/视觉里最强的一种>\n"
+                            "- 情绪四拍：铺垫→顶→翻→收\n"
+                            "- 落点：<这一场结束时的状态>\n"
+                            "- 转场桥：<Q1-Q5 锚点=…；同一时空中下一拍写「同场续」；第1场写「首场无桥」>\n"
+                            "- 本场变化：<相比上一场推进了什么>\n"
+                            "\n硬要求：2-8 场（场数由内容决定，不要凑数）；每场 6-11 行；总长 1200-1900 字；"
+                            "不要写正文、不要写对白全文、不要写叙述段落。"
+                            "\n同一时空的连续事件写成「同场续」的相邻两场，不要为凑场数硬切。"
+                            "\n如果内容写不下，说明该拆成更多场，而不是写得更长。"
+                        )
                     # 如果本轮有 burstiness 相关 P0/P1，额外注入具体修复方向
                     burst_hints: list[str] = []
                     for msg in hard_review.p0 + hard_review.p1:
@@ -555,7 +804,10 @@ class PipelineRunner:
                                 completion2 = complete_prose(
                                     lambda acc, _d=extra_directive: generate(acc, _extra_directive=_d)
                                 )
-                                cleaned2 = humanize_postprocess(completion2.text)
+                                cleaned2, guard2 = guarded_postprocess(completion2.text)
+                                if guard2.rolled_back and on_event:
+                                    on_event("notice", {
+                                        "text": f"[去AI味护栏] 重写稿后处理崩坏，保留原版本：{guard2.reason}"})
                                 # 重写后再跑一次硬门禁，仍 P0 就保留原版本
                                 hard2 = hard_gate(cleaned2, prev_tail=anchor_text[-200:] if anchor_text else "",
                                                   target_chars=spec.target_chars, stage=spec.name)
@@ -597,15 +849,21 @@ class PipelineRunner:
 
         writer.apply_chunks(chunks, edited)
         return LayerRunResult(layer=spec.name, pairs=list(writer.xy_pairs), calls=calls,
-                              snapshots=snapshots, resumed_indices=resumed)
+                              snapshots=snapshots, resumed_indices=resumed,
+                              gate_pending=gate_pending, gate_demoted=gate_demoted)
 
     def _generate_stream(self, msgs: list[dict], max_tokens: int, index: int,
-                         on_event: Callable[[str, dict[str, Any]], None] | None) -> tuple[str, str]:
-        """流式调用：thinking/delta 实时回调，同时聚合正文与真实 finish_reason。"""
+                         on_event: Callable[[str, dict[str, Any]], None] | None = None,
+                         layer: str = "") -> tuple[str, str]:
+        """流式调用：thinking/delta 实时回调，同时聚合正文与真实 finish_reason。
+
+        layer 透传给 provider，用于按层选 reasoning_effort（结构层不能 high）。
+        """
         parts: list[str] = []
         usage_total = 0
         finish_reason: str | None = None
-        for ev in self.provider.chat_stream(msgs, self.model, max_tokens=max_tokens):
+        for ev in self.provider.chat_stream(msgs, self.model, max_tokens=max_tokens,
+                                            extra=_layer_extra(layer)):
             if ev.kind == "delta":
                 parts.append(ev.text)
                 if on_event:

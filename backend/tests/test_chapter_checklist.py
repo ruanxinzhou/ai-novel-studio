@@ -74,7 +74,7 @@ def test_position_entities_and_foreshadow(env):
                  "【角色快照】", "陆离：主角（第1-2章）", "老王：看门大爷〔已退场〕",
                  "幕后黑手：终卷BOSS〔设定中，尚未出场〕",
                  "【地点快照】", "【道具快照】", "【情节线快照】",
-                 "【到期伏笔】", "面板暗纹：属性异常（第2章埋，已欠 1 章）"):
+                 "【到期伏笔】", "面板暗纹：属性异常（第2章埋，已静默 1 章，从未推进）"):
         assert frag in m.content, frag
     assert "床下的朋友" not in m.content          # 已回收不出现
 
@@ -84,7 +84,7 @@ def test_old_foreshadow_marked_and_gap_warning(env):
     env.desk.record(2, "plot", "二")
     env.entities.add("foreshadow", "青铜镜来历", summary="第1章埋", chapter=1)
     m = build_chapter_checklist(env.entities, env.desk, 12, 30)
-    assert "已欠 11 章，本章必须处理" in m.content
+    assert "已静默 11 章，从未推进，本章必须处理" in m.content
     assert "第 3-11 章尚未写，本章是跳章续写" in m.content
 
 

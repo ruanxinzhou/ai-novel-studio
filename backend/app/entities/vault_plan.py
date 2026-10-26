@@ -189,6 +189,155 @@ def _first_sentence(text: Any, limit: int = 60) -> str:
 
 
 # ============================================================
+# 人物档案提取：从已有的结构化数据拼 summary / details
+# ============================================================
+#
+# **为什么需要这一层**：卷级落库原本只传「名字 + 一句括注」，
+# 于是实体库里 107 个 volume_plan 角色全是空档案——
+# 简介写的是「周朔（电话）」里的括注「电话」，细节档案全空。
+#
+# 但数据其实**早就在** adapted_module 里了：cast 有职业/年龄/外貌/性格/
+# 动机/秘密，renamed_cast 有身份定位，host_character 有身体状态与死状。
+# 这里只是把它们取出来，按固定格式拼成实体档案。
+#
+# 三条铁律：
+# 1. **不臆造**：源数据里没有的字段就不写这一行，绝不用占位文案凑格式。
+# 2. **不覆盖**：作者改过的档案一律不动。
+# 3. **零 token**：纯字段搬运，不调模型。
+
+# 档案行标题 → 对应的源字段名（按优先级依次找）
+_PROFILE_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("身份", ("occupation", "role", "identity")),
+    ("年龄", ("age",)),
+    ("性别", ("gender", "sex")),
+    ("外貌", ("appearance", "look", "appearance_desc")),
+    ("性格", ("personality", "character", "temperament")),
+    ("动机", ("motivation", "goal", "objective")),
+    ("秘密", ("secret", "secrets", "hidden")),
+    ("关键技能", ("key_skills", "skills")),
+)
+
+# 宿主角色额外字段（只有 host_character 有）
+_HOST_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("身体状态", ("body_state",)),
+    ("原剧本位置", ("original_story_position",)),
+    ("第七日死状", ("seventh_day_death",)),
+    ("隐藏死因", ("hidden_death_cause",)),
+    ("挣扎钩子", ("struggle_hook",)),
+    ("信息差", ("info_gap_hint",)),
+)
+
+
+def _fmt_skills(raw: Any) -> str:
+    """把技能 dict 压成「侦查74/意志57/…」这种一行。"""
+    if isinstance(raw, dict):
+        items = list(raw.items())[:8]
+        return "/".join(f"{k}{v}" for k, v in items if k)
+    if isinstance(raw, str):
+        return raw.strip()
+    return ""
+
+
+def _field_text(card: dict, keys: tuple[str, ...], fmt=None) -> str:
+    """从卡里取第一个非空的指定字段。"""
+    for k in keys:
+        v = card.get(k)
+        if v is None:
+            continue
+        text = fmt(v) if fmt else str(v).strip()
+        text = (text or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _build_profile(
+    name: str,
+    *,
+    cast_card: dict | None = None,
+    renamed: dict | None = None,
+    player_card: dict | None = None,
+    host: dict | None = None,
+    note: str = "",
+) -> tuple[str, str]:
+    """由结构化数据拼出 (summary, details)。
+
+    summary：一句话身份定位，如「周朔，雾汀县公安局刑侦中队长。」
+    details：多行档案，每行「标题：内容」，源数据没有的字段直接不出现。
+
+    多个来源按「信息量」合并：cast 字段最全，其次 renamed_cast 的 role，
+    再是 player_cards 的 desc。同一字段取先命中且非空的。
+    """
+    sources: list[dict] = []
+    for s in (cast_card, player_card, host, renamed):
+        if isinstance(s, dict) and s:
+            sources.append(s)
+
+    def pick(keys: tuple[str, ...], fmt=None) -> str:
+        for src in sources:
+            text = _field_text(src, keys, fmt)
+            if text:
+                return text
+        return ""
+
+    # ---- summary：姓名 + 身份定位 ----
+    title = pick(("occupation", "role", "identity"))
+    summary = f"{name}，{title}。" if title else ""
+    if not summary:
+        # 退到 player_cards 的描述首句
+        desc = ""
+        for src in sources:
+            desc = _first_sentence(str(src.get("desc") or src.get("summary") or ""), 50)
+            if desc:
+                break
+        summary = desc
+    if not summary and note:
+        summary = note.strip()
+
+    # ---- details：逐字段 ----
+    lines: list[str] = []
+    for label, keys in _PROFILE_FIELDS:
+        text = pick(keys, _fmt_skills if label == "关键技能" else None)
+        if text:
+            lines.append(f"{label}：{text}")
+    if isinstance(host, dict):
+        for label, keys in _HOST_FIELDS:
+            text = _field_text(host, keys)
+            if text:
+                lines.append(f"{label}：{text}")
+    if renamed:
+        # 字段名以 sushi_generator 的 schema 为准（original / new_name / role），
+        # 旧写法 from 也兼容。
+        old_name = str(renamed.get("original") or renamed.get("from") or "").strip()
+        if old_name:
+            lines.append(f"原名：{old_name}")
+    if not lines and note:
+        lines.append(f"备注：{note.strip()}")
+
+    return summary.strip(), "\n".join(lines)
+
+
+def _now_iso() -> str:
+    """当前时间戳，格式与 EntityStore 内部一致。"""
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _is_placeholder_summary(summary: str) -> bool:
+    """判断现有 summary 是不是「碎片/占位」，是才允许覆盖。
+
+    碎片特征：空、太短、或者只是某个括注（如「电话」）。
+    作者认真写的简介再短也超过 8 个字，且不会只有一两个字的通名。
+    """
+    s = (summary or "").strip()
+    if not s:
+        return True
+    if len(s) <= 6:
+        return True
+    return False
+
+
+# ============================================================
 # 伏笔名清洗：伏笔描述常是整句，需要抽出可引用的短名
 # ============================================================
 
@@ -257,12 +406,18 @@ def _split_foreshadow_names(raw: Any) -> list[str]:
 
 def _seed_character(store: EntityStore, name: str, note: str,
                     chapter: int | None, source: str,
-                    summary_hint: str = "") -> str:
+                    summary_hint: str = "",
+                    details_hint: str = "") -> str:
     """建/取一个角色。返回 'created' | 'existed'。
 
     刻意**不自动写声音档案**：习惯动作/口癖是作者的决定权，
     自动编一套反而会污染「所有角色共用动作库」这个 AI 味源头。
     但会记进 SeedResult.voices_missing 提醒作者去配。
+
+    档案补写规则（**不覆盖作者**）：
+    - summary 是空/碎片（≤6 字）→ 用 summary_hint 覆盖
+    - details 是空 → 用 details_hint 覆盖
+    - 作者写过 → 一律不动
     """
     existing = store.find("character", name)
     if existing is not None:
@@ -270,9 +425,20 @@ def _seed_character(store: EntityStore, name: str, note: str,
         if chapter is not None and chapter not in existing.appearances:
             existing.appearances.append(chapter)
             existing.appearances.sort()
+        # 档案补写：只填空位，绝不覆盖作者写过的内容
+        changed = False
+        if _is_placeholder_summary(existing.summary) and summary_hint:
+            existing.summary = summary_hint.strip()
+            changed = True
+        if not (existing.details or "").strip() and details_hint:
+            existing.details = details_hint.strip()
+            changed = True
+        if changed:
+            existing.updated_at = _now_iso()
         return "existed"
     summary = summary_hint or (f"{note}" if note else "")
-    store.add("character", name, summary=summary, source=source, chapter=chapter)
+    store.add("character", name, summary=summary, details=details_hint,
+              source=source, chapter=chapter)
     return "created"
 
 
@@ -346,9 +512,10 @@ def seed_from_volume_plan(
         return start_no + max(rel_no - 1, 0) if start_no else None
 
     def _record(etype: str, name: str, note: str, chapter: int | None,
-                summary_hint: str = "") -> None:
+                summary_hint: str = "", details_hint: str = "") -> None:
         if etype == "character":
-            r = _seed_character(store, name, note, chapter, source, summary_hint)
+            r = _seed_character(store, name, note, chapter, source,
+                                summary_hint, details_hint)
         else:
             r = _seed_simple(store, etype, name, note, chapter, source, summary_hint)
         if r == "created":
@@ -360,7 +527,88 @@ def seed_from_volume_plan(
         else:
             res.existed.append(f"{etype}:{name}")
 
-    # ---- 1) chapter_plan：每章的在场角色 / 地点 / 伏笔 ----
+    # ============================================================
+    # 第 1 步：先建「有档案的角色」
+    #
+    # **顺序很关键**：旧实现先扫 chapter_plan，characters_on_stage 里的
+    # 「周朔（电话）」把 summary 写成了「电话」，后面再拿到完整 cast
+    # 档案也补不进去了（已存在 → 直接返回）。
+    # 现在反过来：先把 adapted_module 里的完整档案写进去，
+    # chapter_plan 只负责补出场章号。
+    # ============================================================
+    adapted = getattr(vol, "adapted_module", None)
+    if not isinstance(adapted, dict):
+        adapted = {}
+    host = getattr(vol, "host_character", None) or {}
+    if not isinstance(host, dict):
+        host = {}
+
+    # 索引：名字 → 各类结构化卡
+    cast_by_name: dict[str, dict] = {}
+    for c in (adapted.get("cast") or []):
+        if isinstance(c, dict):
+            nm = _clean_name(c.get("name") or "")
+            if nm:
+                cast_by_name.setdefault(nm, c)
+
+    player_by_name: dict[str, dict] = {}
+    for c in (adapted.get("player_cards") or []):
+        if isinstance(c, dict):
+            nm = _clean_name(c.get("name") or "")
+            if nm:
+                player_by_name.setdefault(nm, c)
+
+    renamed_by_name: dict[str, dict] = {}
+    for item in (adapted.get("renamed_cast") or []):
+        if isinstance(item, dict):
+            # 字段名以 sushi_generator 的 schema 为准：original / new_name / role。
+            # 旧写法 to/from 也兼容（早期 mock 数据用过）。
+            nm = _clean_name(item.get("new_name") or item.get("to") or "")
+            if nm:
+                renamed_by_name.setdefault(nm, item)
+        elif isinstance(item, str):
+            nm = _clean_name(item)
+            if nm:
+                renamed_by_name.setdefault(nm, {})
+
+    host_name = _clean_name(host.get("name") or "")
+
+    # 1a) cast（改编后的角色卡，字段最全）
+    for nm, card in cast_by_name.items():
+        summary, details = _build_profile(
+            nm, cast_card=card,
+            renamed=renamed_by_name.get(nm),
+            player_card=player_by_name.get(nm),
+            host=host if nm == host_name else None,
+        )
+        _record("character", nm, "", None, summary, details)
+
+    # 1b) 宿主角色（可能不在 cast 里）
+    if host_name and host_name not in cast_by_name:
+        summary, details = _build_profile(
+            host_name, host=host, renamed=renamed_by_name.get(host_name),
+        )
+        _record("character", host_name, "", None, summary, details)
+
+    # 1c) player_cards（调查员卡）
+    for nm, card in player_by_name.items():
+        if nm in cast_by_name:
+            continue
+        summary, details = _build_profile(
+            nm, player_card=card, renamed=renamed_by_name.get(nm),
+        )
+        _record("character", nm, "", None, summary, details)
+
+    # 1d) renamed_cast 里还没建过的人（只有旧名→新名映射，没有更多档案）
+    for nm, item in renamed_by_name.items():
+        if nm in cast_by_name or nm in player_by_name or nm == host_name:
+            continue
+        summary, details = _build_profile(nm, renamed=item)
+        _record("character", nm, "", None, summary, details)
+
+    # ============================================================
+    # 第 2 步：chapter_plan —— 补出场章号 + 兜底建档
+    # ============================================================
     for item in plan:
         if not isinstance(item, dict):
             continue
@@ -373,6 +621,8 @@ def seed_from_volume_plan(
         ch = _abs_ch(rel)
 
         for name, note in _split_names(item.get("characters_on_stage")):
+            # 已在第 1 步建过完整档案 → 这里只补章号
+            # （_seed_character 内部会判断「已存在」只补 appearances）
             _record("character", name, note, ch)
 
         for name, note in _split_names(item.get("location")):
@@ -398,7 +648,7 @@ def seed_from_volume_plan(
                     e.state_attrs["payoff_chapter"] = str(ch)
                 res.foreshadow_paid.append(fs_name)
 
-    # ---- 2) 详设节点里的角色线索（characters / who 等字段） ----
+    # ---- 详设节点里的角色线索（characters / who 等字段） ----
     for attr in ("death_nodes", "climax_nodes", "clue_nodes"):
         for node in (getattr(vol, attr, None) or []):
             if not isinstance(node, dict):
@@ -412,38 +662,6 @@ def seed_from_volume_plan(
             for key in ("item", "items", "object", "prop", "token"):
                 for name, note in _split_names(node.get(key)):
                     _record("item", name, note, None)
-
-    # ---- 3) 宿主角色 ----
-    host = getattr(vol, "host_character", None) or {}
-    if isinstance(host, dict):
-        hname = _clean_name(host.get("name") or "")
-        if hname:
-            note = _first_sentence(host.get("desc") or host.get("summary") or "")
-            _record("character", hname, note, None, summary_hint=note)
-
-    # ---- 4) 改编后的角色卡（player_cards / renamed_cast） ----
-    adapted = getattr(vol, "adapted_module", None)
-    if isinstance(adapted, dict):
-        for card in (adapted.get("player_cards") or []):
-            if not isinstance(card, dict):
-                continue
-            cname = _clean_name(card.get("name") or "")
-            if not cname:
-                continue
-            note = _first_sentence(
-                card.get("desc") or card.get("summary")
-                or card.get("role") or card.get("identity") or "")
-            _record("character", cname, note, None, summary_hint=note)
-        for item in (adapted.get("renamed_cast") or []):
-            if isinstance(item, dict):
-                cname = _clean_name(item.get("to") or item.get("new_name") or "")
-                oname = _clean_name(item.get("from") or item.get("old_name") or "")
-                if cname:
-                    _record("character", cname, oname, None)
-            elif isinstance(item, str):
-                cname = _clean_name(item)
-                if cname:
-                    _record("character", cname, "", None)
 
     if res.created or res.foreshadow_paid:
         store._flush()

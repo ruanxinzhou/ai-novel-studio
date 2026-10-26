@@ -394,8 +394,23 @@ def _start_coc(pid: str, sid: str, body: _CocIn) -> dict:
 
     def _on_event(kind: str, payload: dict):
         with progress_lock:
+            # **流式事件先落地再算进度**：thinking / delta 是模型此刻的
+            # 推理与输出，落进 job.live_log 后由 SSE 推给前端。这里必须
+            # 放在进度分支之前 return——以前被下面的 else: msg = kind
+            # 吞成一行状态文字，作者只能盯着「开场中」干等。
+            if kind in ("thinking", "delta", "notice"):
+                txt = str(payload.get("text") or "")
+                if txt.strip():
+                    job.append_live(
+                        kind if kind != "notice" else "notice",
+                        txt if kind == "delta" else txt.rstrip()[-160:],
+                        session=int(payload.get("session", 1) or 1),
+                    )
+                return
             sess_idx = int(payload.get("session", 1)) - 1
             i = payload.get("session")
+            if not (0 <= sess_idx < 3):
+                return
             if kind == "coc_session_start":
                 msg = f"第 {i}/3 场（{labels[sess_idx]}）开场…"
             elif kind == "coc_session_turn":

@@ -4,6 +4,7 @@ import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import SushiCards from './SushiCards.vue'
 import { briefApi, type BriefOption } from '../api'
+import { visibleBeats } from '../plotBeats'
 
 const props = defineProps<{
   pid: string
@@ -139,6 +140,7 @@ watch(
         hooks: sel.hooks || '',
         day: sel.day || props.existingBrief.day || 1,
         beat_type: sel.beat_type || 'engine',
+        plot_beats: sel.plot_beats || undefined,
         foreshadow_advance: sel.foreshadow_advance || [],
         entities_on_stage: sel.entities_on_stage || [],
         is_custom: !!sel.is_custom,
@@ -320,6 +322,24 @@ async function confirmSelect() {
           <div style="display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 4px">
             <el-tag v-if="item.beat_type" size="small" type="warning" effect="plain">{{ BEAT_LABELS[item.beat_type] || item.beat_type }}</el-tag>
             <el-tag v-if="item.day" size="small" type="info" effect="plain">第{{ item.day }}天</el-tag>
+            <el-tag v-if="visibleBeats(item.plot_beats).length" size="small" effect="plain" style="color:#909399">
+              起承转合 {{ visibleBeats(item.plot_beats).length }}/4
+            </el-tag>
+          </div>
+          <!-- 起承转合：四段竖排，读起来就是本章的推进轨迹 -->
+          <div v-if="visibleBeats(item.plot_beats).length" class="brief-beats">
+            <div
+              v-for="b in visibleBeats(item.plot_beats)"
+              :key="b.key"
+              class="brief-beat-row"
+              :style="{ background: b.bg, borderLeftColor: b.color }"
+            >
+              <span class="brief-beat-label" :style="{ color: b.color }">{{ b.label }}</span>
+              <div class="brief-beat-text">
+                <span class="brief-beat-hint" :style="{ color: b.color }">{{ b.hint }}</span>
+                {{ item.plot_beats![b.key] }}
+              </div>
+            </div>
           </div>
           <div v-if="(item.foreshadow_advance || []).length" style="font-size: 11px; color: #e6a23c; line-height: 1.6">
             🪝 推进：{{ (item.foreshadow_advance || []).join(' · ') }}
@@ -472,6 +492,40 @@ async function confirmSelect() {
 .brief-footer-hint {
   font-size: 12px;
   color: #909399;
+}
+
+/* 起承转合四段：竖排成一条推进轨迹，左侧色条区分段 */
+.brief-beats {
+  margin: 6px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.brief-beat-row {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  padding: 4px 7px;
+  border-left: 2px solid transparent;
+  border-radius: 2px;
+}
+.brief-beat-label {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.7;
+  flex-shrink: 0;
+  width: 14px;
+}
+.brief-beat-text {
+  font-size: 11px;
+  color: #c0c4cc;
+  line-height: 1.65;
+}
+.brief-beat-hint {
+  display: block;
+  font-size: 10px;
+  opacity: 0.7;
+  margin-bottom: 1px;
 }
 
 /* SushiCards 在暗色背景下的微调：通过 deep 穿透 */

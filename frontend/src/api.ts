@@ -163,11 +163,15 @@ export const reviewApi = {
 
 export const refineApi = {
   // 迭代润色：在 text 基础上按 directive 调整，SSE 实时回调，结束返回调整后全文
-  stream: (text: string, directive: string, h: SSEHandlers): Promise<{ y: string }> =>
+  // stage：被调整的产物层（plot=章细纲 / draft=正文 / polish=润色稿）。
+  // 后端按它选 system 合同与输出合同——在剧情卡上调整必须仍输出编号场景块，
+  // 不传则按 draft（正文）处理。
+  stream: (text: string, directive: string, h: SSEHandlers,
+           stage?: 'plot' | 'draft' | 'polish'): Promise<{ y: string }> =>
     fetch('/api/refine/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, directive }),
+      body: JSON.stringify({ text, directive, stage }),
     }).then((r) => consumeSSE<{ y: string }>(r, h)),
 }
 
@@ -473,6 +477,12 @@ export interface EntityInfo {
   created_at: string
   updated_at: string
   voiceprint?: Voiceprint
+  // spec 3：可追踪状态属性。knows / blinded_to（知情边界）就装在这里——
+  // 它们随剧情变（第 3 章不知道、第 7 章知道），所以不属于恒定的 voiceprint。
+  state_attrs?: Record<string, string>
+  // spec 3：伏笔推进追踪（仅 foreshadow 用）。last_advanced_ch=0 表示从未推进。
+  last_advanced_ch?: number
+  advance_count?: number
 }
 export interface EntitiesSummary {
   project: string
@@ -525,6 +535,30 @@ export interface VoiceprintDetail extends VoiceprintRow {
   labels: Record<string, string>
   min_habits: number
   min_catchphrases: number
+  /** 写死了具体动作的条目（写手会原样搬进正文，读起来像硬塞） */
+  over_specified: string[]
+  /** 动作倾向的通道分布；narrow=true 表示全挤在一个通道（如全是手部） */
+  channel_balance: {
+    channels: Record<string, number>
+    narrow: boolean
+    dominant: string
+    n_channels: number
+  }
+}
+
+/** 按实体档案生成的声音档案草稿（未落库） */
+export interface VoiceprintDraft {
+  ok: boolean
+  id: string
+  name: string
+  /** 生成失败时才有；成功时为 null */
+  error?: string
+  draft: Voiceprint | null
+  current?: Voiceprint
+  /** 草稿与现有档案有差异的字段 */
+  changed: (keyof Voiceprint)[]
+  unchanged: (keyof Voiceprint)[]
+  fields?: (keyof Voiceprint)[]
 }
 
 export const voiceprintsApi = {
@@ -536,6 +570,72 @@ export const voiceprintsApi = {
       `/api/projects/${pid}/voiceprints/${encodeURIComponent(eid)}`,
       { method: 'PUT', body: JSON.stringify(body) },
     ),
+  /** 按实体库里的角色档案生成声音档案草稿；只返回不写库 */
+  draft: (pid: string, eid: string) =>
+    req<VoiceprintDraft>(
+      `/api/projects/${pid}/voiceprints/${encodeURIComponent(eid)}/draft`,
+      { method: 'POST' },
+    ),
+}
+
+// ============================================================
+// 角色记忆碎片（memories）
+// ============================================================
+// 魂穿设定专用：这具身体在被唐迟附身之前经历过什么，拆成若干碎片，
+// 每条标一个「入戏第几天想起」。正文注入时按本章所在的 Day 闸门过滤——
+// 第 1 章不该看到第 7 天的底牌。与 voiceprint 同一套交互契约：
+// draft 只返回不写库，作者逐条勾选后走 save 落库。
+
+export interface MemoryFragment {
+  id: string
+  /** 记忆内容，30-200 字 */
+  text: string
+  /** 唐迟入戏第几天想起，1..7 */
+  recovers_at: number
+  /** 实际在正文里被写出来的章号；0 = 还没写出来。设了就以它为准，不再回收 */
+  revealed_at: number
+  /** 溯源：来自哪条档案或原剧本哪一幕 */
+  source: string
+  /** 作者批注 */
+  note: string
+}
+
+export interface MemoriesDraft {
+  ok: boolean
+  id: string
+  name: string
+  /** 生成失败时才有；成功时为 null */
+  error?: string
+  memories: MemoryFragment[] | null
+  current?: MemoryFragment[]
+  /** 草稿里是新写的记忆文本 */
+  new: string[]
+  /** 草稿里与现有档案重复的（默认不勾，避免覆盖作者手写） */
+  kept: string[]
+  /** 解锁日取值范围 [1, 7] */
+  day_range?: [number, number]
+  /** 定位到的卷号；用于告诉作者这批碎片基于哪一卷的原剧本 */
+  volume_no?: number | null
+}
+
+export const memoriesApi = {
+  get: (pid: string, eid: string) =>
+    req<{ ok: boolean; id: string; memories: MemoryFragment[]; day_range: [number, number] }>(
+      `/api/projects/${pid}/entities/${encodeURIComponent(eid)}/memories`,
+    ),
+  save: (pid: string, eid: string, memories: Partial<MemoryFragment>[]) =>
+    req<{ ok: boolean; id: string; memories: MemoryFragment[] }>(
+      `/api/projects/${pid}/entities/${encodeURIComponent(eid)}/memories`,
+      { method: 'PUT', body: JSON.stringify({ memories }) },
+    ),
+  /** 按实体档案 + 本卷原剧本生成记忆碎片草稿；只返回不写库 */
+  draft: (pid: string, eid: string, volNo?: number | null) => {
+    const qs = volNo != null ? `?vol_no=${volNo}` : ''
+    return req<MemoriesDraft>(
+      `/api/projects/${pid}/entities/${encodeURIComponent(eid)}/memories/draft${qs}`,
+      { method: 'POST' },
+    )
+  },
 }
 
 export const entitiesApi = {
@@ -558,7 +658,18 @@ export const entitiesApi = {
   },
   add: (pid: string, body: { type: string; name: string; summary?: string; details?: string; status?: string; chapter?: number }) =>
     req<EntityInfo>(`/api/projects/${pid}/entities`, { method: 'POST', body: JSON.stringify(body) }),
-  update: (pid: string, eid: string, body: { name?: string; summary?: string; details?: string; status?: string }) =>
+  // spec 3：state_attrs 是**合并**语义（空串=删除该键），所以只传要改的字段即可。
+  update: (
+    pid: string,
+    eid: string,
+    body: {
+      name?: string
+      summary?: string
+      details?: string
+      status?: string
+      state_attrs?: Record<string, string>
+    },
+  ) =>
     req<EntityInfo>(`/api/projects/${pid}/entities/${encodeURIComponent(eid)}`, {
       method: 'PUT',
       body: JSON.stringify(body),
@@ -772,6 +883,12 @@ export interface KindleVariant {
   final_hp: number
   turns: number
   final_summary: string
+  // 跑团成败是**独立字段**，不靠 final_summary 有没有内容判断。
+  // 旧实现把 traceback 写进 final_summary，于是失败看起来像「一份有内容的梗概」。
+  run_status?: 'ok' | 'failed'
+  /** 失败阶段：thread（线程崩）/ bootstrap（0 回合退出）/ finalize（压真相失败） */
+  fail_stage?: string
+  fail_reason?: string
 }
 
 export const sessionsApi = {
@@ -989,6 +1106,11 @@ export interface CocDayBreakdown {
   summary?: string
   title?: string
 }
+/** 终止原因：story_complete=自然讲完；hard_cap=撞预算截断（后半段没写完）；
+ *  transition_done=转折后收束；max_turns/dead/insane=硬约束；no_beat=没跑起来 */
+export type CocEndingReason =
+  | 'story_complete' | 'hard_cap' | 'transition_done'
+  | 'max_turns' | 'dead' | 'insane' | 'no_beat' | 'stopped_by_author'
 export interface CocVariant {
   label?: string            // 同PL好运 / 同PL厄运 / 异PL反转
   one_liner?: string
@@ -998,6 +1120,19 @@ export interface CocVariant {
   final_hp?: number
   turns?: number
   final_summary?: string
+  /** 本场完整通稿（8000-12000 字连续故事），与 final_summary 分开取 */
+  full_narrative?: string
+  /** beat 进度：语义进度，不是回合数 */
+  beats_done?: number
+  beat_budget?: number
+  /** KP 判定的叙事阶段：展开中 / 转折点 / 已收束 */
+  story_phase?: string
+  /** 终止原因——区分「讲完了」与「被截断了」，两者对底本价值不同 */
+  ending_reason?: CocEndingReason
+  /** 跑团成败独立字段：不要靠 final_summary 是否为空来判断 */
+  run_status?: 'ok' | 'failed'
+  fail_stage?: string
+  fail_reason?: string
 }
 export interface Outline5Variant {
   label?: string
@@ -1021,6 +1156,8 @@ export interface Job {
   error?: string | null
   created_at?: string
   updated_at?: string
+  /** 实时日志：LLM 的 thinking / delta 流 + 每拍裁决结果（第四步） */
+  live_log?: Array<{ kind: string; text: string; session?: number }>
 }
 
 export interface StartJobResp {
@@ -1276,6 +1413,11 @@ export interface DeskChapter {
   no: number
   title: string
   volume: string // 所属卷名（大纲「第N卷 卷名」行），空=未分卷
+  /** 卷号（来自 volumes store 真实分组），空=未归属 */
+  volume_no: number | null
+  chapter_kind: 'mainline' | 'dungeon' | 'interlude' | string
+  /** 所属副本卷号（dungeon 章用），用于卷内进度回退计算 */
+  field_no: number | null
   has_outline: boolean
   plot_done: boolean
   draft_done: boolean
@@ -1291,6 +1433,9 @@ export interface DeskVolume {
   title: string // 空字符串 = 卷头出现前的无名首组
   note: string // 卷头到下一章之间的零散引言
   chapters: number[]
+  /** 卷号。**卷内进度计算靠这个**——只有 chapters 数组时无法判断某章属哪一卷。 */
+  volume_no: number
+  volume_kind: 'mainline' | 'dungeon' | 'interlude' | string
 }
 export interface DeskDetail {
   project: string
@@ -1321,6 +1466,28 @@ export interface DeskChapterDetail {
   chapter: DeskChapterFull
   outline: string
 }
+// spec 4 写前人工确认门：门禁后仍有 P0 时由后端带出，要求作者表态。
+// 注意这不是「生成失败」——正文已经落库了，作者看到的是「收下 / 再重写 / 自己改」。
+export interface DeskGateState {
+  required: boolean
+  pending: string[]
+  demoted: string[]
+}
+// spec 4 写前风险：只在有风险时 blocked=true（每次必确认会退化成多余的点击）
+export interface GateRisk {
+  kind: string
+  label: string
+  detail: string
+  items: string[]
+}
+export interface GatePreview {
+  chapter: number
+  stage: string
+  blocked: boolean
+  risks: GateRisk[]
+  brief: string
+  error?: string
+}
 export interface DeskRunResult {
   chapter: number
   stage: string
@@ -1329,6 +1496,26 @@ export interface DeskRunResult {
   resumed_indices: number[]
   calls: { completion_status: string; attempts: number }[]
   checklist_injected?: boolean
+  gate?: DeskGateState
+  /** 作者批注（【】标注）的处理报告 */
+  annotations?: {
+    count: number
+    unmet: AnnotationInfo[]
+    leftover_markers: number
+    annotations?: AnnotationInfo[]
+  }
+}
+
+/** 一条作者批注的作用域信息 */
+export interface AnnotationInfo {
+  text: string
+  intent: 'insert' | 'replace' | 'delete'
+  marker: string
+  target_para: number
+  para: number
+  line: number
+  inline: boolean
+  scope_label: string
 }
 export interface FinalizeResult {
   chapter: number
@@ -1343,6 +1530,13 @@ export interface FinalizeResult {
   foreshadow?: {
     paid?: string[]
     advanced?: string[]
+    attempts?: number
+    warning?: string
+    error?: string
+  } | null
+  /** 定稿时新检出并已入账的伏笔（正文里现挖、账上原先没有的坑） */
+  foreshadow_detected?: {
+    planted?: { name: string; summary: string; evidence: string }[]
     attempts?: number
     warning?: string
     error?: string
@@ -1423,11 +1617,48 @@ export const deskApi = {
       `/api/projects/${pid}/desk/${chapter}/payoff`,
       { method: 'PUT', body: JSON.stringify({ payoff }) },
     ),
-  finalize: (pid: string, chapter: number, autoEntities = true, payoff?: string) =>
+  // spec 4 定稿：审稿 blocked 时必须带 acknowledge 逐条确认，否则后端 422。
+  // acknowledge 是「我承认知道这些不稳」的凭据，不是「修好了」——作者有权明知不稳照样定稿。
+  finalize: (
+    pid: string,
+    chapter: number,
+    autoEntities = true,
+    payoff?: string,
+    acknowledge?: string[],
+  ) =>
     req<FinalizeResult>(`/api/projects/${pid}/desk/${chapter}/finalize`, {
       method: 'POST',
-      body: JSON.stringify({ auto_entities: autoEntities, payoff: payoff ?? null }),
+      body: JSON.stringify({
+        auto_entities: autoEntities,
+        payoff: payoff ?? null,
+        acknowledge: acknowledge ?? null,
+      }),
     }),
+  // spec 4 写前预演：零 token 算出风险 + 将要注入的任务书全文。
+  // 展示的 brief 就是模型将看到的，所以这是「透明」而非「拦截」。
+  gatePreview: (pid: string, chapter: number, stage: string) =>
+    req<GatePreview>(`/api/projects/${pid}/desk/${chapter}/gate/preview`, {
+      method: 'POST',
+      body: JSON.stringify({ stage }),
+    }),
+  // spec 4 表态记录。recorded=false 表示账本没写进去，但作者的决定依然有效——
+  // 记录失败绝不阻断操作，所以这里不抛错。
+  gateDecide: (
+    pid: string,
+    chapter: number,
+    body: {
+      gate: 'pre_write' | 'post_gate' | 'finalize'
+      decision: 'accept' | 'rewrite' | 'manual' | 'acknowledge'
+      stage?: string
+      risks?: string[]
+      detail?: string
+      p0?: string[]
+    },
+  ) =>
+    req<{ ok: boolean; recorded: boolean; chapter: number; gate: string; decision: string }>(
+      `/api/projects/${pid}/desk/${chapter}/gate/decide`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
   // 反定稿：清 finalized_at，保留正文/审稿结果，允许改完再定稿
   unfinalize: (pid: string, chapter: number) =>
     req<{ chapter: number; finalized_at: string; ok: boolean }>(
@@ -1578,6 +1809,7 @@ export interface SimStartBody {
   max_pairs_per_session?: number
   max_turns_per_session?: number
   tangchi_replace_idx?: number | null
+  use_mock?: boolean
 }
 
 export interface SimVariant {
@@ -1985,6 +2217,14 @@ export const rhythmApi = {
 // ============================================================
 // 章前 5 分钟方向卡（brief）
 // ============================================================
+/** 起承转合四段骨架。顺序固定：起 → 承 → 转 → 合 */
+export interface PlotBeats {
+  qi?: string
+  cheng?: string
+  zhuan?: string
+  he?: string
+}
+
 export interface BriefOption {
   id: string
   title: string
@@ -1992,6 +2232,7 @@ export interface BriefOption {
   hooks?: string
   day?: number
   beat_type?: string
+  plot_beats?: PlotBeats
   foreshadow_advance?: string[]
   entities_on_stage?: string[]
   is_custom?: boolean

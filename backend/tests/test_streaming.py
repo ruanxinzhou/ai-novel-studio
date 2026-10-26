@@ -213,9 +213,9 @@ class TestRefineStreamApi:
         captured = {}
 
         class CaptureRouter(FakeStreamRouter):
-            def chat_stream(self, step, messages, model=None, max_tokens=None):
+            def chat_stream(self, step, messages, model=None, max_tokens=None, extra=None):
                 captured["messages"] = messages
-                yield from super().chat_stream(step, messages, model, max_tokens)
+                yield from super().chat_stream(step, messages, model, max_tokens, extra)
 
         monkeypatch.setattr("app.api.main.get_router", lambda: CaptureRouter("x"))
         with sse_client.stream("POST", "/api/refine/stream",
@@ -223,6 +223,84 @@ class TestRefineStreamApi:
             "".join(c for c in r.iter_text())
         user_msg = captured["messages"][1]["content"]
         assert "【原文】" in user_msg and "【要求】" in user_msg
+
+
+class TestRefineStageContracts:
+    """「按要求调整」必须按产物层给合同。
+
+    **回归**：之前 refine 端点写死了正文的 system 合同和输出合同
+    （「只输出正文文本本身，不带任何标题、编号或说明」），而它被
+    剧情/正文/润色三个阶段共用。结果在**剧情卡上按要求调整，
+    出来的是正文**——章细纲的「第N场 + 字段行」编号结构全被删掉，
+    退化成连续散文。
+
+    这不是模型不听话，是我们给的合同自相矛盾：
+    system 说「只有正文层才输出纯散文」，末尾合同说「不带任何编号」。
+    """
+
+    def _capture(self, sse_client, monkeypatch, payload):
+        captured = {}
+
+        class CaptureRouter(FakeStreamRouter):
+            def chat_stream(self, step, messages, model=None, max_tokens=None, extra=None):
+                captured["messages"] = messages
+                yield from super().chat_stream(step, messages, model, max_tokens, extra)
+
+        monkeypatch.setattr("app.api.main.get_router", lambda: CaptureRouter("x"))
+        with sse_client.stream("POST", "/api/refine/stream", json=payload) as r:
+            "".join(c for c in r.iter_text())
+        return captured["messages"]
+
+    def test_plot_stage_keeps_numbered_scene_blocks(self, sse_client, monkeypatch):
+        """剧情层调整后，输出合同必须保住「第N场」和字段行。"""
+        msgs = self._capture(sse_client, monkeypatch, {
+            "text": "第1场：雨夜来电\n- 场景：渡口旅社",
+            "directive": "加强开场悬念",
+            "stage": "plot",
+        })
+        user_msg = msgs[1]["content"]
+        assert "场景编号" in user_msg or "必须保留" in user_msg
+        assert "不带任何标题、编号或说明" not in user_msg
+
+    def test_draft_stage_uses_prose_contract(self, sse_client, monkeypatch):
+        """正文层调整仍是纯散文合同。"""
+        msgs = self._capture(sse_client, monkeypatch, {
+            "text": "雨声压住窗玻璃。",
+            "directive": "开头再慢一点",
+            "stage": "draft",
+        })
+        user_msg = msgs[1]["content"]
+        assert "只输出正文文本本身" in user_msg
+
+    def test_plot_stage_system_is_structured_not_prose(self, sse_client, monkeypatch):
+        """剧情层不能拿正文向的活人感合同——那会诱导模型写散文。"""
+        msgs = self._capture(sse_client, monkeypatch, {
+            "text": "第1场：雨夜来电",
+            "directive": "加强悬念",
+            "stage": "plot",
+        })
+        system_msg = msgs[0]["content"]
+        draft_sys = msgs[0]["content"]
+        # 正文向硬指标（段尾落点/章末钩子/长段阶梯）不该出现在结构层
+        assert "章末钩子" not in system_msg
+        assert draft_sys  # system 非空
+
+    def test_unknown_stage_falls_back_to_draft(self, sse_client, monkeypatch):
+        """未知层按正文处理，不炸。"""
+        msgs = self._capture(sse_client, monkeypatch, {
+            "text": "原文",
+            "directive": "要求",
+            "stage": "不存在的层",
+        })
+        assert "只输出正文文本本身" in msgs[1]["content"]
+
+    def test_no_stage_keeps_legacy_behavior(self, sse_client, monkeypatch):
+        """不传 stage 时行为不变（按正文走）——老调用方不受影响。"""
+        msgs = self._capture(sse_client, monkeypatch, {
+            "text": "原文",
+            "directive": "要求",
+        })
+        assert "只输出正文文本本身" in msgs[1]["content"]
 
 
 class TestDeskRunStreamApi:

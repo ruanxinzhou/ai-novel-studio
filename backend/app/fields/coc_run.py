@@ -215,10 +215,49 @@ class CocRunState:
     # ---- 回合 ----
     turns: list[CocTurn] = field(default_factory=list)
     next_role: str = "keeper"   # 下一步该谁发言：keeper 开场
+    # ---- beat（第二步）----
+    # beat = 一次完整因果循环（PL 试探 → KP 裁决 → 剧情状态变化 → PL 再试探），
+    # 也就是从前的「回合对」。**改名不改行为**：一个 beat = 一次
+    # step_keeper + step_investigator，所以它与旧的 steps_done 数值一致。
+    #
+    # 为什么要有 beats：旧实现只留 turns（纯文本），KP 下一轮拿不到
+    # 「已经查清了什么」，导致 PL 在已确认的事上重复试探。beats 存结构化
+    # 裁决记录（known_now/unknown_now），并在下一轮回注给 KP 当约束。
+    beats: list[dict] = field(default_factory=list)
+    beat_budget: int = 24        # 语义预算：故事该讲多长（作者可覆盖）
+    beats_done: int = 0          # 已完成的 beat 数
+    last_story_phase: str = ""   # 展开中|转折点|已收束；留空=按展开中处理
+    consecutive_transition: int = 0   # 连续「转折点」的 beat 数
+    # ---- 决策链（第三步）----
+    # roll_log：真骰子记录。每次判定一条，可回放、可审计。
+    # 旧实现（parse_dice_rolls）是从 KP 中文文本里正则抠出来的，
+    # 骰子本质是模型"想"的——不可复现，且模型倾向让 PL 成功。
+    roll_log: list[dict] = field(default_factory=list)
+    # storyboard：决策链分镜表。每拍一行，是这一层真正的产物。
+    storyboard: list[dict] = field(default_factory=list)
+    # no_progress_streak：连续「没有信息增量」的拍数，用于掐断空转。
+    no_progress_streak: int = 0
     # ---- meta ----
-    status: str = "pending"     # pending/running/paused/awaiting_author/finalized/aborted
+    # status 语义（failed 是本次新增，与 paused 刻意区分）：
+    #   pending          还没跑
+    #   running          跑团中
+    #   paused           跑过、被作者叫停，可续跑
+    #   awaiting_author  跑够数了，等作者决定（正常终点）
+    #   failed           出错了，作者需要决定重跑还是放弃（异常终点）
+    #   finalized        已定稿
+    #   aborted          已放弃
+    # paused 与 failed 必须分开：前者是「正常的暂停」，后者是「需要重跑」，
+    # 前端要显示不同的操作入口（续跑 vs 重跑）。
+    status: str = "pending"
     max_turns: int = 40         # 硬上限，防止死循环
-    final_summary: str = ""     # 跑完后 coc_outcome 层的产物
+    # final_summary 只装**真正的梗概**。异常文本一律进state.error，
+    # 绝不能写进这里——写进去等于把失败伪装成成功产物（历史事故：
+    # 前端拿这个字段当卡片正文，于是 traceback 被当成「一份有内容的梗概」）。
+    final_summary: str = ""
+    # 通稿层产物（第二步）：8000–12000 字连续叙事，供作者「读懂 + 直接当创作底本」。
+    # 与 final_summary **并存不替代**——后者是「第N幕」结构体，
+    # 下游（EmbodyView / day_breakdown）在读它，格式不能动。
+    full_narrative: str = ""
     final_parsed: Any = None
     final_day_breakdown: list[dict] = field(default_factory=list)  # [{day, summary}]
     survivors: list[str] = field(default_factory=list)
@@ -775,7 +814,12 @@ def generate_variant_seed(rng: random.Random | None = None,
 
 
 def render_variant_seed(seed: dict) -> str:
-    """把 seed 渲染成文本，作为 KP 开场的 REQUIRED 材料注入。"""
+    """把 seed 渲染成文本，作为 KP 开场的 REQUIRED 材料注入。
+
+    **结局给的是「方向」不是「命令」**：方案 B 之后 seed 由 LLM 从副本核
+    生成，KP 必须保留推翻权——故事该走向哪是跑出来的，不是预先钦定的。
+    旧实现写死五种结局标签（「你这场必须险胜」），等于命令 KP 去凑框架。
+    """
     if not seed:
         return ""
     lines = ["# 本场仿真差异化设定（守密人内部参考，不要直接念给玩家）", ""]
@@ -783,20 +827,29 @@ def render_variant_seed(seed: dict) -> str:
     lines.append(f"- 主角开场心境：{seed.get('tangchi_mood','')}")
     lines.append(f"- 开场 SAN 扣减：{seed.get('san_start_penalty',0)}")
     lines.append(f"- 金手指已被动触发次数：{seed.get('obsession_start_uses',0)}")
-    flavor = seed.get("flavor")
-    if flavor:
-        lines.append(f"- 本场基调：{flavor}")
     lines.append("")
-    lines.append("## 本场额外登场 NPC")
-    for n in seed.get("extra_npcs", []):
-        lines.append(f"- {n['name']}（{n['stance']}；隐藏：{n['secret']}）")
-    lines.append("")
-    lines.append("## 核心反转（KP 负责在 Day4-Day6 之间逐步揭开）")
-    lines.append(f"- {seed.get('core_twist','')}")
-    lines.append("")
-    lines.append("## 要埋的伏笔（至少埋 2 个，回收要自然）")
-    for f in seed.get("planted_foreshadows", []):
-        lines.append(f"- {f}")
-    lines.append("")
-    lines.append(f"## 结局倾向：{seed.get('ending_label','')}")
+    if seed.get("extra_npcs"):
+        lines.append("## 本场额外登场 NPC")
+        for n in seed["extra_npcs"]:
+            lines.append(f"- {n['name']}（{n['stance']}；隐藏：{n['secret']}）")
+        lines.append("")
+    if seed.get("core_twist"):
+        lines.append("## 本线核心反转（KP 在中后段逐步揭开）")
+        lines.append(f"- {seed['core_twist']}")
+        lines.append("")
+    if seed.get("planted_foreshadows"):
+        lines.append("## 要埋的伏笔（至少埋 2 个，回收要自然）")
+        for f in seed["planted_foreshadows"]:
+            lines.append(f"- {f}")
+        lines.append("")
+    # 结局：**方向 + 明确授权推翻**。没有 ending_direction 时（兜底 seed）
+    # 整段省略，让 KP 完全自由发挥。
+    direction = seed.get("ending_direction") or seed.get("ending_label") or ""
+    if direction:
+        lines.append("## 结局走向（这是倾向，不是命令）")
+        lines.append(f"- {direction}")
+        lines.append(
+            "- **如果故事跑出了另一个更成立的结局，KP 可以推翻这条倾向**——"
+            "结局由跑团决定，不由本设定决定。"
+        )
     return "\n".join(lines)

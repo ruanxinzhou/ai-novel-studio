@@ -10,6 +10,7 @@ Volume 对应一场副本（field_no），统筹整卷的基调弧线、长线�
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +18,145 @@ from pathlib import Path
 
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ============================================================
+# 原剧本归一化（origin_novel）
+# ============================================================
+#
+# **为什么需要这一层**：用户要的是「主角魂穿过去之前的原剧情」，
+# 但这份数据在项目里**存成了三份、且没有任何一个字段名指向它**：
+#
+#   selected_variant.full_narrative   13532 字  通稿（原剧本完整故事）
+#   selected_variant.final_summary     1534 字  小说化梗概（含「第N幕」标记）
+#   selected_variant.transcript        3171 字  跑团实况对话
+#   selected_variant.day_breakdown      7 条    逐日推进（day 1..7）
+#
+# 而 simulated_run.full_log（18321 字）是上面几段用 `=====` 拼起来的，
+# 任何一处改动都不会同步另外几处。注入侧更是完全读不到——
+# desk.py 原本读的是 `sr.get("runs")`，而真实数据里没有这个键（死代码）。
+#
+# 所以这里做一次**归一化**：把散落的形态收成一份权威结构，落 Volume.origin_novel，
+# 之后所有下游（正文注入 / 记忆碎片生成 / 前端展示）都只读这一个字段。
+
+#: full_log 里三段的分隔标记（=====标题=====）
+_FULL_LOG_SECTION_RE = re.compile(r"=====([^=]+)=====")
+
+#: final_summary 里的幕标记「第3幕：」，按天归位
+_ACT_MARKER_RE = re.compile(r"第\s*(\d+)\s*幕")
+
+
+def _extract_full_log_section(full_log: str, keyword: str) -> str:
+    """从 full_log 的 `=====标题=====` 分段里取出标题含 keyword 的那段。"""
+    if not full_log:
+        return ""
+    parts = _FULL_LOG_SECTION_RE.split(full_log)
+    # split 结果形如 [前导, 标题1, 正文1, 标题2, 正文2, ...]
+    for i in range(1, len(parts) - 1, 2):
+        if keyword in parts[i]:
+            return parts[i + 1].strip()
+    return ""
+
+
+def _split_acts(summary: str) -> list[dict]:
+    """把小说化梗概按「第N幕」切成逐幕列表。
+
+    没有幕标记时（短稿 / fallback 稿）返回空 list——这是正常情况，
+    调用方要能退化到只注入逐日推进，而不是报错。
+    """
+    if not summary:
+        return []
+    marks = list(_ACT_MARKER_RE.finditer(summary))
+    if not marks:
+        return []
+    acts: list[dict] = []
+    for i, m in enumerate(marks):
+        start = m.start()
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(summary)
+        text = summary[start:end].strip()
+        if text:
+            acts.append({"day": i + 1, "act": int(m.group(1)), "text": text})
+    return acts
+
+
+def build_origin_novel(variant: dict | None, *, mode: str = "pick_one",
+                       full_log: str = "") -> dict:
+    """由 selected_variant 抽出归一化的原剧本结构。
+
+    variant：simulated_run.selected_variant（dict）
+    mode："pick_one" | "custom"，只作为溯源信息写进 built_from
+    full_log：simulated_run.full_log，用于 final_summary 缺失时兜底取梗概段
+
+    返回 dict：
+      {full_text, summary, transcript, acts[], days[], one_liner,
+       survivors[], built_at, built_from}
+
+    所有字段容错：任一形态缺失都只影响该字段，不抛异常——
+    跑团 fallback 稿经常缺字段，注入侧要能退化而不是崩。
+    """
+    v = variant if isinstance(variant, dict) else {}
+    sv = v.get("selected_variant") if isinstance(v.get("selected_variant"), dict) else v
+
+    full_text = str(sv.get("full_narrative") or "").strip()
+    summary = str(sv.get("final_summary") or "").strip()
+    if not summary:
+        # 兜底 1：full_log 的「小说化梗概」段
+        summary = _extract_full_log_section(full_log, "小说化梗概")
+    if not summary and not full_text:
+        # 兜底 2：full_log 的「通稿」段
+        full_text = _extract_full_log_section(full_log, "通稿").strip()
+    if not full_text:
+        # 兜底 3：full_log 的「跑团完整日志」段（至少有原剧本的机制轨迹）
+        full_text = _extract_full_log_section(full_log, "跑团").strip()
+
+    days: list[dict] = []
+    for row in (sv.get("day_breakdown") or []):
+        if not isinstance(row, dict):
+            continue
+        try:
+            day = int(row.get("day") or 0)
+        except (TypeError, ValueError):
+            continue
+        text = str(row.get("summary") or row.get("text") or "").strip()
+        if day and text:
+            days.append({"day": day, "summary": text})
+    days.sort(key=lambda r: r["day"])
+
+    survivors = [str(x) for x in (sv.get("survivors") or []) if str(x).strip()]
+
+    return {
+        "full_text": full_text,
+        "summary": summary,
+        "transcript": str(sv.get("transcript") or "").strip(),
+        "acts": _split_acts(summary),
+        "days": days,
+        "one_liner": str(sv.get("one_liner") or "").strip(),
+        "survivors": survivors,
+        "built_at": _now(),
+        "built_from": mode if mode in ("pick_one", "custom") else "pick_one",
+    }
+
+
+def origin_novel_of(vol) -> dict:
+    """取出归一化原剧本；旧项目（无 origin_novel）惰性重建。
+
+    **惰性重建是必须的**：已有卷的 origin_novel 是空，不重建就等于
+    「升级后老项目全部失效」，用户得重跑一次跑团（十几分钟 + 花钱）。
+    数据本来就在 simulated_run.selected_variant 里，重建是纯字段搬运、零 LLM。
+    """
+    cached = getattr(vol, "origin_novel", None) if vol is not None else None
+    if isinstance(cached, dict) and (cached.get("full_text") or cached.get("summary")):
+        return cached
+    if vol is None:
+        return {}
+    sr = vol.simulated_run if isinstance(vol.simulated_run, dict) else {}
+    sv = sr.get("selected_variant") if isinstance(sr.get("selected_variant"), dict) else None
+    if not sv:
+        return {}
+    built = build_origin_novel(sv, mode=str(sr.get("mode") or "pick_one"),
+                               full_log=str(sr.get("full_log") or ""))
+    built["built_from"] = "lazy"      # 标记是读时补的，不是选版当时落的
+    return built
 
 
 # 七层反转进度取值
@@ -85,6 +225,10 @@ class Volume:
     # 历史兼容：早期版本存的是 premise 字符串，读取时用 adapted_premise_of() / adapted_player_cards_of() 兼容。
     adapted_module: dict | str | None = None
     simulated_run: dict | None = None
+    # origin_novel：归一化后的「原剧本」（唐迟魂穿之前的完整故事）。
+    # 选版落盘时由 build_origin_novel() 一次构建；旧卷读时由 origin_novel_of() 惰性补，
+    # 所以这一列可能为空——**永远用 origin_novel_of(vol) 读，不要直接下标取**。
+    origin_novel: dict | None = None
     death_nodes: list = field(default_factory=list)
     climax_nodes: list = field(default_factory=list)
     clue_nodes: list = field(default_factory=list)
@@ -167,6 +311,7 @@ class Volume:
             start_chapter_no=int(d.get("start_chapter_no", 1) or 1),
             adapted_module=d.get("adapted_module"),
             simulated_run=d.get("simulated_run"),
+            origin_novel=d.get("origin_novel"),
             death_nodes=list(d.get("death_nodes", []) or []),
             climax_nodes=list(d.get("climax_nodes", []) or []),
             clue_nodes=list(d.get("clue_nodes", []) or []),

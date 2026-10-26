@@ -14,13 +14,32 @@ routing:
   refine:       { primary: minimax,    fallback: trae_exec }
   # chore = 拆解抽取类（导入拆章大纲、实体抽取）：走本地 trae-cli 不花钱，MiniMax 兜底
   chore:        { primary: trae_exec,  fallback: minimax }
+  # 车卡类（CL/PL 调查员卡生成）：**必须显式路由**。未注册的步骤会回落
+  # 默认 trae_exec → 300s 硬超时把跑团卡在「正在生成 PL 卡」这一步，
+  # 而且这步不在 live_log 链路里，作者只能干等（历史事故）。
+  sushi:        { primary: minimax,    fallback: minimax }
+  sushi_edit:   { primary: minimax,    fallback: minimax }
   # distill = 拆书写法卡提炼（一本书一次，产出直接进后续写作上下文，质量优先）
   distill:      { primary: minimax,    fallback: trae_exec }
   # 《第七日的亡者》场工作流（Phase 1 书化）
   adapt_scenario:     { primary: minimax, fallback: trae_exec }
   coc_keeper:         { primary: minimax, fallback: trae_exec }
   coc_investigator:   { primary: minimax, fallback: trae_exec }
+  # coc = 跑团 runner 的兜底路由键。正常情况下各层会用自己的层名路由
+  # （coc_beat / coc_narrative / coc_outcome ...），只有层名丢失时才落到这里。
+  # 显式声明 minimax 单通道，避免回落默认 trae_exec 触发 300s 超时卡死。
+  coc:                { primary: minimax }
+  # 跑团决策链（第四步）：**单通道，不 failover**。
+  # 不加 trae_exec 兜底是有意的：trae_exec 有 300s 硬超时，一旦 failover
+  # 过去会把整场跑团卡死（历史事故：trae exec 超时杀进程树，job 永远
+  # 停在 4%、三场 turns=0）。宁可快速失败让作者重跑，也不要静默卡住。
+  coc_beat:           { primary: minimax }
+  # 支线种子生成（方案 B）：开场前一次调用产出三条差异化设定。
+  # 单通道不兜底：兜底会让作者拿到与剧本无关的硬编码素材。
+  coc_seed:           { primary: minimax }
   coc_outcome:        { primary: minimax, fallback: trae_exec }
+  # 通稿层单次生成 8000-12000 字，同样不兜底（长任务被 300s 截断必失败）
+  coc_narrative:      { primary: minimax }
   tang_outline:       { primary: minimax, fallback: trae_exec }
   split_chapters:     { primary: minimax, fallback: trae_exec }
   distill_world:      { primary: minimax, fallback: trae_exec }

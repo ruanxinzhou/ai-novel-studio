@@ -157,7 +157,16 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
         if ch and ch.chapter_kind == "mainline":
             ml_ch_nos.append(no)
     ml_finalized = sum(1 for n in ml_ch_nos if desk.get(n) and desk.get(n).finalized_at)
-    # 主线未写完时，若用户显式点选了非 mainline 卷（去规划新副本/间章），允许跳过去做规划，不强绑主线
+    # 主线未写完时，若用户显式点选了非 mainline 卷（去规划新副本/间章），允许跳过去做规划，不强绑主线。
+    #
+    # 这里判定的语义是「用户明确指了某一卷，就按那一卷的进度走」——
+    # 无论主线写没写完。只在用户**没有指定卷**（target_volume_no is None）时，
+    # 才让主线进度劫持整个判定。
+    #
+    # 旧实现只在「目标卷号 ≠ 主线卷号」时才放行，导致一种具体的坏情况：
+    # 用户在副本卷完成改编后点「下一阶段：模拟跑团」，前端带着该卷号来查询，
+    # 却因为「该卷号 ≠ 主线卷号」而被判定为 user_switching_away=False，
+    # 于是返回 desk（写作台），表现为**点击后原地刷新、跳不回跑团页**。
     user_switching_away = (
         target_volume_no is not None
         and not any(v.volume_no == target_volume_no and v.volume_kind == "mainline" for v in vols)
@@ -232,14 +241,20 @@ def _determine_phase(pid: str, target_volume_no: int | None = None) -> dict:
         "writing-desk": "writing-desk",
     }
     if isinstance(view_override, str) and view_override in _VIEW_TO_PHASE:
-        return {
-            "phase": _VIEW_TO_PHASE[view_override],
-            "volume_no": target_vol.volume_no,
-            "volume_kind": target_vol.volume_kind,
-            "chapter_no": None,
-            "is_last_chapter": False,
-            "is_reviewing": False,
-        }
+        # 自愈：_view 指向的阶段若已经完成，说明这是历史数据残留的临时标记，
+        # 不该再压住阶段推进。表现为「点下一阶段原地刷新，永远跳不动」。
+        # 这里不自动清盘（/phase 是只读 GET），只是不再被它拦住——
+        # 真正的清理发生在 markStageComplete。
+        _view_stage_done = bool(sc.get(view_override, False))
+        if not _view_stage_done:
+            return {
+                "phase": _VIEW_TO_PHASE[view_override],
+                "volume_no": target_vol.volume_no,
+                "volume_kind": target_vol.volume_kind,
+                "chapter_no": None,
+                "is_last_chapter": False,
+                "is_reviewing": False,
+            }
 
     # 过滤出属于该卷的章节：优先 field_no == vol_no；is_interlude 且未正确绑 field_no 的老数据归到最近 interlude 卷
     all_chapter_nos = sorted(desk.all_nos())

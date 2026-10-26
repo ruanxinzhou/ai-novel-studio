@@ -13,7 +13,7 @@ from typing import Any, Iterator, Literal
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .. import config as _config
 from ..context import Material, MaterialFamily
@@ -580,14 +580,39 @@ class RefineIn(BaseModel):
     text: str
     directive: str
     project: str | None = None
+    #: 被调整的产物层：plot（章细纲）/ draft（正文）/ polish（润色稿）。
+    #: 不传按 draft 走（历史行为）。这一层决定用哪套 system 合同与输出合同。
+    stage: str | None = None
 
 
 @app.post("/api/refine/stream")
 def refine_stream(body: RefineIn) -> StreamingResponse:
     """迭代润色：在【原文】基础上按【要求】调整，SSE 实时透出 thinking/delta，
-    结束发 result（y 为调整后全文）。走 refine 路由（提示词可在工坊改）。"""
+    结束发 result（y 为调整后全文）。走 refine 路由（提示词可在工坊改）。
+
+    ## 为什么要按层分合同
+
+    这个端点被三个阶段的「按要求调整」共用：剧情（章细纲）、正文、润色稿。
+    但三者的**产物形态**完全不同——章细纲是「第N场 + 字段行」的编号结构块，
+    正文是纯散文。
+
+    之前这里写死了正文的合同（system 用 draft 的完整活人感合同、
+    末尾拼「只输出正文文本本身，不带任何标题、编号或说明」），
+    于是**在剧情卡上按要求调整，出来的是正文**：模型被两份合同夹击——
+    system 说「正文层才输出纯散文」、末尾合同说「不带任何编号」，
+    编号场景块全被删掉，退化成连续散文。这不是模型不听话，
+    是我们给的合同自相矛盾。
+
+    所以这里按 stage 走 `system_contract_for` / `output_contract_for`，
+    和生成阶段（render_generation_messages）用同一套按层分发逻辑。
+    """
+    from ..pipeline.prompts import output_contract_for, system_contract_for
+
     def sse(event: str, data) -> str:
         return f"event: {event}\ndata: {json_dumps(data)}\n\n"
+
+    # 产物层：只认三个已知层，其余一律按正文（draft）兜底。
+    stage = body.stage if body.stage in ("plot", "draft", "polish") else "draft"
 
     def gen() -> Iterator[str]:
         q: Queue = Queue()
@@ -597,12 +622,13 @@ def refine_stream(body: RefineIn) -> StreamingResponse:
             parts: list[str] = []
             try:
                 instruction = _prompt_store.effective("refine")
-                user = (f"{instruction}\n\n【原文】\n{body.text}\n\n【要求】\n{body.directive}\n{OUTPUT_CONTRACT}")
+                contract = output_contract_for(stage)
+                user = (f"{instruction}\n\n【原文】\n{body.text}\n\n【要求】\n{body.directive}\n{contract}")
                 messages = [
-                    {"role": "system", "content": SYSTEM_CONTRACT},
+                    {"role": "system", "content": system_contract_for(stage)},
                     {"role": "user", "content": user},
                 ]
-                # 输出预算 = 正文等长 + 思考余量（推理模型思考与正文共享 max_tokens），
+                # 输出预算 = 原文等长 + 思考余量（推理模型思考与输出共享 max_tokens），
                 # 不做人为上限——131072 是 MiniMax-M3 的模型硬顶，非产品限制
                 out_budget = min(131_072, max(8_192,
                                               int(len(body.text) * PROSE_TOKENS_PER_CHAR) + 4_096))
@@ -981,6 +1007,10 @@ class EntityUpdateIn(BaseModel):
     details: str | None = None
     status: str | None = None
     voiceprint: dict | None = None
+    # spec 3：可追踪状态属性。character 的 knows / blinded_to（知情边界）走这里。
+    # 语义是**合并**而非覆盖：空串/None 表示删掉该键（store.update:935-940），
+    # 所以前端只传要改的字段即可，不必先读回全量再整体 PUT。
+    state_attrs: dict[str, str] | None = None
 
 
 class VoiceprintIn(BaseModel):
@@ -1095,6 +1125,7 @@ def entities_update(pid: str, eid: str, body: EntityUpdateIn) -> dict:
     try:
         return _entities_for(pid).update(
             eid, body.name, body.summary, body.details, body.status,
+            state_attrs=body.state_attrs,
             voiceprint=body.voiceprint).as_dict()
     except ValueError as ex:
         raise HTTPException(status_code=404 if "不存在" in str(ex) else 422, detail=str(ex))
@@ -1208,6 +1239,12 @@ def voiceprint_get(pid: str, eid: str) -> dict:
         "voiceprint": vp.as_dict(), "labels": VOICEPRINT_LABELS,
         "min_habits": VOICEPRINT_MIN_ACTIONS,
         "min_catchphrases": VOICEPRINT_MIN_CATCHPHRASES,
+        # 写死了具体动作的条目：写手会原样搬进正文，读起来像硬塞。
+        # 只提示不自动改——怎么抽象是作者的决定。
+        "over_specified": vp.over_specified(),
+        # 动作倾向的通道分布：narrow=True 表示全挤在一个通道（如全是手部），
+        # 写手会没有选择，只能反复用同一类身体描写。
+        "channel_balance": vp.channel_balance(),
     }
 
 
@@ -1225,6 +1262,59 @@ def voiceprint_put(pid: str, eid: str, body: VoiceprintIn) -> dict:
             "voiceprint": vp.as_dict()}
 
 
+@app.post("/api/projects/{pid}/voiceprints/{eid}/draft")
+def voiceprint_draft(pid: str, eid: str) -> dict:
+    """按实体档案生成声音档案**草稿**（不写库）。
+
+    设计成「只返回不写入」是刻意的：作者在实体库里手写的语气基调、
+    精心调过的沉默习惯，被一次 AI 生成冲掉的代价远大于省下的几分钟。
+    所以这里只产出草稿，前端弹预览让作者逐字段看过、用哪些由作者勾选，
+    真正落库仍走上面的 PUT。
+
+    输入是该角色在实体库里的全部描述（身份/年龄/外貌/性格/动机/秘密/
+    身体状态/死状/信息差），模型据此推导说话方式，输出能追溯到输入。
+    """
+    _require_project(pid)
+    store = _entities_for(pid)
+    from ..entities.voiceprint_gen import (
+        FIELD_SHAPE,
+        diff_against_current,
+        generate_draft,
+    )
+
+    if eid == PROTAGONIST_ID:
+        name = store.protagonist.current_body_name or "主角"
+        entity = store.protagonist.as_dict()
+    else:
+        try:
+            entity = store.get(eid).as_dict()
+        except ValueError as ex:
+            raise HTTPException(status_code=404, detail=str(ex))
+        name = entity.get("name") or eid
+
+    provider = _chore_provider("voiceprint")
+    draft = generate_draft(provider, name, entity)
+
+    if draft.get("_error"):
+        return {"ok": False, "id": eid, "name": name, "error": draft["_error"],
+                "draft": None, "changed": [], "unchanged": []}
+
+    try:
+        current = store.get_voiceprint(eid).as_dict()
+    except ValueError:
+        current = {}
+
+    diff = diff_against_current(draft, current)
+    return {
+        "ok": True, "id": eid, "name": name,
+        "draft": draft,
+        "current": current,
+        "changed": diff["changed"],
+        "unchanged": diff["unchanged"],
+        "fields": list(FIELD_SHAPE.keys()),
+    }
+
+
 @app.delete("/api/projects/{pid}/entities/{eid}")
 def entities_delete(pid: str, eid: str) -> dict:
     _require_project(pid)
@@ -1233,6 +1323,136 @@ def entities_delete(pid: str, eid: str) -> dict:
     except ValueError as ex:
         raise HTTPException(status_code=404, detail=str(ex))
     return {"deleted": eid}
+
+
+# ---- 角色记忆碎片（memories）----
+#
+# 与 voiceprint 同一套交互契约：draft 端点**只返回草稿不写库**，
+# 作者逐条勾选后走 put 落库。所以作者手写的记忆和调整过的解锁日
+# 不会被一次 AI 生成冲掉。
+
+
+class MemoriesIn(BaseModel):
+    """记忆碎片全量覆盖。字段全部可选；memories 传空数组表示清空。"""
+    memories: list[dict] = Field(default_factory=list)
+
+
+@app.get("/api/projects/{pid}/entities/{eid}/memories")
+def memories_get(pid: str, eid: str) -> dict:
+    """取某角色（或主角）的记忆碎片列表。"""
+    from ..entities.store import MEMORY_DAY_MAX, MEMORY_DAY_MIN
+
+    _require_project(pid)
+    store = _entities_for(pid)
+    try:
+        items = store.get_memories(eid)
+    except ValueError as ex:
+        raise HTTPException(status_code=404, detail=str(ex))
+    return {
+        "ok": True, "id": eid,
+        "memories": [m.as_dict() for m in items],
+        "day_range": [MEMORY_DAY_MIN, MEMORY_DAY_MAX],
+    }
+
+
+@app.put("/api/projects/{pid}/entities/{eid}/memories")
+def memories_put(pid: str, eid: str, body: MemoriesIn) -> dict:
+    """落库记忆碎片（整体覆盖）。前端预览弹窗勾选后调用。"""
+    _require_project(pid)
+    store = _entities_for(pid)
+    try:
+        items = store.set_memories(eid, body.memories)
+    except ValueError as ex:
+        raise HTTPException(status_code=422, detail=str(ex))
+    return {"ok": True, "id": eid,
+            "memories": [m.as_dict() for m in items]}
+
+
+@app.post("/api/projects/{pid}/entities/{eid}/memories/draft")
+def memories_draft(pid: str, eid: str, vol_no: int | None = None) -> dict:
+    """按实体档案 + 本卷原剧本生成记忆碎片**草稿**（不写库）。
+
+    输入是该角色已有的全部描述（身份/年龄/性格/动机/秘密/身体状态/
+    第七日死状/隐藏死因/信息差…）加上本卷归一化后的原剧本
+    （梗概全文 + 逐日推进 + 通稿节选），模型据此推导这个角色
+    可以被拆成哪些「日后会陆续想起来的记忆」，每条标一个解锁日。
+
+    vol_no 不传时按角色出场章号回退定位所属卷；定位不到就只按档案生成
+    （退化但不报错——第一次写书时卷可能还没建）。
+    """
+    _require_project(pid)
+    store = _entities_for(pid)
+    from ..entities.memory_gen import (
+        MEMORY_DAY_MAX,
+        MEMORY_DAY_MIN,
+        diff_against_current,
+        generate_draft,
+    )
+
+    if eid == PROTAGONIST_ID:
+        name = store.protagonist.current_body_name or "主角"
+        entity = store.protagonist.as_dict()
+    else:
+        try:
+            entity = store.get(eid).as_dict()
+        except ValueError as ex:
+            raise HTTPException(status_code=404, detail=str(ex))
+        name = entity.get("name") or eid
+
+    # 定位本卷：显式 vol_no > 角色首个出场章所属卷 > 最新卷
+    target_vn = vol_no
+    if target_vn is None:
+        appearances = entity.get("appearances") or []
+        if appearances:
+            try:
+                target_vn = _volume_for_chapter(pid, int(min(appearances))).volume_no
+            except Exception:
+                target_vn = None
+    if target_vn is None:
+        try:
+            vols = _volumes_for(pid).all_list()
+            target_vn = vols[-1].volume_no if vols else None
+        except Exception:
+            target_vn = None
+
+    origin_novel: dict = {}
+    if target_vn is not None:
+        try:
+            from ..book.volume import origin_novel_of
+            origin_novel = origin_novel_of(_volumes_for(pid).get(int(target_vn)))
+        except Exception:
+            origin_novel = {}
+
+    provider = _chore_provider("voiceprint")
+    # 生成可能因为上游超时/限流整体失败（trae exec 300s 超时就是常见一例）。
+    # 端点不能因此 500——它是「省作者几分钟」的工具，不是必经关卡：
+    # 拿不到草稿时作者还能手写，500 只会让他以为功能坏了。
+    try:
+        draft = generate_draft(provider, name, entity, origin_novel)
+    except Exception as ex:
+        return {"ok": False, "id": eid, "name": name,
+                "error": f"生成失败：{str(ex)[:200]}",
+                "memories": None, "new": [], "kept": []}
+
+    if draft.get("_error"):
+        return {"ok": False, "id": eid, "name": name, "error": draft["_error"],
+                "memories": None, "new": [], "kept": []}
+
+    try:
+        current = [m.as_dict() for m in store.get_memories(eid)]
+    except ValueError:
+        current = []
+
+    diff = diff_against_current(draft["memories"], current)
+    return {
+        "ok": True, "id": eid, "name": name,
+        "volume_no": target_vn,
+        "memories": draft["memories"],
+        "current": current,
+        "new": diff["new"],
+        "kept": diff["kept"],
+        "day_range": [MEMORY_DAY_MIN, MEMORY_DAY_MAX],
+    }
 
 
 @app.post("/api/projects/{pid}/entities/extract")
@@ -1320,7 +1540,29 @@ def import_text(pid: str, body: ImportTextIn) -> dict:
     return resp
 
 
+def _accepts_extra(fn) -> set:
+    """取函数签名里的参数名集合（供「要不要透传 extra」判断）。
+
+    测试里大量替身 router 只按旧签名定义 `chat(self, step, messages,
+    model=None, max_tokens=None)`，无条件透传 extra 会直接 TypeError。
+    """
+    import inspect
+    try:
+        return set(inspect.signature(fn).parameters)
+    except (TypeError, ValueError):
+        return set()
+
+
 def _chore_provider(step: str = "chore"):
+    """把 Router 适配成 Provider。**必须暴露 chat_stream**：
+    PipelineRunner 用 `hasattr(provider, "chat_stream")` 判断走流式还是整块。
+    以前这个适配器只有 `chat`，于是所有走 _chore_provider 的步骤
+    （含跑团 coc）都退化成一次性阻塞调用——前端的实时 thinking/delta
+    一条也收不到，作者只能盯着「开场中」干等。
+
+    用 `hasattr(router, ...)` 守卫：测试里不少替身 router 只实现了
+    `chat`，无条件挂上 chat_stream 会让它们 AttributeError。
+    """
     router: Router = get_router()
 
     class _Adapter:
@@ -1329,8 +1571,22 @@ def _chore_provider(step: str = "chore"):
 
         @staticmethod
         def chat(messages, model=None, max_tokens=None, extra=None):
+            # extra 只在 Router 支持时透传：测试替身 router 的 chat 签名
+            # 可能没有 extra，硬传会 TypeError（'takes from 3 to 5
+            # positional arguments but 6 were given'）。
+            if extra is not None and "extra" in _accepts_extra(router.chat):
+                return router.chat(step, messages, model, max_tokens, extra)
             return router.chat(step, messages, model, max_tokens)
 
+    if hasattr(router, "chat_stream"):
+        @staticmethod
+        def chat_stream(messages, model=None, max_tokens=None, extra=None):
+            if extra is not None and "extra" in _accepts_extra(router.chat_stream):
+                yield from router.chat_stream(step, messages, model, max_tokens, extra)
+            else:
+                yield from router.chat_stream(step, messages, model, max_tokens)
+
+        _Adapter.chat_stream = staticmethod(chat_stream)
     return _Adapter()
 
 
@@ -2058,6 +2314,24 @@ class DeskTextIn(BaseModel):
 class DeskFinalizeIn(BaseModel):
     auto_entities: bool = True
     payoff: Literal["none", "small", "medium", "climax"] | None = None   # 定稿时顺手点选兑现规模
+    # spec 4：审稿 blocked 时的逐条确认。作者必须显式承认「我知道不稳」，
+    # 后端不依赖前端自觉——没传就 422。作者有权明知不稳照样定稿，
+    # 我们只负责让他知道。
+    acknowledge: list[str] | None = None
+
+
+class GateDecideIn(BaseModel):
+    """作者对确认门的表态（spec 4）。"""
+    gate: Literal["pre_write", "post_gate", "finalize"]
+    decision: Literal["accept", "rewrite", "manual", "acknowledge"]
+    stage: str = ""
+    risks: list[str] = []          # 触发的风险类型（RISK_*）
+    detail: str = ""               # 一句话摘要
+    p0: list[str] = []             # 门禁后的 P0 原文
+
+
+class GatePreviewIn(BaseModel):
+    stage: Literal["plot", "draft", "polish"] = "plot"
 
 
 class DeskPayoffIn(BaseModel):
@@ -2129,6 +2403,53 @@ def desk_save_text(pid: str, chapter: int, stage: str, body: DeskTextIn) -> dict
         raise HTTPException(status_code=422, detail=str(e))
     return {"chapter": chapter, "stage": stage, "chars": len(body.text),
             "finalized_at": work.finalized_at}
+
+
+@app.post("/api/projects/{pid}/desk/{chapter}/gate/preview")
+def desk_gate_preview(pid: str, chapter: int, body: GatePreviewIn) -> dict:
+    """写前预演（spec 4）：零 token 算出本章风险 + 将要注入的任务书全文。
+
+    「零 token」是这里的关键：作者点「生成」之前就该知道模型要写什么、
+    账上有哪些债没还。前端拿 blocked 决定弹不弹窗，拿 brief 展示给作者看——
+    展示的就是模型将看到的，所以这是「透明」而非「拦截」。
+    """
+    _require_project(pid)
+    from app.generation.gate import build_preview
+    desk = _desk_for(pid)
+    o_map = outline_map(_project_store, pid)
+    try:
+        pv = build_preview(
+            _entities_for(pid), desk, chapter, body.stage,
+            outline_total=max(o_map) if o_map else 0,
+            book_store=_book_for(pid), field_store=_fields_for(pid),
+            volume_store=_volumes_for(pid),
+            current_volume=_volume_for_chapter(pid, chapter),
+            project_id=pid,
+        )
+    except Exception as e:
+        # 预演失败绝不能阻断写作——它是辅助信息，不是门禁
+        return {"chapter": chapter, "stage": body.stage, "blocked": False,
+                "risks": [], "brief": "", "error": str(e)[:200]}
+    return pv.as_dict()
+
+
+@app.post("/api/projects/{pid}/desk/{chapter}/gate/decide")
+def desk_gate_decide(pid: str, chapter: int, body: GateDecideIn) -> dict:
+    """记录作者对确认门的表态（spec 4）。
+
+    账本写失败返回 ok=True 但 recorded=False——**记录失败不阻断作者的操作**，
+    他已经做了决定，不能因为写不进账本就把他的决定作废（与 spec 1 同约束）。
+    """
+    _require_project(pid)
+    from app.generation.gate import append_decision
+    ok = True
+    for risk in (body.risks or [""]):
+        ok = append_decision(
+            pid, chapter, body.gate, body.decision,
+            risk=risk, detail=body.detail, stage=body.stage, p0=body.p0,
+        ) and ok
+    return {"ok": True, "recorded": ok, "chapter": chapter,
+            "gate": body.gate, "decision": body.decision}
 
 
 @app.post("/api/projects/{pid}/desk/{chapter}/run")
@@ -2228,7 +2549,8 @@ def desk_review(pid: str, chapter: int) -> dict:
     if s_warns:
         record["strand_warnings"] = s_warns
     b_warns = book_review_checks(desk, chapter,
-                                book_store=_book_for(pid), field_store=_fields_for(pid))
+                                book_store=_book_for(pid), field_store=_fields_for(pid),
+                                entity_store=_entities_for(pid))
     if b_warns:
         record["book_warnings"] = b_warns
     desk.record_review(chapter, record)
@@ -2311,15 +2633,20 @@ def desk_fix_stream(pid: str, chapter: int) -> StreamingResponse:
 
 @app.post("/api/projects/{pid}/desk/{chapter}/finalize")
 def desk_finalize(pid: str, chapter: int, body: DeskFinalizeIn | None = None) -> dict:
-    """定稿 + 保鲜飞轮：实体抽取、标记核验、整本合成采纳 draft 版本。"""
+    """定稿 + 保鲜飞轮：实体抽取、标记核验、整本合成采纳 draft 版本。
+
+    spec 4：审稿 blocked 时必须带 acknowledge 逐条确认，否则 422。
+    不拦死——作者有权明知不稳照样定稿，我们只负责让他知道。
+    """
     _require_project(pid)
     auto = body.auto_entities if body else True
     payoff = body.payoff if body else None
+    ack = body.acknowledge if body else None
     try:
         return finalize_chapter(
             _chore_provider(), _prompt_store, _project_store, pid,
             _entities_for(pid), _markers_for(pid), _desk_for(pid),
-            chapter, auto_entities=auto, payoff=payoff)
+            chapter, auto_entities=auto, payoff=payoff, acknowledge=ack)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
@@ -3922,7 +4249,8 @@ def state_snapshot(pid: str, chapter: int | None = None) -> dict:
 
 class ApplyDiffIn(BaseModel):
     # selections 结构：{bucket: {index_in_bucket: true/false}}
-    # bucket ∈ new_entities/state_changes/new_foreshadows/foreshadow_payoffs/ripple_hints
+    # bucket ∈ new_entities/state_changes/new_foreshadows/foreshadow_payoffs/
+    #         foreshadow_advances/ripple_hints
     selections: dict[str, dict[str, bool]]
 
 
@@ -4615,7 +4943,52 @@ from .jobs_routes import register_job_routes, register_pdf5_route
 
 # 给 coc_runner 一个工厂（每次返回新 PipelineRunner，线程安全）
 def _coc_runner_factory():
-    return PipelineRunner(_chore_provider('coc'), prompt_store=_prompt_store)
+    """跑团专用 runner 工厂。
+
+    **不能用 _chore_provider('coc')**：那个适配器把路由 key 写死成字符串
+    'coc'，而 routing.yaml 里根本没有 coc 这一条 → 回落默认 trae_exec
+    → 300s 硬超时把整场跑团卡死（历史事故：job 永远停在 4%、turns=0）。
+
+    这里改成「按层名路由」的代理：PipelineRunner 用 spec.name 调
+    run_layer 时，这里按层名转发给对应路由条目，于是 coc_beat /
+    coc_narrative 的 minimax 单通道（无 trae_exec 兜底）才真正生效。
+    """
+    router: Router = get_router()
+
+    class _PerLayerAdapter:
+        """按调用层转发到对应路由条目。
+
+        PipelineRunner 会先调 `provider.chat_stream(...)`，但不知道层名——
+        层名在 spec.name 里，经 extra["_layer"] 传下来。所以这里以
+        extra["_layer"] 为准；拿不到就退回 'coc'（保证有兜底而非崩）。
+        """
+        name = "router:coc"
+        default_model = None
+
+        @staticmethod
+        def _step(extra):
+            return str((extra or {}).get("_layer") or "coc")
+
+        @staticmethod
+        def chat(messages, model=None, max_tokens=None, extra=None):
+            step = _PerLayerAdapter._step(extra)
+            if extra is not None and "extra" in _accepts_extra(router.chat):
+                return router.chat(step, messages, model, max_tokens, extra)
+            return router.chat(step, messages, model, max_tokens)
+
+    # 同 _chore_provider：测试替身可能没有 chat_stream，挂之前先探。
+    if hasattr(router, "chat_stream"):
+        @staticmethod
+        def chat_stream(messages, model=None, max_tokens=None, extra=None):
+            step = _PerLayerAdapter._step(extra)
+            if extra is not None and "extra" in _accepts_extra(router.chat_stream):
+                yield from router.chat_stream(step, messages, model, max_tokens, extra)
+            else:
+                yield from router.chat_stream(step, messages, model, max_tokens)
+
+        _PerLayerAdapter.chat_stream = staticmethod(chat_stream)
+
+    return PipelineRunner(_PerLayerAdapter(), prompt_store=_prompt_store)
 
 register_job_routes(
     app,

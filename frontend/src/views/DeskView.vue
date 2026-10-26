@@ -19,6 +19,7 @@ import {
   type SkillModule,
 } from '../api'
 import { activeTab, currentChapterNo, currentProjectId, currentVolumeNo } from '../state'
+import { visibleBeats } from '../plotBeats'
 import { provideChatContext } from '../chatContext'
 import PrevStepPanel from '../components/PrevStepPanel.vue'
 
@@ -133,9 +134,25 @@ provideChatContext(() => {
   }
 })
 
-const autoAtEnd = computed(() => {
-  // 前端近似：当前章号已是本卷最后一章
-  return !!(totalCount.value && currentNo.value && currentNo.value >= totalCount.value)
+/** 卷末自动判定。
+ *
+ *  **不要用 totalCount**：那是全书章数（len(chapters)），不是本卷章数。
+ *  早期版本写成 `currentNo >= totalCount`，于是第 1 卷第 2 章
+ *  （全书共 20 章）永远判不出卷末 —— 「本章已是本卷终章」勾不上，
+ *  文案还打出「卷内计划共 20 章」。两处都是同一个根因。
+ *
+ *  判据是「当前章是不是本卷已建章里的最后一章」；
+ *  节奏蓝图另有 suggested_chapter_range，那条由后端 _brief_advance 判定，
+ *  前端不重复实现，只按章数近似。
+ */
+const autoAtEnd = computed(() => isVolumeLastByCount.value)
+
+/** 当前卷有没有节奏蓝图。
+ *  主线卷（蓝星开篇）不走 rhythm 流程，没有蓝图；这时说「按节奏蓝图」是骗人的，
+ *  得区分措辞——否则作者会去找一份不存在的蓝图。 */
+const hasRhythmBlueprint = computed(() => {
+  const bp = curVolume.value?.rhythm_blueprint
+  return !!(bp && Array.isArray(bp.chapter_plan) && bp.chapter_plan.length)
 })
 const endChapterChecked = computed({
   get: () => {
@@ -213,6 +230,43 @@ watch(text, () => {
 
 const finalizedCount = computed(() => overview.value?.finalized ?? 0)
 const totalCount = computed(() => overview.value?.total ?? 0)
+
+/** 当前卷的章号列表（升序）。卷归属优先用 overview.volumes 里 volumes store 的真实分组，
+ *  拿不到时退回章节自身的 field_no —— 两者不一致说明分组逻辑漏了章，按 field_no 更保险。 */
+const currentVolumeChapters = computed<number[]>(() => {
+  const ov = overview.value
+  if (!ov) return []
+  const fromVols = (ov.volumes || []).find(
+    (v) => v.volume_no != null && v.volume_no === activeVolumeNo.value,
+  )
+  if (fromVols?.chapters?.length) return [...fromVols.chapters].sort((a, b) => a - b)
+  // 回退：按 field_no 归组（field_no 才是副本卷的真实归属键）
+  const cur = ov.chapters?.find((c) => c.no === currentNo.value)
+  const fn = cur?.field_no ?? ((detail.value?.chapter as any)?.field_no ?? null)
+  if (fn == null) return []
+  return (ov.chapters || [])
+    .filter((c) => c.field_no === fn)
+    .map((c) => c.no)
+    .sort((a, b) => a - b)
+})
+
+/** 当前卷共几章 */
+const volumeTotalCount = computed(() => currentVolumeChapters.value.length)
+
+/** 当前章在本卷内的序号（从 1 起）。第 1 卷第 2 章 → 2，不是 2/20。 */
+const volumeSeqNo = computed(() => {
+  const idx = currentVolumeChapters.value.indexOf(currentNo.value)
+  return idx >= 0 ? idx + 1 : 0
+})
+
+/** 本章是不是本卷最后一章（按已建章数判定，不依赖节奏蓝图）。
+ *  主线卷（蓝星开篇）不走 rhythm，没有 suggested_chapter_range，
+ *  autoAtEnd 永远为 false —— 这类卷只能靠「已建章数」判卷末。 */
+const isVolumeLastByCount = computed(() => {
+  const list = currentVolumeChapters.value
+  if (!list.length) return false
+  return currentNo.value === Math.max(...list)
+})
 // 今日应写：第一章未定稿的
 const todayNo = computed(
   () => overview.value?.chapters.find((c) => !c.finalized_at)?.no ?? 0,
@@ -349,7 +403,7 @@ async function refineStage(stage: StageKey) {
       onNotice: (n) => {
         stageNotes[stage].push(n)
       },
-    })
+    }, stage)
     text[stage] = r.y
     ElMessage.success(`已按要求调整（${r.y.length} 字）。满意点「保存修改」，不满意可继续调整或手动改`)
   } catch (e) {
@@ -432,13 +486,145 @@ const deskRefMaterials = () =>
 // 开章任务书（P1①五段式）：剧情/正文生成时自动带上——开篇委托/本章故事/人物与设定/怎么写更顺/收在哪里
 const useChecklist = ref(true)
 
-async function runStage(stage: StageKey) {
+/**
+ * spec 4 · 写前风险确认（零 token）。
+ *
+ * 只在 `blocked` 时弹——每次必确认的确认门三章后就变成肌肉记忆，作者闭眼点确认，
+ * 制造「我已经确认过了」的假安全感，比不做更糟。
+ *
+ * 展示的 brief 就是模型将看到的（同一个 build_chapter_checklist 产出），
+ * 所以这是「透明」而非「拦截」：作者判断的依据和模型的依据是同一份。
+ */
+async function confirmPreWrite(stage: StageKey): Promise<boolean> {
+  let pv
+  try {
+    pv = await deskApi.gatePreview(currentProjectId.value, currentNo.value, stage)
+  } catch {
+    return true // 预演失败不阻断写作——它是辅助信息，不是门禁
+  }
+  if (!pv.blocked) return true
+
+  const riskHtml = pv.risks
+    .map(
+      (r) =>
+        `<div style="margin:6px 0"><b style="color:#c45656">${escapeHtml(r.label)}</b>` +
+        `<div style="font-size:13px;color:#606266;margin-top:2px">${escapeHtml(r.detail)}</div></div>`,
+    )
+    .join('')
+  const briefBlock = pv.brief
+    ? `<details style="margin-top:12px"><summary style="cursor:pointer;font-size:13px">` +
+      `看看模型将收到的开章任务书（${pv.brief.length} 字）</summary>` +
+      `<pre style="max-height:280px;overflow:auto;background:#f6f7f9;padding:10px;border-radius:4px;` +
+      `font-size:12px;line-height:1.6;white-space:pre-wrap;margin-top:6px">${escapeHtml(pv.brief)}</pre></details>`
+    : ''
+
+  try {
+    await ElMessageBox.confirm(
+      `<div>第 ${pv.chapter} 章「${STAGES.find((s) => s.key === stage)!.label}」开写前，` +
+        `账上有 ${pv.risks.length} 项需要你知道：</div>${riskHtml}${briefBlock}`,
+      '写前风险确认',
+      {
+        confirmButtonText: '知道，开写',
+        cancelButtonText: '先处理一下',
+        dangerouslyUseHTMLString: true,
+        type: 'warning',
+        distinguishCancelAndClose: true,
+      },
+    )
+  } catch {
+    return false // 取消 = 作者要先回去补账，不该硬着头皮开写
+  }
+  // 表态入账（记录失败不阻断——决定已经做了）
+  void deskApi
+    .gateDecide(currentProjectId.value, currentNo.value, {
+      gate: 'pre_write',
+      decision: 'accept',
+      stage,
+      risks: pv.risks.map((r) => r.kind),
+      detail: pv.risks.map((r) => r.detail).join('；').slice(0, 280),
+    })
+    .catch(() => undefined)
+  return true
+}
+
+function escapeHtml(s: string): string {
+  return (s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+/**
+ * spec 4 · 门禁后表态。
+ *
+ * 重试用尽后仍有 P0 时后端不再静默落库，而是带 `gate.required=true`。
+ * 这里问作者三件事：收下（默认，与旧行为等价）/ 再重写一次 / 我自己改。
+ *
+ * 注意这不是「生成失败」——正文已经落库了，弹窗只是让作者知道它被扣过分。
+ */
+async function handlePostGate(stage: StageKey, rounds: number, gate: {
+  required: boolean
+  pending: string[]
+  demoted: string[]
+}): Promise<'accept' | 'rewrite' | 'manual'> {
+  const lines = gate.pending
+    .map((p) => `<li style="margin:3px 0">${escapeHtml(p)}</li>`)
+    .join('')
+  const demoted = gate.demoted.length
+    ? `<div style="font-size:12px;color:#909399;margin-top:8px">` +
+      `另有 ${gate.demoted.length} 项重写多轮未改善已自动降级为建议：<br/>` +
+      gate.demoted.map((d) => escapeHtml(d)).join('<br/>') +
+      `</div>`
+    : ''
+
+  let decision: 'accept' | 'rewrite' | 'manual' = 'accept'
+  try {
+    await ElMessageBox.confirm(
+      `<div>这一版已经生成并存库，但<b>硬门禁跑了 ${rounds} 轮后仍有 ${gate.pending.length} 项未达标</b>：</div>` +
+        `<ul style="padding-left:20px;margin:8px 0;font-size:13px">${lines}</ul>${demoted}` +
+        `<div style="font-size:12px;color:#909399;margin-top:10px">` +
+        `这些是硬门禁判出的硬问题，收下不会丢，但正文确实没达标。</div>`,
+      '质量门禁 · 需要你表态',
+      {
+        confirmButtonText: '收下这一版',
+        cancelButtonText: '再重写一次',
+        distinguishCancelAndClose: true,
+        dangerouslyUseHTMLString: true,
+        type: 'warning',
+      },
+    )
+  } catch (a: any) {
+    // 区分「取消（想重写）」与「关闭（想自己改）」
+    decision = a === 'cancel' ? 'rewrite' : 'manual'
+  }
+
+  void deskApi
+    .gateDecide(currentProjectId.value, currentNo.value, {
+      gate: 'post_gate',
+      decision,
+      stage,
+      detail: gate.pending.join('；').slice(0, 280),
+      p0: gate.pending,
+    })
+    .catch(() => undefined)
+  return decision
+}
+
+async function runStage(stage: StageKey, opts?: { skipPreGate?: boolean }) {
   if (busy.value) return
+  // spec 4：开写前的风险确认（仅风险触发时弹，见 confirmPreWrite 的注释）
+  if (!opts?.skipPreGate) {
+    const go = await confirmPreWrite(stage)
+    if (!go) return
+  }
   busy.value = stage
   // 流式生成：清空旧文，正文增量实时打进编辑框
   text[stage] = ''
   thinking[stage] = ''
   stageNotes[stage] = []
+  /** spec 1：本轮硬门禁实际跑了几轮（后端一直在发，前端从来没接） */
+  let qualityRounds = 0
   try {
     const r = await deskApi.runStream(
       currentProjectId.value,
@@ -463,7 +649,44 @@ async function runStage(stage: StageKey) {
           stageNotes[stage].push('命中收据，秒回（未重调模型）')
         },
         onNotice: (n) => {
+          // spec 2 的护栏回滚通知走这里——静默回滚会让人以为规则生效了其实没有
           stageNotes[stage].push(n)
+        },
+        // spec 1：质量数据一直是「算了就发、前端从不看」的状态。
+        // 接上之后作者能看到这一版被扣了哪些分、重试了几轮。
+        onQuality: (q) => {
+          if (q.kind === 'hard') {
+            qualityRounds = q.round + 1
+            if (q.round > 0) {
+              stageNotes[stage].push(
+                `硬门禁第 ${q.round} 轮：P0 ${(q.p0 || []).length} 项 / P1 ${(q.p1 || []).length} 项`,
+              )
+            }
+            // 气息长度（2026-10-26 定稿反推）：段内逗号数
+            // 人工定稿 1.5-2.1 个/段，机器稿 1.08 —— 全章都 <1.2 是摄影机切法
+            const rh = q.rhythm
+            if (rh && typeof rh['段内逗号均数'] === 'number') {
+              const breath = rh['段内逗号均数'] as number
+              if (breath < 1.2) {
+                stageNotes[stage].push(
+                  `气息偏碎：段内逗号 ${breath} 个/段（人工定稿实测 1.5-2.1）` +
+                    `——每段基本只有一句，是摄影机切法。`,
+                )
+              }
+            }
+          }
+        },
+        // spec 1：描写账本提示（Top6 重复表达）
+        // 只有真正构成模板复读的语义场才会进 top（后端已过滤掉「用一次也叫复读」的噪音），
+        // 这里只提示复读最严重的那一条，避免刷屏。
+        onLexicon: (l) => {
+          const top = (l.top || [])[0]
+          if (!top) return
+          const n = top.violations
+          stageNotes[stage].push(
+            `描写账本：${top.field} 在 500 字窗内复读 ${n} 次` +
+            (top.min_gap != null ? `（最近间隔 ${top.min_gap} 字）` : ''),
+          )
         },
       },
     )
@@ -474,9 +697,35 @@ async function runStage(stage: StageKey) {
     if (r.checklist_injected) {
       stageNotes[stage].push('已带五段任务书：开篇委托 → 本章故事 → 人物与设定 → 怎么写更顺（含三线近况/到期伏笔）→ 收在哪里')
     }
+    // 作者批注（【】标注）处理报告
+    if (r.annotations?.count) {
+      const ann = r.annotations
+      stageNotes[stage].push(`已识别 ${ann.count} 条【】批注并按最高优先级落实`)
+      if (ann.unmet.length) {
+        stageNotes[stage].push(
+          `⚠ 有 ${ann.unmet.length} 条批注看起来没落实：` +
+          ann.unmet.slice(0, 3).map((a) => a.text.slice(0, 20)).join('；') +
+          (ann.unmet.length > 3 ? '…' : '') +
+          '（请检查，或再润色一次）',
+        )
+      }
+    }
     busy.value = '' // 先解锁再刷新，selectChapter 有 busy 守卫
     await loadOverview()
     if (currentNo.value) await selectChapter(currentNo.value)
+
+    // spec 4：门禁后表态——正文已落库，这里问作者怎么处置残留 P0
+    if (r.gate?.required) {
+      const decision = await handlePostGate(stage, qualityRounds, r.gate)
+      if (decision === 'rewrite') {
+        ElMessage.info('正在带上门禁问题重写一次')
+        await runStage(stage, { skipPreGate: true })
+        return
+      }
+      if (decision === 'manual') {
+        stageNotes[stage].push('你选择自己改这一版——改完点「保存修改」即可')
+      }
+    }
   } catch (e) {
     ElMessage.error(`生成失败：${(e as Error).message}`)
     busy.value = ''
@@ -546,6 +795,13 @@ async function runFix() {
   }
 }
 
+/** spec 4：审稿判不稳的项（review.items 里 status==='不稳'） */
+function unstableItems(): { name: string; problem: string }[] {
+  return (review.value?.items || [])
+    .filter((i) => i.status === '不稳')
+    .map((i) => ({ name: i.name || '（未命名项）', problem: (i.problem || '').trim() }))
+}
+
 async function doFinalize() {
   if (busy.value) return
   const payoff = payoffChoice.value || 'none'
@@ -560,19 +816,71 @@ async function doFinalize() {
   } else if (isSuppressEnd) {
     confirmMsg += `\n\n⚠ 注意：这是本卷按计划的最后一章，但你未勾选「本章为本卷终章」——定稿后不会进入杀青面板，会继续追加下一章。确定不杀青、继续写？`
   }
-  try {
-    await ElMessageBox.confirm(confirmMsg, '定稿确认', {
-      confirmButtonText: isEarlyEnd ? '确定提前杀青' : (isSuppressEnd ? '确定继续写' : '定稿'),
-      cancelButtonText: '再改改',
-      type: isEarlyEnd ? 'warning' : 'info',
-      distinguishCancelAndClose: true,
-    })
-  } catch {
-    return
+
+  // spec 4：审稿有「不稳」项时必须逐条确认——后端在 blocked 且未带 acknowledge 时会 422。
+  // 这里**不拦死**：作者有权明知不稳照样定稿，我们只负责让他知道。
+  const unstable = unstableItems()
+  let acknowledge: string[] | undefined
+  if (unstable.length) {
+    const itemsHtml = unstable
+      .map(
+        (i) =>
+          `<li style="margin:4px 0"><b>${escapeHtml(i.name)}</b>` +
+          (i.problem ? `<div style="font-size:12px;color:#606266;margin-top:2px">${escapeHtml(i.problem)}</div>` : '') +
+          `</li>`,
+      )
+      .join('')
+    const extra: string[] = []
+    const rv = review.value as any
+    if (rv?.book_warnings?.length) {
+      extra.push(
+        `<div style="margin-top:8px;font-size:12px;color:#c45656">书规报警 ${rv.book_warnings.length} 条：<br/>` +
+          rv.book_warnings.slice(0, 3).map((w: string) => `· ${escapeHtml(w)}`).join('<br/>') +
+          `</div>`,
+      )
+    }
+    if (rv?.rhythm_warning) {
+      extra.push(`<div style="font-size:12px;color:#e6a23c;margin-top:6px">${escapeHtml(rv.rhythm_warning)}</div>`)
+    }
+    try {
+      await ElMessageBox.confirm(
+        `<div><b>审稿判定本章有 ${unstable.length} 项不稳</b>，定稿前请确认你已知悉：</div>` +
+          `<ul style="padding-left:20px;margin:8px 0;font-size:13px">${itemsHtml}</ul>` +
+          extra.join('') +
+          `<div style="font-size:12px;color:#909399;margin-top:10px">` +
+          `确认知悉即可定稿——不稳项会记入账本，日后可回查。想先改就点「再改改」，` +
+          `或对某一项跑「修复」后再定稿。</div>`,
+        '定稿确认 · 有不稳项',
+        {
+          confirmButtonText: '我已知悉，仍要定稿',
+          cancelButtonText: '再改改',
+          dangerouslyUseHTMLString: true,
+          type: 'warning',
+          distinguishCancelAndClose: true,
+        },
+      )
+    } catch {
+      return
+    }
+    acknowledge = unstable.map((i) => i.name)
+  } else {
+    try {
+      await ElMessageBox.confirm(confirmMsg, '定稿确认', {
+        confirmButtonText: isEarlyEnd ? '确定提前杀青' : (isSuppressEnd ? '确定继续写' : '定稿'),
+        cancelButtonText: '再改改',
+        type: isEarlyEnd ? 'warning' : 'info',
+        distinguishCancelAndClose: true,
+      })
+    } catch {
+      return
+    }
   }
+
   busy.value = 'finalize'
   try {
-    lastFinalize.value = await deskApi.finalize(currentProjectId.value, currentNo.value, true, payoff)
+    lastFinalize.value = await deskApi.finalize(
+      currentProjectId.value, currentNo.value, true, payoff, acknowledge,
+    )
     payoffChoice.value = payoff
     ElMessage.success(`第 ${currentNo.value} 章已定稿，飞轮运转完成`)
     // 调 briefApi.advance 判断下一章 / 杀青；按用户勾选传 force_volume_end
@@ -839,26 +1147,27 @@ watch(activeTab, (tab) => {
                 </div>
               </div>
 
-              <!-- 起承转合 -->
+              <!-- 起承转合：竖排成推进轨迹，读起来就是本章怎么走 -->
               <div
-                v-if="currentBriefSelected.plot_beats && (currentBriefSelected.plot_beats.qi || currentBriefSelected.plot_beats.cheng || currentBriefSelected.plot_beats.zhuan || currentBriefSelected.plot_beats.he)"
-                style="margin-top: 10px; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px"
+                v-if="visibleBeats(currentBriefSelected.plot_beats).length"
+                style="margin-top: 10px; display: flex; flex-direction: column; gap: 4px"
               >
-                <div v-if="currentBriefSelected.plot_beats.qi" style="background:#fdf6ec; border-left:3px solid #e6a23c; padding:6px 10px; border-radius:3px; font-size:12px; line-height:1.6">
-                  <b style="color:#e6a23c">起</b>
-                  <div style="color:#606266; margin-top:2px; white-space:pre-wrap">{{ currentBriefSelected.plot_beats.qi }}</div>
+                <div
+                  v-for="b in visibleBeats(currentBriefSelected.plot_beats)"
+                  :key="b.key"
+                  :style="{ background: b.bg, borderLeft: '3px solid ' + b.color, padding: '6px 10px', borderRadius: '3px' }"
+                >
+                  <div style="font-size: 12px; line-height: 1.6">
+                    <b :style="{ color: b.color }">{{ b.label }}</b>
+                    <span style="color: #a8abb2; font-size: 11px; margin-left: 4px">{{ b.hint }}</span>
+                    <div style="color: #606266; margin-top: 2px; white-space: pre-wrap">{{ currentBriefSelected.plot_beats![b.key] }}</div>
+                  </div>
                 </div>
-                <div v-if="currentBriefSelected.plot_beats.cheng" style="background:#f4f4f5; border-left:3px solid #909399; padding:6px 10px; border-radius:3px; font-size:12px; line-height:1.6">
-                  <b style="color:#606266">承</b>
-                  <div style="color:#606266; margin-top:2px; white-space:pre-wrap">{{ currentBriefSelected.plot_beats.cheng }}</div>
-                </div>
-                <div v-if="currentBriefSelected.plot_beats.zhuan" style="background:#fef0f0; border-left:3px solid #f56c6c; padding:6px 10px; border-radius:3px; font-size:12px; line-height:1.6">
-                  <b style="color:#f56c6c">转</b>
-                  <div style="color:#606266; margin-top:2px; white-space:pre-wrap">{{ currentBriefSelected.plot_beats.zhuan }}</div>
-                </div>
-                <div v-if="currentBriefSelected.plot_beats.he" style="background:#ecf5ff; border-left:3px solid #409eff; padding:6px 10px; border-radius:3px; font-size:12px; line-height:1.6">
-                  <b style="color:#409eff">合</b>
-                  <div style="color:#606266; margin-top:2px; white-space:pre-wrap">{{ currentBriefSelected.plot_beats.he }}</div>
+                <div
+                  v-if="visibleBeats(currentBriefSelected.plot_beats).length < 4"
+                  style="font-size: 11px; color: #e6a23c; line-height: 1.6"
+                >
+                  ⚠ 起承转合只填了 {{ visibleBeats(currentBriefSelected.plot_beats).length }}/4 段，缺段会导致正文节奏塌腰，点「换方向」重抽一版补齐。
                 </div>
               </div>
 
@@ -1027,6 +1336,26 @@ watch(activeTab, (tab) => {
             style="margin-bottom: 10px"
             :disabled="busy === s.key"
           />
+          <!-- 作者批注（【】标注）用法说明：只在润色卡显示 -->
+          <el-alert
+            v-if="s.key === 'polish'"
+            type="info"
+            :closable="false"
+            show-icon
+            style="margin-bottom: 10px"
+          >
+            <template #title>可以直接在正文里写【】批注，润色时会被识别并优先落实</template>
+            <div style="font-size: 12px; line-height: 1.8">
+              <div>· <b>改这一段</b>：把【】写在<b>下一行</b> —— <code>【这一段有问题，改成他踹开门】</code>（作用于上面那段）</div>
+              <div>· <b>在这里加内容</b>：<code>【这里要增加他检查弹匣的动作】</code>（写完批注后再补一段正文，批注会挂在这段之后）</div>
+              <div>· <b>行内批注</b>：跟在句末 —— <code>他推开门。【改成踹开门】</code>（作用于本段）</div>
+              <div>· <b>指远处的段</b>：<code>【第5段：改成这里要有一场雨】</code></div>
+              <div>· <b>删掉某段</b>：<code>【删掉这一段】</code></div>
+              <div style="color: #909399; margin-top: 4px">
+                写完点「保存修改」，再点「重新生成」润色——批注会被剥离并转成指令，成稿里不会留下【】。
+              </div>
+            </div>
+          </el-alert>
           <div v-if="thinking[s.key]" class="thinking-pane">
             <div style="font-size: 12px; color: #909399; margin-bottom: 4px">
               思考过程{{ busy === s.key ? '（生成中，实时）' : '' }}
@@ -1157,8 +1486,13 @@ watch(activeTab, (tab) => {
             >
               本章已是本卷终章（定稿后直接进入杀青面板）
             </el-checkbox>
-            <el-tag v-if="autoAtEnd" size="small" type="success" effect="plain">按节奏蓝图，本章即卷末</el-tag>
-            <el-tag v-else-if="totalCount" size="small" type="info" effect="plain">卷内计划共 {{ totalCount }} 章，当前第 {{ currentNo }} 章</el-tag>
+            <el-tag v-if="autoAtEnd && hasRhythmBlueprint" size="small" type="success" effect="plain">按节奏蓝图，本章即卷末</el-tag>
+            <el-tag v-else-if="autoAtEnd" size="small" type="success" effect="plain">
+              本卷共 {{ volumeTotalCount }} 章，本章是本卷最后一章
+            </el-tag>
+            <el-tag v-else-if="volumeTotalCount" size="small" type="info" effect="plain">
+              本卷共 {{ volumeTotalCount }} 章，当前第 {{ volumeSeqNo }} 章
+            </el-tag>
             <el-tag v-if="endChapterOverride === true && !autoAtEnd" size="small" type="warning" effect="plain">将提前杀青</el-tag>
             <el-tag v-if="endChapterOverride === false && autoAtEnd" size="small" type="warning" effect="plain">将压制杀青，继续写下一章</el-tag>
             <span style="font-size: 12px; color: #999">
@@ -1209,6 +1543,31 @@ watch(activeTab, (tab) => {
                 </template>
                 <div v-if="lastFinalize.foreshadow.warning" style="color: #e6a23c">
                   ⚠ {{ lastFinalize.foreshadow.warning }}
+                </div>
+              </div>
+              <!-- 新伏笔检出：定稿回账的另一半。上一块只问「账上这些还了没有」，
+                   这一块补的是「本章正文里现挖了哪些账上没有的坑」——
+                   不补登记的话，这些坑永远不在任何清单里，也就永远不会被催、不会被回收。 -->
+              <div v-if="lastFinalize.foreshadow_detected">
+                本章新埋：
+                <template v-if="lastFinalize.foreshadow_detected.error">
+                  <el-tag type="warning" size="small">未完成：{{ lastFinalize.foreshadow_detected.error }}</el-tag>
+                </template>
+                <template v-else>
+                  <el-tag
+                    v-if="!(lastFinalize.foreshadow_detected.planted ?? []).length"
+                    type="info" size="small"
+                  >未检出新伏笔</el-tag>
+                  <el-tag
+                    v-for="p in lastFinalize.foreshadow_detected.planted"
+                    :key="'np-' + p.name"
+                    type="primary" size="small"
+                    style="margin-right: 6px"
+                    :title="p.evidence || ''"
+                  >🪝 {{ p.name }}（已入账）</el-tag>
+                </template>
+                <div v-if="lastFinalize.foreshadow_detected.warning" style="color: #e6a23c">
+                  ⚠ {{ lastFinalize.foreshadow_detected.warning }}
                 </div>
               </div>
               <div v-if="lastFinalize.marker_hits.length">

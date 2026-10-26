@@ -9,12 +9,13 @@ plot → draft → polish 全部复用 PipelineRunner（幂等收据 + 有界续
 """
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
 from app.context import Material, MaterialFamily
 from app.context.ledger import build_chapter_checklist
-from app.entities import extract_entities, reconcile_foreshadows
+from app.entities import detect_new_foreshadows, extract_entities, reconcile_foreshadows
 from app.pipeline import SPECS, PipelineRunner
 from app.pipeline.engine import CONTINUATION_TAIL_CHARS
 from app.pipeline.journal import RunJournal, compute_run_key
@@ -23,6 +24,8 @@ from app.review.markers import MarkerStore, markers_material
 from app.providers.base import Provider
 from app.skills import skill_materials
 from app.wizard.store import STAGES, DeskStore, WizardStore
+
+log = logging.getLogger(__name__)
 
 _CHAPTER_HEAD = re.compile(r"^#{0,4}\s*第\s*(\d+)\s*章", re.MULTILINE)
 _VOLUME_HEAD = re.compile(r"^#{0,4}\s*第\s*[0-9一二三四五六七八九十百千]+\s*卷[^\n]*$", re.MULTILINE)
@@ -636,6 +639,50 @@ def run_chapter_stage(
                 content=content,
                 title=f"写作模块[{am}]" + ("（摘要）" if use_digest else ""),
             ))
+    # 分场景写法：判断本章属于哪几类（战斗/心理/情感/恐怖），只注入命中的模块。
+    #
+    # 为什么不做成 default_for：分场景模块不能全量进上下文——每章都塞 4 个场景
+    # 模块会挤爆正文预算，更糟的是模型会照着无关技法硬塞内容
+    # （这章没恋爱却注入恋爱模块，它就会开始编情话）。
+    # 所以按 scene_detect.detect_scenes 的判定结果按需注入。
+    #
+    # 显式点名 modules 时完全跳过识别：作者手动勾了就是他的判断，规则不该覆盖。
+    if modules is None and not full_modules and stage in ("plot", "draft", "polish"):
+        try:
+            from ..skills.scene_detect import auto_modules_for
+
+            _brief = work.brief if isinstance(work.brief, dict) else {}
+            _plot_text = str(getattr(work, "plot_text", "") or "")
+            _ch_kind = getattr(work, "chapter_kind", None) or (
+                "interlude" if getattr(work, "is_interlude", False) else "dungeon"
+            )
+            _ents = []
+            _sel = _brief.get("selected") if isinstance(_brief.get("selected"), dict) else {}
+            for _x in (_sel.get("entities_on_stage") or []):
+                if isinstance(_x, str):
+                    _ents.append(_x)
+            scene_mods = auto_modules_for(
+                plot_text=_plot_text, brief=_brief,
+                focus=str(_sel.get("summary") or ""),
+                entities=_ents, ch_kind=_ch_kind,
+            )
+            # 已在默认集/书专属集里的不重复注入
+            _have = {m.source_id.split(":", 1)[-1] for m in materials
+                     if m.source_id.startswith("skill:")}
+            for _sm in scene_mods:
+                if _sm in _have:
+                    continue
+                materials.append(Material(
+                    source_id=f"skill:{_sm}",
+                    family=MaterialFamily.REQUIRED,
+                    content=module_digest(_sm),
+                    title=f"写作模块[{_sm}]（按本章场景自动追加·摘要）",
+                ))
+                _have.add(_sm)
+        except Exception:
+            # 场景识别失败绝不能阻断正文生成——宁可少个技法提示
+            pass
+
     # Volume 本场设定注入：魂穿宿主/信息差/核心诡计/本场死亡-线索-高潮节点
     # 分支：dungeon（副本章）保留原竞技场拼装；mainline/interlude（蓝星章/间章）注入主线/间章材料
     ch_kind = getattr(work, "chapter_kind", None) or (
@@ -643,7 +690,19 @@ def run_chapter_stage(
     )
     if volume_store is not None and getattr(work, "field_no", None) is not None:
         try:
-            vol = volume_store.get(int(work.field_no))
+            # volume_store 有两种传法，这里必须都认：
+            #   1. VolumeStore 仓库（有 .get(volume_no)）—— 传整个仓库时
+            #   2. 单个 Volume 对象（chapter 已经在 build_chapter_checklist
+            #      那边按 field_no 定位好了）—— desk_run 走的就是这条
+            # 之前只按仓库处理，传 Volume 时 `vol.get(...)` 直接 AttributeError，
+            # 而整个注入块被外层 `except Exception: pass` 静默吞掉，
+            # 于是副本章的竞技场材料（魂穿宿主档案/死亡线索高潮节点/详设6卡）
+            # 实际上**一次都没进过 prompt**，且没有任何报错。
+            # 这是「为什么模型不知道唐迟顶着谁的壳」的第二个根因。
+            if hasattr(volume_store, "volume_no"):
+                vol = volume_store                      # 已经是定位好的卷
+            else:
+                vol = volume_store.get(int(work.field_no))
             if vol is None:
                 pass  # 卷不存在，跳过
             elif ch_kind == "dungeon":
@@ -664,8 +723,28 @@ def run_chapter_stage(
                 if isinstance(hc, dict) and hc:
                     hc_name = hc.get("name") or hc.get("body_name") or "宿主"
                     hc_role = hc.get("role") or hc.get("identity") or ""
-                    hc_know = hc.get("known_info") or hc.get("memory") or hc.get("backstory") or ""
-                    arena_lines.append(f"【魂穿宿主·{hc_name}】\n身份：{hc_role}\n已知信息：{hc_know}")
+                    # 原本这里读的是 hc.get("known_info") / "memory" / "backstory"——
+                    # 这三个键在 host_character 里从不存在（真实字段是 body_state /
+                    # original_story_position / seventh_day_death / hidden_death_cause /
+                    # struggle_hook / info_gap_hint 等），所以恒为空串，是防御性死代码。
+                    # 现在按真实字段取：这具身体在被附身之前经历过什么、它会怎么死。
+                    hc_bits: list[str] = []
+                    if hc_role:
+                        hc_bits.append(f"身份：{hc_role}")
+                    for label, keys in (
+                        ("身体状态", ("body_state",)),
+                        ("原剧本位置", ("original_story_position",)),
+                        ("第七日死状", ("seventh_day_death",)),
+                        ("隐藏死因", ("hidden_death_cause",)),
+                        ("挣扎钩子", ("struggle_hook",)),
+                        ("信息差", ("info_gap_hint",)),
+                    ):
+                        for k in keys:
+                            val = str(hc.get(k) or "").strip()
+                            if val:
+                                hc_bits.append(f"{label}：{val}")
+                                break
+                    arena_lines.append(f"【魂穿宿主·{hc_name}】\n" + "\n".join(hc_bits))
                 # 入本点
                 ep = vol.entry_point or {}
                 if isinstance(ep, dict) and ep:
@@ -826,13 +905,6 @@ def run_chapter_stage(
                             card_summaries.append(f"- {cname}：{cval}")
                     if card_summaries:
                         arena_lines.append("【详设 6 卡（本场）】\n" + "\n".join(card_summaries))
-                # 跑团模拟结果
-                sr = vol.simulated_run or {}
-                if isinstance(sr, dict):
-                    runs = sr.get("runs") or sr.get("simulations") or []
-                    if runs:
-                        picked = runs[0] if isinstance(runs[0], dict) else {}
-                        arena_lines.append(f"【跑团模拟（参考）】\n{picked.get('summary') or picked.get('outcome') or ''}")
                 if arena_lines:
                     content = "\n\n".join(l for l in arena_lines if l and l.strip())
                     materials.append(Material(
@@ -845,6 +917,35 @@ def run_chapter_stage(
                 _inject_mainline_context(materials, vol, chapter, work, entity_store, desk, stage)
             elif ch_kind == "interlude":
                 _inject_interlude_context(materials, vol, entity_store, stage)
+            # 原剧本注入：独立 REQUIRED material，不是竞技场的一部分。
+            #
+            # 为什么必须独立：竞技场是 FINALIZED 族（本场已定的设定），原剧本是
+            # REQUIRED 族（模型必须遵守的世界真相）。混在一起会让它参与
+            # 「族序 → 相关词 → source_id」的排序竞争，超预算时先被丢掉——
+            # 而丢掉原剧本 = 模型完全不知道唐迟穿进来之前发生过什么。
+            #
+            # 原本这里有一段读 `sr.get("runs") or sr.get("simulations")` 的代码，
+            # 但 simulated_run 的真实键是 mode/picked_index/label/summary/
+            # full_log/selected_variant/collage——从来没有 runs 这个键，
+            # 所以那段是**永不执行**的死代码。已删除，改为读归一化的 origin_novel。
+            try:
+                from app.context.ledger import build_origin_material
+                _ch_day_d = getattr(work, "day", None)
+                _br_d = getattr(work, "brief", None)
+                if isinstance(_br_d, dict):
+                    _ov_d = _br_d.get("story_day_override")
+                    _sel_d = _br_d.get("selected") if isinstance(_br_d.get("selected"), dict) else None
+                    if isinstance(_ov_d, int) and 0 < _ov_d <= 7:
+                        _ch_day_d = _ov_d
+                    elif _ch_day_d is None and isinstance(_sel_d, dict) and _sel_d.get("day"):
+                        _ch_day_d = _sel_d.get("day")
+                _origin_m = build_origin_material(vol, _ch_day_d)
+                if _origin_m is not None:
+                    materials.append(_origin_m)
+            except Exception:
+                # 原剧本注入失败不该阻塞正文生成——退化成「模型不知道原剧本」，
+                # 总比整章生成失败好
+                pass
         except Exception:
             # 本场注入失败不应阻塞主流程
             pass
@@ -880,6 +981,37 @@ def run_chapter_stage(
         if not x:
             raise ValueError("本章还没有正文，请先生成正文")
 
+    # ---- 作者批注（【】标注）：润色层专用 ----
+    #
+    # 作者手动改正文时直接在正文里写【要改什么】，润色时要连同其他注入
+    # 的细节一起处理。这是作者对「机器润色提升有限」的正向用法：
+    # 作者负责说清意图，机器负责把意图写进正文。
+    #
+    # 批注必须**在进模型前剥离**：【】留在正文里会被当成叙述内容，
+    # 或被去 AI 味后处理当成「AI 模板句式」删掉（护栏还会整段回滚）。
+    # 剥离后留下 ⟦A1⟧ 锚点，模型据此定位。
+    annotations: list = []
+    if stage == "polish":
+        try:
+            from app.generation.annotations import (
+                render_annotation_block,
+                scan_annotations,
+            )
+            _scan = scan_annotations(x)
+            if _scan.count:
+                annotations = _scan.annotations
+                x = _scan.clean_text
+                _anno_block = render_annotation_block(annotations)
+                if _anno_block:
+                    # REQUIRED 族：作者批注的优先级高于通用写作规则
+                    materials.append(Material(
+                        source_id=f"annotations:ch{chapter}",
+                        family=MaterialFamily.REQUIRED,
+                        content=_anno_block,
+                        title=f"作者批注（{len(annotations)} 条·最高优先级）"))
+        except Exception:
+            annotations = []
+
     direction_mat = _direction_material(wizard)
     if direction_mat is not None:
         materials.append(direction_mat)
@@ -911,6 +1043,7 @@ def run_chapter_stage(
             book_store=book_store, field_store=field_store,
             volume_store=volume_store if hasattr(volume_store, "all_list") else None,
             current_volume=cur_vol,
+            project_id=pid,
         )
         if checklist is not None:
             materials.append(checklist)
@@ -967,14 +1100,109 @@ def run_chapter_stage(
                               journal=journal, on_event=on_event,
                               project_id=pid,
                               chapter_no=chapter if stage in ("draft", "polish") else None)
+
+    # ---- 批注后处理：清残留锚点 + 查未落实 ----
+    #
+    # 模型有时会忘记删锚点。残留的 ⟦A1⟧ 在正文里很扎眼，必须清掉。
+    # 同时用关键词覆盖检查哪些批注可能没改——只提示，不阻断
+    # （启发式判断，误报会让作者白白再改一遍）。
+    #
+    # ⚠️ `result.y` 是只读 property（LayerRunResult.y = "".join(pairs)），
+    #    赋值会抛 AttributeError——上一版就栽在这里，而且被 except 吞掉，
+    #    导致「锚点没清、报告恒为 0」但看不出任何报错。
+    #    要改正文必须改 `result.pairs` 里的分块文本。
+    annotation_report: dict = {"count": 0, "unmet": [], "leftover_markers": 0}
+    if annotations:
+        try:
+            from app.generation.annotations import (
+                strip_leftover_markers,
+                unmet_annotations,
+            )
+            _pairs: list[tuple[str, str]] = []
+            _leftover = 0
+            for _x, _y in result.pairs:
+                _cleaned, _n = strip_leftover_markers(_y)
+                _leftover += _n
+                _pairs.append((_x, _cleaned))
+            if _leftover:
+                result.pairs = _pairs
+            cleaned = result.y
+            _unmet = unmet_annotations(annotations, cleaned)
+            annotation_report = {
+                "count": len(annotations),
+                "unmet": [a.as_dict() for a in _unmet],
+                "leftover_markers": _leftover,
+                "annotations": [a.as_dict() for a in annotations],
+            }
+            if on_event:
+                if _leftover:
+                    on_event("notice", {
+                        "text": f"[作者批注] 成稿里残留 {_leftover} 个锚点标记，已自动清除"
+                                "（对应批注可能没落实，请检查）"})
+                if _unmet:
+                    on_event("notice", {
+                        "text": f"[作者批注] 有 {len(_unmet)} 条批注看起来没落实："
+                                + "；".join(a.text[:24] for a in _unmet[:3])
+                                + ("…" if len(_unmet) > 3 else "")})
+        except Exception:
+            # 不要静默吞掉——批注后处理失败会让作者以为「我明明写了怎么没改」
+            logging.getLogger(__name__).warning(
+                "[作者批注] 后处理失败（锚点未清理、报告未生成）", exc_info=True)
+            annotation_report = {"count": len(annotations), "unmet": [], "leftover_markers": 0,
+                                 "annotations": [a.as_dict() for a in annotations],
+                                 "error": "后处理失败"}
+
     desk.record(chapter, stage, result.y, run_key, title=chapter_title_of(o_map.get(chapter, "")))
     return {
         "chapter": chapter, "stage": stage, "y": result.y, "run_id": run_key,
         "resumed_indices": result.resumed_indices,
         "checklist_injected": checklist_injected,
+        "annotations": annotation_report,
+        # spec 4：门禁后表态信号。required=True 时前端必须弹框问作者
+        # （收下 / 再重写一次 / 我自己改），不能默默当无事发生。
+        "gate": {
+            "required": result.gate_required,
+            "pending": list(result.gate_pending),
+            "demoted": list(result.gate_demoted),
+        },
         "calls": [{"completion_status": c.completion_status, "attempts": c.attempts}
                   for c in result.calls],
     }
+
+
+def _unstable_items(work) -> list[dict]:
+    """取本章审稿里的不稳项（spec 4）。
+
+    只认 `status == "不稳"` 的条目——这是 reviewer._normalize 的约定，
+    缺项会被补成「不稳」，所以缺项也算作者该知道的。
+    书规报警/节奏/三线不进这里：它们是「提醒」不是「审稿判定」，
+    混进来会让 blocked 的门槛变得不可预期。
+    """
+    if work is None:
+        return []
+    review = getattr(work, "review", None)
+    if not isinstance(review, dict):
+        return []
+    return [it for it in (review.get("items") or [])
+            if isinstance(it, dict) and it.get("status") == "不稳"]
+
+
+def _ack_required_message(items: list[dict]) -> str:
+    """blocked 未表态时的拒绝文案——直接把不稳项摊给作者看。
+
+    拒绝信息本身就是最重要的部分：作者必须看到**具体哪几项不稳**，
+    才能真正做出「我知道，就这样」的判断，而不是被一个「审稿未通过」挡住。
+    """
+    lines = [f"审稿判定本章有 {len(items)} 项不稳，定稿前需要你逐条确认："]
+    for it in items[:6]:
+        name = it.get("name") or "（未命名项）"
+        problem = (it.get("problem") or "").strip()
+        lines.append(f"- {name}：{problem}" if problem else f"- {name}")
+    if len(items) > 6:
+        lines.append(f"- …另有 {len(items) - 6} 项")
+    lines.append("确认知悉请重新提交并附 acknowledge 字段；"
+                 "想先改就返回修改，或对某一项点「修复」后再定稿。")
+    return "\n".join(lines)
 
 
 def finalize_chapter(
@@ -988,6 +1216,7 @@ def finalize_chapter(
     chapter: int,
     auto_entities: bool = True,
     payoff: str | None = None,
+    acknowledge: list[str] | None = None,
 ) -> dict:
     """定稿 + 保鲜飞轮：实体核对、伏笔兑现问询、标记核验、整本合成采纳。
 
@@ -997,7 +1226,12 @@ def finalize_chapter(
     不会重复创建，也不会覆盖作者改过的档案。
 
     payoff：定稿时顺手点选的兑现规模四选一（none/small/medium/climax），
-    供开章核对单的节奏位置与审稿的节奏饥饿检查消费。"""
+    供开章核对单的节奏位置与审稿的节奏饥饿检查消费。
+
+    acknowledge：spec 4 的定稿表态。审稿 verdict=blocked（≥2 项不稳）时，
+    作者必须显式承认「我知道这些不稳」——否则拒绝定稿。
+    **不拦死**：作者有权明知不稳照样定稿，我们只负责让他知道。
+    不依赖前端自觉，后端硬校验。"""
     work = desk.get(chapter)
     text = work_text(work, "polish") or work_text(work, "draft")
     if not text:
@@ -1005,8 +1239,25 @@ def finalize_chapter(
     if payoff is not None:
         desk.record_payoff(chapter, payoff)
 
+    # spec 4：blocked 必须逐条表态。静默失败——账本写不成不阻断定稿，
+    # 因为作者已经做了决定，不能因为记录失败就作废他的决定。
+    blocked_items = _unstable_items(work)
+    if blocked_items and not acknowledge:
+        raise ValueError(_ack_required_message(blocked_items))
+    if blocked_items and acknowledge:
+        try:
+            from ..generation.gate import (
+                GATE_FINALIZE, DECISION_ACKNOWLEDGE, append_decision,
+            )
+            append_decision(pid, chapter, GATE_FINALIZE, DECISION_ACKNOWLEDGE,
+                            risk="review_blocked",
+                            detail=f"已知 {len(blocked_items)} 项不稳仍定稿")
+        except Exception as e:
+            log.debug("gate finalize decision failed: %s", e)
+
     entities_report: dict | None = None
     foreshadow_report: dict | None = None
+    foreshadow_detect: dict | None = None
     if auto_entities and entity_store is not None:
         # 先记下落库前已有的实体，抽取结果只当作「补漏」来报告
         before = {e.name for e in entity_store.list(type="character")}
@@ -1024,11 +1275,21 @@ def finalize_chapter(
             }
         except Exception as e:   # 飞轮失败不阻断定稿
             entities_report = {"error": str(e)[:300]}
+        # 伏笔回账要问两个问题，不是一个：
+        #   1) 账上这些，本章还了没有？（reconcile：paid / advanced）
+        #   2) 本章正文里现挖了哪些账上没有的坑？（detect：补登记）
+        # 只做 1 的话，正文里现挖的坑永远不在任何清单里，也就永远不会被催、
+        # 不会被回收——账目系统性漏记。
         try:
             fr = reconcile_foreshadows(provider, entity_store, prompt_store, text, chapter=chapter)
             foreshadow_report = fr.as_dict() if fr is not None else None
         except Exception as e:   # 问询失败同样不阻断
             foreshadow_report = {"error": str(e)[:300]}
+        try:
+            fd = detect_new_foreshadows(provider, entity_store, prompt_store, text, chapter=chapter)
+            foreshadow_detect = fd.as_dict()
+        except Exception as e:
+            foreshadow_detect = {"error": str(e)[:300]}
     marker_hits = marker_store.verify(text, chapter) if marker_store is not None else []
 
     parts: list[str] = []
@@ -1042,10 +1303,19 @@ def finalize_chapter(
     v = project_store.adopt(pid, "draft", x_pairs=[], y="\n\n".join(parts),
                             note=f"第{chapter}章定稿（保鲜飞轮已转）")
     desk.mark_finalized(chapter)
+    # 质量账本：定稿章的指标才算数（draft 不计入趋势，见 ledger 模块头）。
+    # 追加一条 accepted 行而非原地改 draft 行——账本是追加式历史。
+    # 静默失败：账本问题绝不阻断定稿。
+    try:
+        from ..generation.ledger import mark_accepted
+        mark_accepted(pid, chapter)
+    except Exception as e:
+        log.debug("quality ledger mark_accepted failed: %s", e)
     return {
         "chapter": chapter, "chars": len(text),
         "entities": entities_report,
         "foreshadow": foreshadow_report,
+        "foreshadow_detected": foreshadow_detect,
         "marker_hits": marker_hits,
         "draft_version": v.seq,
         "total_chapters": len(parts),

@@ -353,7 +353,10 @@ class TestVariantSeed:
         assert "本场额外登场 NPC" in txt
         assert "核心反转" in txt
         assert "要埋的伏笔" in txt
-        assert "结局倾向" in txt
+        # 方案 B：结局改成「走向 + 授权 KP 推翻」，不再是硬性命令。
+        # 旧文案「结局倾向」已随render_variant_seed 一起改掉。
+        assert "结局走向" in txt
+        assert "可以推翻" in txt
         # 所有 NPC 名字都出现
         for n in seed["extra_npcs"]:
             assert n["name"] in txt

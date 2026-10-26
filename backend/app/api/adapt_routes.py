@@ -186,11 +186,21 @@ def _stream_jobs(pid: str, vol_no: int):
 
 
 def _stage_complete(pid: str, vol_no: int, body: _StageCompleteIn) -> dict:
-    """POST 标记某阶段已完成。"""
+    """POST 标记某阶段已完成。
+
+    **必须清掉 `_view` 覆盖**：`_view` 是「回看已完成阶段」的临时标记，
+    而 `/phase` 路由在函数最开头就检查它并无条件返回——只要它还在，
+    任何阶段推进都会被拦回原来那一页，表现为「点下一阶段原地刷新」。
+
+    历史事故：卷 2 的 `_view='adapt'` 残留，`adapt=True` 却永远被拦回改编页。
+    """
     if body.stage not in _ALLOWED_STAGES:
         raise HTTPException(status_code=422, detail=f"未知阶段：{body.stage}")
     vs, v = _get_volume_or_404(pid, vol_no)
-    v.stage_completed[body.stage] = True
+    sc = dict(v.stage_completed or {})
+    sc[body.stage] = True
+    sc.pop("_view", None)
+    v.stage_completed = sc
     vs.save(v)
     return {"ok": True, "volume": v.as_dict()}
 

@@ -133,6 +133,8 @@ async function fetchVolume() {
     const r = await adaptApi.getVolume(pid, realVolNo.value)
     volume.value = r.volume
     if (r.volume?.adapted_module && r.volume?.stage_completed?.adapt) {
+      // 已选版：顺手清 _view，否则「下一阶段」永远原地刷新
+      await clearViewOverride()
       uiState.value = 'selected'
       return
     }
@@ -314,7 +316,38 @@ async function onDialogSave() {
   ElMessage.success(dialogMode.value === 'edit' ? '已更新该版，可点击「选这盘」保存' : '已添加自定义版本，可点击「选这盘」保存')
 }
 
-function onNextStage() {
+// 进入页面时若已完成选版，顺手清掉 _view 覆盖。
+// _view 是「回看已完成阶段」的临时标记，/phase 路由会无条件优先返回它——
+// 它残留时，「下一阶段」按钮点了只会原地刷新，永远跳不动。
+async function clearViewOverride() {
+  const pid = currentProjectId.value
+  const sc: any = volume.value?.stage_completed
+  if (!pid || !sc || sc._view == null) return
+  try {
+    // 标记 adapt 完成会顺带清掉 _view（后端 _stage_complete 的既有行为）
+    await adaptApi.markStageComplete(pid, realVolNo.value, 'adapt')
+    delete sc._view
+  } catch {
+    // 静默失败：不因为清标记阻断作者进入下一阶段
+  }
+}
+
+async function onNextStage() {
+  const pid = currentProjectId.value
+  if (pid) {
+    try {
+      // 推进阶段：后端会置 adapt=True 并清掉 _view。
+      // 不调这一下，光靠 /phase 查询推不动阶段（它只读不算）。
+      await adaptApi.markStageComplete(pid, realVolNo.value, 'adapt')
+      if (volume.value?.stage_completed) {
+        delete volume.value.stage_completed._view
+        volume.value.stage_completed.adapt = true
+      }
+    } catch (e: any) {
+      ElMessage.error('阶段推进失败：' + (e?.message ?? e))
+      return
+    }
+  }
   emit('done')
 }
 

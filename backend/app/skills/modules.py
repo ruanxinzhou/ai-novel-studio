@@ -88,6 +88,32 @@ MODULES: dict[str, dict] = {
         "stages": ["outline", "plot", "draft", "polish"],
         "default_for": [],
     },
+    # ---- 分场景写法（按本章场景自动注入，见 scene_detect.py）----
+    #
+    # 这些**不进 default_for**：默认集是全书通用的硬规则，分场景模块要靠
+    # scene_detect.detect_scenes() 判断本章属于哪几类后按需注入——
+    # 全量注入会把无关技法塞进上下文挤爆正文预算，
+    # 且「这章没有恋爱」却注入恋爱模块，模型会开始往正文里硬塞情话。
+    "scene_livedetail": {
+        "title": "生活质感：三色描写分级/镜头调度/五感轮换/细节立人",
+        "stages": ["plot", "draft", "polish"],
+        "default_for": [],
+    },
+    "scene_combat": {
+        "title": "战斗写法：四拍动作/三拍节奏/禁止报招式名/胜必留代价",
+        "stages": ["plot", "draft"],
+        "default_for": [],
+    },
+    "psychology_inner": {
+        "title": "心理内心戏：情绪→身体→动作/禁叙述者下结论/情绪滞后性",
+        "stages": ["plot", "draft", "polish"],
+        "default_for": [],
+    },
+    "scene_romance": {
+        "title": "情感恋爱戏：情绪禁直说/潜台词/生活细节承载/冰山三式",
+        "stages": ["plot", "draft", "polish"],
+        "default_for": [],
+    },
 }
 
 

@@ -22,6 +22,7 @@ import {
   type SkillModule,
 } from '../api'
 import VoiceprintEditor from './VoiceprintEditor.vue'
+import MemoryEditor from './MemoryEditor.vue'
 
 const open = computed({
   get: () => drawerOpen.value,
@@ -201,9 +202,24 @@ const voiceprintDialogOpen = ref(false)
 function openVoiceprints(presetId?: string) {
   voiceprintDialogOpen.value = true
   // 组件内自己按 presetId 预选
-  if (presetId) voiceprintPreset.value = presetId
+  // 注意：presetId 必须是 string——@click="openVoiceprints" 会把
+  // PointerEvent 当第一个参数传进来，不挡一下的话 presetId 变成事件对象，
+  // 组件会拿它去请求 /voiceprints/[object PointerEvent]（404）。
+  if (typeof presetId === 'string' && presetId) voiceprintPreset.value = presetId
 }
 const voiceprintPreset = ref<string | undefined>(undefined)
+
+// ============== 角色记忆碎片 Dialog ==============
+// 魂穿设定专用：这具身体在被附身之前经历过什么。与声音档案同一套
+// 「生成草稿 → 预览 → 逐条勾选采用」的交互契约。
+const memoryDialogOpen = ref(false)
+const memoryPreset = ref<string | undefined>(undefined)
+const memoryVolNo = ref<number | null>(null)
+function openMemories(presetId?: string, volNo?: number | null) {
+  memoryDialogOpen.value = true
+  if (presetId) memoryPreset.value = presetId
+  memoryVolNo.value = volNo ?? null
+}
 
 // ============== 完整实体库 Dialog ==============
 const vaultDialogOpen = ref(false)
@@ -213,10 +229,47 @@ const vaultList = ref<EntityInfo[]>([])
 const vaultCounts = ref<Record<string, number>>({})
 const vaultSelected = ref<EntityInfo | null>(null)
 const vaultEditing = ref(false)
-const vaultForm = ref<{ name: string; summary: string; details: string; status: string; type: string }>({
+const vaultForm = ref<{
+  name: string; summary: string; details: string; status: string; type: string
+  state_attrs: Record<string, string>
+}>({
   name: '', summary: '', details: '', status: 'active', type: 'character',
+  state_attrs: {},
 })
 const vaultSaving = ref(false)
+
+/**
+ * spec 3 · 角色知情边界字段定义。
+ *
+ * 只给 character 挂这两个字段，因为知情边界是**角色**的核心属性——
+ * 无限流设定的张力全靠信息不对称撑着。
+ *
+ * `knows` / `blinded_to` 刻意与 `knows_about` 关系边分开：关系边记「谁认识谁」，
+ * 这两个记「知道什么 / 不知道什么」。不自动推断，作者自己填。
+ */
+const KNOWLEDGE_FIELDS = [
+  {
+    key: 'knows',
+    label: '已知信息',
+    ph: '例：唐迟是第七个住客、老陈的孙女在三年前失踪',
+    tip: '写他时可以据此行动、说出口的信息',
+  },
+  {
+    key: 'blinded_to',
+    label: '不知情',
+    ph: '例：猫眼里的东西、房东其实是那个神',
+    tip: '他看不到、说不出、不会凭直觉猜到。章节里出现相关内容时只能表现为困惑或无知——审稿会据此报警',
+  },
+] as const
+
+/** spec 3：伏笔推进状态展示（仅 foreshadow 用）。 */
+function foreshadowProgress(e: EntityInfo | null): { text: string; cls: string } {
+  if (!e || e.type !== 'foreshadow') return { text: '', cls: '' }
+  const last = e.last_advanced_ch ?? 0
+  const cnt = e.advance_count ?? 0
+  if (!last) return { text: '从未推进', cls: 'fs-never' }
+  return { text: `第 ${last} 章推进过（累计 ${cnt} 次）`, cls: cnt >= 2 ? 'fs-ok' : 'fs-thin' }
+}
 
 async function loadVault() {
   if (!currentProjectId.value) return
@@ -259,6 +312,7 @@ function startEdit() {
   vaultForm.value = {
     name: e.name, summary: e.summary ?? '', details: e.details ?? '',
     status: e.status, type: e.type,
+    state_attrs: { ...(e.state_attrs || {}) },
   }
   vaultEditing.value = true
 }
@@ -267,6 +321,14 @@ async function saveEntity() {
   if (!currentProjectId.value || !vaultSelected.value) return
   vaultSaving.value = true
   try {
+    // spec 3：state_attrs 走**合并**语义（空串=删除该键），所以只传这两个字段即可，
+    // 不必把其他实体的状态属性一起 PUT 回去。
+    const attrs: Record<string, string> = {}
+    if (vaultForm.value.type === 'character') {
+      for (const f of KNOWLEDGE_FIELDS) {
+        attrs[f.key] = (vaultForm.value.state_attrs[f.key] ?? '').trim()
+      }
+    }
     const updated = await entitiesApi.update(
       currentProjectId.value,
       vaultSelected.value.id,
@@ -275,6 +337,7 @@ async function saveEntity() {
         summary: vaultForm.value.summary,
         details: vaultForm.value.details,
         status: vaultForm.value.status,
+        state_attrs: attrs,
       },
     )
     Object.assign(vaultSelected.value, updated)
@@ -528,6 +591,14 @@ function layerCompleted(layer: string): boolean {
           <el-button size="small" type="warning" plain @click="openVoiceprints">
             🎭 角色声音档案
           </el-button>
+          <el-tooltip
+            content="魂穿专用：这具身体在被附身之前经历过什么。每条标一个「入戏第几天想起」，正文按天解锁注入"
+            placement="top"
+          >
+            <el-button size="small" type="warning" plain @click="openMemories()">
+              🧩 角色记忆碎片
+            </el-button>
+          </el-tooltip>
         </div>
         <div
           v-loading="loading.entities"
@@ -690,6 +761,23 @@ function layerCompleted(layer: string): boolean {
     />
   </el-dialog>
 
+  <!-- 角色记忆碎片 Dialog：魂穿专用，按天解锁注入 -->
+  <el-dialog
+    v-model="memoryDialogOpen"
+    title="🧩 角色记忆碎片"
+    width="900px"
+    top="5vh"
+    destroy-on-close
+  >
+    <MemoryEditor
+      v-if="currentProjectId"
+      :pid="currentProjectId"
+      :preset-id="memoryPreset"
+      :vol-no="memoryVolNo"
+      @close="memoryDialogOpen = false"
+    />
+  </el-dialog>
+
   <!-- 实体库 Dialog -->
   <el-dialog v-model="vaultDialogOpen" title="🗂 实体库" width="960px" top="5vh" destroy-on-close>
     <div style="display: flex; gap: 12px; margin-bottom: 10px; align-items: center; flex-wrap: wrap">
@@ -767,6 +855,49 @@ function layerCompleted(layer: string): boolean {
                 {{ vaultSelected.details || '（未填）' }}
               </div>
             </div>
+
+            <!-- spec 3：伏笔推进状态。账龄按「最近一次真正推进」算，
+                 「从未推进」的那条才是真正该被催的。 -->
+            <div v-if="vaultSelected.type === 'foreshadow'" style="margin-bottom: 10px">
+              <b>推进状态</b>
+              <div style="margin-top: 4px">
+                <el-tag size="small" :class="['fs-tag', foreshadowProgress(vaultSelected).cls]">
+                  {{ foreshadowProgress(vaultSelected).text }}
+                </el-tag>
+                <span style="font-size: 12px; color: #909399; margin-left: 8px">
+                  埋设章 {{ (vaultSelected.appearances ?? [])[0] ?? '?' }}
+                </span>
+              </div>
+              <div style="font-size: 11px; color: #c0c4cc; margin-top: 4px; line-height: 1.5">
+                「从未推进」指被反复提起但从没往前推——这种伏笔在定稿回账时才会被记为 advanced。
+              </div>
+            </div>
+
+            <!-- spec 3：知情边界。空值=不检查，不自动推断。 -->
+            <div
+              v-if="vaultSelected.type === 'character' && (vaultSelected.state_attrs?.knows || vaultSelected.state_attrs?.blinded_to)"
+              style="margin-bottom: 10px"
+            >
+              <b>知情边界</b>
+              <div v-if="vaultSelected.state_attrs?.knows" style="margin-top: 4px; font-size: 13px">
+                <el-tag size="small" type="success" style="margin-right: 6px">已知</el-tag>
+                <span style="color: #606266; line-height: 1.5">{{ vaultSelected.state_attrs.knows }}</span>
+              </div>
+              <div v-if="vaultSelected.state_attrs?.blinded_to" style="margin-top: 6px; font-size: 13px">
+                <el-tag size="small" type="danger" style="margin-right: 6px">不知情</el-tag>
+                <span style="color: #606266; line-height: 1.5">{{ vaultSelected.state_attrs.blinded_to }}</span>
+              </div>
+              <div style="font-size: 11px; color: #c0c4cc; margin-top: 6px; line-height: 1.5">
+                「不知情」会进审稿：他在本章表现出知道这些内容时会被拦下报警（软提醒）。
+              </div>
+            </div>
+            <div
+              v-else-if="vaultSelected.type === 'character'"
+              style="margin-bottom: 10px; font-size: 12px; color: #c0c4cc"
+            >
+              未声明知情边界——点「编辑」可补充。不知道也没关系：空值表示不检查。
+            </div>
+
             <div style="display: flex; gap: 8px; margin-top: 12px">
               <el-button size="small" type="primary" @click="startEdit">编辑</el-button>
               <el-button size="small" type="danger" plain @click="removeEntity">删除</el-button>
@@ -793,6 +924,23 @@ function layerCompleted(layer: string): boolean {
             <el-form-item label="细节档案">
               <el-input v-model="vaultForm.details" type="textarea" :rows="8" placeholder="外貌、关系、伏笔、性格、线索…" />
             </el-form-item>
+            <!-- spec 3：知情边界编辑。留空=不检查，不自动推断。 -->
+            <template v-if="vaultForm.type === 'character'">
+              <el-form-item v-for="f in KNOWLEDGE_FIELDS" :key="f.key">
+                <template #label>
+                  <span>{{ f.label }}</span>
+                  <span style="font-size: 11px; color: #c0c4cc; margin-left: 6px; font-weight: normal">
+                    {{ f.tip }}
+                  </span>
+                </template>
+                <el-input
+                  v-model="vaultForm.state_attrs[f.key]"
+                  type="textarea"
+                  :rows="2"
+                  :placeholder="f.ph"
+                />
+              </el-form-item>
+            </template>
             <div style="display: flex; gap: 8px">
               <el-button type="primary" :loading="vaultSaving" @click="saveEntity">保存</el-button>
               <el-button @click="vaultEditing = false">取消</el-button>
@@ -805,6 +953,22 @@ function layerCompleted(layer: string): boolean {
 </template>
 
 <style scoped>
+/* spec 3：伏笔推进状态标签。从未推进 = 最该被催（红色），只推进过一次偏薄（橙色）。 */
+.fs-tag.fs-never {
+  background: #fef0f0;
+  color: #c45656;
+  border-color: #fbc4c4;
+}
+.fs-tag.fs-thin {
+  background: #fdf6ec;
+  color: #b88230;
+  border-color: #f5dab1;
+}
+.fs-tag.fs-ok {
+  background: #f0f9eb;
+  color: #67c23a;
+  border-color: #c2e7b0;
+}
 .group-desc {
   font-size: 12px;
   color: #909399;

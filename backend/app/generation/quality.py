@@ -23,6 +23,7 @@ import re
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
+from app.generation.archive import archive_density
 from app.generation.humanize import (
     _DASH_RE,
     _FULL_DOUBLE_RE,
@@ -200,31 +201,52 @@ def hard_gate(
     is_outline = (stage == "plot")
     if is_outline:
         import re as _re
-        _scenes = _re.findall(r"第\s*\d+\s*场", text)
-        _blocks = _re.findall(r"^\s*[-·*]\s*(?:场景|微观目标|阻力|信息差|关键对白|关键动作|感官锚点|情绪四拍|落点|POV)\s*[：:]", text, _re.M)
-        stats["outline_format"] = {"scenes": len(_scenes), "fields": len(_blocks)}
-        if len(_scenes) < 3:
+        # 场标记要兼容三种写法：「第1场：」「1. xxx」「场1」——
+        # 只认「第N场」会把「场1：客厅」这种合法编号判成散文。
+        # 必须锚到行首（可带 #/列表符）：否则场内任何一处「第N场」（比如落点里写
+        # 「收在第3场之后」）都会被计成一场，场数虚高后 fields < scenes*4 会误报「字段不全」。
+        _scenes = _re.findall(
+            r"^\s*(?:[-·*>]\s*|#{1,4}\s*)?(?:第\s*\d+\s*场|场景\s*\d+|场\s*\d+)", text, _re.M)
+        _blocks = _re.findall(r"^\s*[-·*]?\s*(?:场景|微观目标|阻力|信息差|关键对白|关键动作|感官锚点|情绪四拍|落点|POV|转场桥|本场变化)\s*[：:]", text, _re.M)
+        # 连续场（同一时空的下一拍）标记为「同场续」，它们不需要五类转场桥
+        _cont = _re.findall(r"^\s*[-·*]?\s*转场桥\s*[：:]\s*同场续", text, _re.M)
+        _delta = _re.findall(r"^\s*[-·*]?\s*本场变化\s*[：:]", text, _re.M)
+        stats["outline_format"] = {
+            "scenes": len(_scenes), "fields": len(_blocks),
+            "同场续": len(_cont), "本场变化": len(_delta),
+        }
+        # 场数下限 2：连续场合并后总块数会自然下降，短章写 2 场是正常的。
+        # 上限不设门禁——超长由字数门禁（2600）兜住，硬卡场数只会逼模型凑数。
+        if len(_scenes) < 2:
             p0.append(
-                f"章细纲格式错误：只识别到 {len(_scenes)} 个「第N场」标记（至少 3 个）。"
+                f"章细纲格式错误：只识别到 {len(_scenes)} 个场景标记（至少 2 个）。"
                 f"章细纲必须是编号场景块（每场含 场景/微观目标/阻力/关键对白/关键动作/落点 等字段），"
                 f"**不能写成连续散文或正文**——你输出的是细纲，不是正文。"
-                f"格式：第1场：<场名>\\n- 场景：…\\n- 微观目标：…\\n- 阻力：…\\n- 关键对白：「…」\\n- 关键动作：A→B→C\\n- 落点：…"
+                f"格式：第1场：<场名>\n- 场景：…\n- 微观目标：…\n- 阻力：…\n- 关键对白：「…」\n- 关键动作：A→B→C\n- 落点：…"
             )
         elif len(_blocks) < len(_scenes) * 4:
-            p1.append(
+            # 字段太少 = 没写成施工图，P0 而非 P1：这种稿子正文层没法直接用
+            p0.append(
                 f"章细纲字段不全：{len(_scenes)} 个场景只有 {len(_blocks)} 个字段"
-                f"（建议每场 ≥6 个：场景/微观目标/阻力/信息差/关键对白/关键动作/感官锚点/情绪四拍/落点）"
+                f"（每场至少 4 个，建议 6 个：场景/微观目标/阻力/信息差/关键对白/关键动作/感官锚点/情绪四拍/落点）"
+            )
+        # 标了「同场续」就必须写「本场变化」——否则正文层无从判断这一场推进了什么
+        if len(_cont) > len(_delta):
+            p0.append(
+                f"章细纲连续场缺「本场变化」：{len(_cont)} 场标了「同场续」但只有 {len(_delta)} 个「本场变化」。"
+                f"连续场必须写清相比上一场推进了什么（视线移动/手上动作换一步/对方换一句话），"
+                f"否则正文层只能把同一件事写两遍"
             )
         # 细纲只做格式 + 字数校验，正文质量门禁不适用
-        if len(_scenes) >= 3:
-            if chars < 900:
-                p1.append(f"章细纲过短：{chars} 字（建议 1200-1900，字段写不全正文就没东西写）")
-            elif chars > 2600:
-                p1.append(
-                    f"章细纲过长：{chars} 字（上限 2600）——"
-                    f"**这通常意味着你在写正文而不是细纲**。细纲是编号块，每场 6-10 行。"
-                    f"如果你觉得内容写不下，说明该拆成更多场而不是写得更长"
-                )
+        if chars > 2600:
+            # 过长是「写成正文」最强信号，判 P0 逼重写（原来判 P1 等于放过）
+            p0.append(
+                f"章细纲过长：{chars} 字（上限 2600）——"
+                f"**这几乎可以确定你在写正文而不是细纲**。细纲是编号块，每场 6-10 行。"
+                f"内容写不下说明该拆成更多场，而不是写得更长"
+            )
+        elif chars < 900 and len(_scenes) >= 2:
+            p1.append(f"章细纲过短：{chars} 字（建议 1200-1900，字段写不全正文就没东西写）")
 
     # ---- 以下全部是正文层专属检查，plot（章细纲）不适用 ----
     if not is_outline:
@@ -398,10 +420,34 @@ def hard_gate(
                 p1.append(
                     f"节奏：单句成段占比 {_rhythm['单句成段占比']}%（上限 30%），全章像流水账"
                 )
+            # 气息长度（2026-10-26 定稿反推新增）
+            #
+            # 人工定稿的段是「一口气」——一段里连着走 3-6 个动作，用逗号接。
+            # 实测第一组：机器稿段内逗号 1.08/段，定稿 2.06/段。
+            # 全章都在 1.2 以下 = 全是「一句一段」的摄影机切法。
+            if _rhythm["段内逗号均数"] < 1.2 and _rhythm["段落数"] >= 12:
+                p1.append(
+                    f"气息：段内逗号仅 {_rhythm['段内逗号均数']} 个/段"
+                    f"（人工定稿实测 1.5-2.1）——每段基本只有一句，是摄影机切法。"
+                    f"把相邻的动作/感官用逗号接进同一段，让一段是一口气说完的。"
+                )
             if _rhythm["动作收尾占比"] < 8:
                 p1.append(
                     f"活人节奏：动作收尾段仅 {_rhythm['动作收尾占比']}%（建议 ≥10%）"
                     f"——段尾爱落在抽象总结，改为落在具体动作/物件/短句"
+                )
+            # 档案密度（2026-10-26 定稿反推新增）
+            #
+            # 数字要挂在人/时/物上：定稿第三章的硬挂靠从 7 处涨到 13 处，
+            # 差别在「邵广勤今早猝死」→「四十七岁，住在二楼最里面那间，
+            # 今早七点十分，脸朝下扣在积水里」——**给现场，不给摘要**。
+            _arch = archive_density(text)
+            stats["archive_density"] = _arch
+            if _arch["per_k"] < 2.0:
+                p1.append(
+                    f"档案密度 {_arch['per_k']} 个/千字（建议 ≥2）"
+                    f"——数字还停在装饰层面。**恐怖信息要给现场，不要给摘要**："
+                    f"「脸朝下扣在积水里」比「猝死，死因没查清」有画面得多。"
                 )
 
     return HardGateResult(p0=p0, p1=p1, stats=stats)
@@ -522,6 +568,12 @@ def parse_soft_review(raw: str) -> SoftReviewResult:
     }
     for en, zh in key_map.items():
         v = scores.get(en)
+        if v is None:
+            # 模型有时直接用中文键名返回（「伏笔」「节奏」…）。
+            # 旧代码只看英文键，取不到就记 0 分——
+            # 于是 13 项全 0 → total=0 → 报「0 分」，
+            # 看起来像正文极差，实际是键名没对上。
+            v = scores.get(zh)
         try:
             res.scores[zh] = max(0, min(10, int(v)))
         except (TypeError, ValueError):
@@ -531,6 +583,10 @@ def parse_soft_review(raw: str) -> SoftReviewResult:
         res.total = max(0, min(100, int(total)))
     except (TypeError, ValueError):
         res.total = int(sum(res.scores.values()) * 10 / 13) if res.scores else 0
+    # total=0 但 13 项分数之和明显 > 0 → 说明模型没给 total，
+    # 用分数均值补一个，别让作者看到「0 分」这种假信号。
+    if res.total == 0 and sum(res.scores.values()) > 0:
+        res.total = int(sum(res.scores.values()) * 10 / 13)
     res.p0 = [str(x) for x in (data.get("p0_fatal") or []) if str(x).strip()]
     res.p1 = [str(x) for x in (data.get("p1_warnings") or []) if str(x).strip()]
     res.fix_hints = [str(x) for x in (data.get("fix_hints") or []) if str(x).strip()]
@@ -538,13 +594,26 @@ def parse_soft_review(raw: str) -> SoftReviewResult:
 
 
 def rewrite_prompt_with_hints(original_prompt: str, review: SoftReviewResult) -> str:
-    """把评审 P0 + fix_hints 拼成续写/重写的补充指令，追加到 user_directive。"""
-    if not review.p0 and not review.fix_hints:
+    """把评审 P0 + P1 + fix_hints 拼成续写/重写的补充指令，追加到 user_directive。
+
+    ## 为什么 P1 也要带上（2026-10-24）
+
+    旧代码只传 P0 和 fix_hints，P1 被完全丢掉。
+    结果是：评审报了「8 条建议」，重写时模型一条都没收到，
+    改完还是同样 8 条——作者看到问题列表反复出现，
+    只觉得「这工具在瞎报」，其实问题从没被传达过去。
+
+    P1 是「建议修改但不致命」，不是「不用改」。
+    """
+    if not review.p0 and not review.p1 and not review.fix_hints:
         return original_prompt
     parts = ["【上次生成未通过质量门禁，请按下列反馈重写】"]
     if review.p0:
         parts.append("致命问题（必须修正）：")
         parts.extend(f"- {x}" for x in review.p0)
+    if review.p1:
+        parts.append("建议级问题（同样要修，只是不致命）：")
+        parts.extend(f"- {x}" for x in review.p1)
     if review.fix_hints:
         parts.append("具体修改方向：")
         parts.extend(f"- {x}" for x in review.fix_hints[:6])

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import SushiCards from '../components/SushiCards.vue'
 import PrevStepPanel from '../components/PrevStepPanel.vue'
 import { simulateApi } from '../api'
@@ -32,40 +32,119 @@ function toggleTranscript(vid: string) {
 }
 // 已完成态：跑团实况折叠
 const showRaw = ref(false)
-/** 从 full_log 中拆分出「小说化梗概」部分（去掉前置 KP/PL 日志）；无分隔符时回退到 full_log 本身。 */
-function splitFullLog(full: string): { summary: string; transcript: string } {
+// 通稿折叠（第二步）：通稿很长，默认收起，作者要主动展开才看
+const expandedNarrative = ref<string | null>(null)
+// 已完成态的通稿折叠开关
+const showNarrative = ref(false)
+function toggleNarrative(vid: string) {
+  expandedNarrative.value = expandedNarrative.value === vid ? null : vid
+}
+/** 从 full_log 中拆分出「小说化梗概」与「通稿」部分（去掉前置 KP/PL 日志）；
+ *  无分隔符时回退到 full_log 本身。通稿段是第二步新增的，位置在梗概之后、调试信息之前。 */
+function splitFullLog(full: string): { summary: string; transcript: string; narrative: string } {
   const raw = String(full || '')
-  const markers = [
-    '===== 小说化梗概（原剧本经过）=====',
-    '===== 小说化梗概（原剧本经过）=====\n',
-  ]
-  for (const m of markers) {
-    const i = raw.indexOf(m)
-    if (i >= 0) {
-      const after = raw.slice(i + m.length)
-      const debugIdx = after.indexOf('===== 调试信息 =====')
-      const summary = debugIdx >= 0 ? after.slice(0, debugIdx).trim() : after.trim()
-      const transcript = raw.slice(0, i).trim()
-      return { summary, transcript }
-    }
+  const SUMMARY_MARKER = '===== 小说化梗概（原剧本经过）====='
+  const NARRATIVE_MARKER = '===== 通稿（本场完整故事）====='
+  const DEBUG_MARKER = '===== 调试信息 ====='
+  const i = raw.indexOf(SUMMARY_MARKER)
+  if (i < 0) return { summary: raw.trim(), transcript: '', narrative: '' }
+  const transcript = raw.slice(0, i).trim()
+  const afterSummary = raw.slice(i + SUMMARY_MARKER.length)
+  // 通稿段（可能不存在——老数据没有这一段）
+  const nIdx = afterSummary.indexOf(NARRATIVE_MARKER)
+  let summary = afterSummary
+  let narrative = ''
+  if (nIdx >= 0) {
+    summary = afterSummary.slice(0, nIdx)
+    const afterNarr = afterSummary.slice(nIdx + NARRATIVE_MARKER.length)
+    const dIdx = afterNarr.indexOf(DEBUG_MARKER)
+    narrative = (dIdx >= 0 ? afterNarr.slice(0, dIdx) : afterNarr).trim()
   }
-  return { summary: raw.trim(), transcript: '' }
+  // 摘要段要剥掉尾部的通稿/调试标记残留
+  const dIdx2 = summary.indexOf(DEBUG_MARKER)
+  if (dIdx2 >= 0) summary = summary.slice(0, dIdx2)
+  return { summary: summary.trim(), transcript, narrative }
 }
 const completedSummary = computed(() => {
   const sv = completed.value?.selected_variant
   if (sv?.final_summary) return String(sv.final_summary)
   return splitFullLog(completed.value?.full_log || '').summary
 })
+
+// ---- 失败可见性 ----
+/** 该场是否失败。**独立字段判定**，不靠 final_summary 有没有内容——
+ *  旧实现把 traceback 写进 final_summary，那正是失败看起来像成功的根源。 */
+function isFailed(v: any): boolean {
+  return v?.run_status === 'failed'
+}
+const FAIL_STAGE_LABEL: Record<string, string> = {
+  thread: '线程崩溃',
+  bootstrap: '未能启动（0 回合）',
+  finalize: '梗概生成失败',
+}
+function failStageLabel(v: any): string {
+  return FAIL_STAGE_LABEL[v?.fail_stage] || '未知阶段'
+}
+/** 失败原因：优先 fail_reason，退回 state.error，都没有就说「未知原因」。 */
+function failReason(v: any): string {
+  return String(v?.fail_reason || v?.state_error || '未知原因')
+}
+/** 有几场失败——顶部汇总条要用。 */
+const failedCount = computed(() => allVariants.value.filter(isFailed).length)
 const completedTranscript = computed(() => {
   const sv = completed.value?.selected_variant
   if (sv?.transcript) return String(sv.transcript)
   return splitFullLog(completed.value?.full_log || '').transcript
 })
 
+// ---- beat 进度与终止原因（第二步）----
+//
+// 作者选底本前必须知道两件事：这一场**讲完了没有**，以及**讲到哪一段了**。
+// 旧的「回合 24」看不出故事有没有收住——回合数跟故事长度无关。
+/** 终止原因 → 作者可读文案 + 严重度。hard_cap 要显式警告：后半段没写完。 */
+const ENDING_REASON_META: Record<string, { text: string; level: 'ok' | 'warn' | 'info' }> = {
+  story_complete: { text: '自然讲完', level: 'ok' },
+  transition_done: { text: '转折后收束', level: 'ok' },
+  hard_cap: { text: '撞预算截断', level: 'warn' },
+  max_turns: { text: '触顶回合上限', level: 'warn' },
+  dead: { text: '全员死亡', level: 'warn' },
+  insane: { text: '全员疯狂', level: 'warn' },
+  no_beat: { text: '未跑出任何一拍', level: 'info' },
+  stopped_by_author: { text: '手动停止', level: 'info' },
+}
+function endingReasonMeta(v: any) {
+  const key = String(v?.ending_reason || '')
+  return ENDING_REASON_META[key] || { text: '', level: 'info' as const }
+}
+/** beat 进度百分比：预算为 0 时不显示进度条，避免出现除零/空条。 */
+function beatPercent(v: any): number {
+  const done = Number(v?.beats_done || 0)
+  const budget = Number(v?.beat_budget || 0)
+  if (budget <= 0) return 0
+  return Math.min(100, Math.round((done / budget) * 100))
+}
+/** 通稿：优先独立字段；老数据没有该字段时回退到 full_log 里拆。 */
+function narrativeOf(v: any): string {
+  if (v?.full_narrative) return String(v.full_narrative)
+  return ''
+}
+/** 有几场是「讲完了」，汇总条要提示作者哪几场其实没写完。 */
+const truncatedCount = computed(
+  () => allVariants.value.filter((v: any) => endingReasonMeta(v).level === 'warn').length,
+)
+/** 已完成态的通稿：优先独立字段，老数据回退到 full_log 拆分。 */
+const completedNarrative = computed(() => {
+  const sv = completed.value?.selected_variant
+  if (sv?.full_narrative) return String(sv.full_narrative)
+  return splitFullLog(completed.value?.full_log || '').narrative
+})
+
 // ---- 启动参数 ----
 const userDirective = ref('')
-const maxPairs = ref(6)
-const maxTurns = ref(20)
+// 默认值只作为「上限」：真实拍数由后端按模组体量自动估算。
+// 以前默认 6 会把预算钉死在6~8 拍，三场全部 hard_cap 收场。
+const maxPairs = ref(40)
+const maxTurns = ref(120)
 const useMock = ref(false)
 const optionsOpen = ref(false)
 
@@ -280,16 +359,126 @@ function startSse() {
     if (ev.type === 'job_update' && ev.job && job.value && ev.job.job_id === job.value.job_id) {
       applyJob(ev.job)
     } else if (ev.type === 'job_update_batch' && ev.jobs) {
-      const mine = [...ev.jobs].reverse().find((j) => j.kind === 'coc_batch')
+      // **必须锁定当前 job**：同一 session 里堆着历次跑团的 job，
+      // 取「最后一个」会拿到旧任务，把界面回退到上一轮结果。
+      const mine = job.value
+        ? ev.jobs.find((j: any) => j.job_id === job.value?.job_id)
+        : [...ev.jobs].reverse().find((j: any) => j.kind === 'coc_batch')
       if (mine) applyJob(mine)
     } else if (ev.type === 'job_idle') {
-      // no-op
+      // SSE 即将关闭时**主动拉一次最终状态**。真实事故：任务在服务端
+      // 已经 done，但长连接在最后一刻断掉，done 事件没送达，
+      // 页面永远停在 96% 的running 态，结果区一片空白。
+      void refreshJob()
+    }
+  })
+}
+
+/** 兜底拉取：SSE 不可靠时的唯一真相来源。 */
+async function refreshJob() {
+  const pid = currentProjectId.value
+  if (!pid || !props.volNo) return
+  try {
+    const r = await simulateApi.listJobs(pid, props.volNo)
+    const jobs = r.jobs || []
+    const mine = job.value
+      ? jobs.find((j: any) => j.job_id === job.value?.job_id)
+      : [...jobs].reverse().find((j: any) => j.kind === 'coc_batch')
+    if (mine) applyJob(mine)
+  } catch {
+    // 拉取失败就保持原状态，下次SSE 事件会再纠正
+  }
+}
+
+// ---- 实时日志（第四步）----
+// 作者等的是「模型此刻在干什么」。后端把 LLM 的 thinking / delta 流
+// 实时写进 job.live_log，这里按场次分栏渲染。
+//
+// **为什么分栏**：三场是并行的独立支线，混在一个滚动框里会互相穿插
+// ——A 场的思考和 B 场的裁决交替出现，读起来像一场在胡言乱语。
+// 三栏并列后，每场的推演脉络各自连续，支线如何分叉一眼可见。
+const liveLog = ref<Array<{ kind: string; text: string; session?: number }>>([])
+/** 每场的最新一行判定结果（更有用：一眼看到这条支线讲成什么样了） */
+const liveBeats = ref<Record<number, string>>({})
+/** 每栏独立的滚动容器 ref（三场各一个） */
+const livePaneRefs = ref<Record<number, HTMLElement | null>>({})
+
+/** 按场次把事件分桶；每桶只保留最近 N 行，避免长跑把 DOM 撑爆 */
+const LIVE_PER_PANE = 40
+
+const liveBySession = computed(() => {
+  const buckets: Record<number, Array<{ kind: string; text: string }>> = {}
+  for (const row of liveLog.value) {
+    const s = Number(row.session || 0)
+    if (!buckets[s]) buckets[s] = []
+    buckets[s].push({ kind: row.kind, text: row.text })
+  }
+  for (const k of Object.keys(buckets)) {
+    buckets[k as unknown as number] = buckets[k as unknown as number].slice(-LIVE_PER_PANE)
+  }
+  return buckets
+})
+
+/** 三栏的渲染模型（空栏也渲染，保持布局稳定不跳动） */
+const livePanes = computed(() =>
+  [1, 2, 3].map((s) => ({
+    session: s,
+    // 场次名与下方候选卡保持同一来源（sub_results[i].label），
+    // 作者在两处看到的是同一个名字，不用建立心智映射。
+    label: (job.value?.sub_results as any[])?.[s - 1]?.label || `平行宇宙 #${s}`,
+    rows: liveBySession.value[s] || [],
+  }))
+)
+
+/** 该栏最新一条非 thinking 文本，作为栏头状态（作者最关心「讲到哪了」） */
+function paneStatus(s: number): string {
+  const beats = liveBeats.value[s]
+  if (beats) return beats
+  const rows = liveBySession.value[s] || []
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (rows[i].kind === 'verdict' || rows[i].kind === 'delta') return rows[i].text
+  }
+  return ''
+}
+
+function setPaneRef(s: number, el: any) {
+  if (el) livePaneRefs.value[s] = el as HTMLElement
+}
+
+function applyLiveLog(j: Job) {
+  const rows: any[] = (j as any).live_log || []
+  if (!rows.length) return
+  // 合并 delta：同一场连续的 delta 拼成一行，避免刷屏
+  const merged: Array<{ kind: string; text: string; session?: number }> = []
+  for (const r of rows) {
+    const last = merged[merged.length - 1]
+    if (
+      last && last.kind === 'delta' && last.session === r.session &&
+      last.text.length + (r.text?.length || 0) < 900
+    ) {
+      last.text += r.text
+    } else {
+      merged.push({ kind: r.kind, text: r.text, session: r.session })
+    }
+  }
+  liveLog.value = merged.slice(-120)
+  // 判定结果单独收集
+  const beats: Record<number, string> = {}
+  for (const r of rows) {
+    if (r.kind === 'verdict' && r.session != null) beats[r.session] = r.text
+  }
+  if (Object.keys(beats).length) liveBeats.value = beats
+  // 各栏分别滚到底
+  nextTick(() => {
+    for (const el of Object.values(livePaneRefs.value)) {
+      if (el) el.scrollTop = el.scrollHeight
     }
   })
 }
 
 function applyJob(j: Job) {
   job.value = j
+  applyLiveLog(j)
   if (j.status === 'done') {
     running.value = false
     extraVariants.value = []
@@ -328,13 +517,55 @@ async function onStart(directive = '') {
   }
 }
 
+/** 正在重跑的卡片索引（-1=无）。当前后端只支持整批重跑，
+ *  所以这里记录的是「用户点了哪张失败卡」，实际动作是整批重来。 */
+const rerunningIdx = ref(-1)
+
+/**
+ * 重跑失败场。
+ *
+ * **诚实说明**：后端目前只有 `startSim`（整批启动），没有单场重跑接口，
+ * 所以这里触发的是**整批重跑**，而不是只补这一场。作者会重新消耗
+ * 已成功那几场的额度——所以必须先确认，不能让作者以为只花一场的钱。
+ *
+ * 单场重跑要做的话需要后端补一个 `retry_session(vid)`，本step 不做。
+ */
+async function onRerunFailed(idx: number) {
+  const it = allVariants.value[idx]
+  if (!it) return
+  rerunningIdx.value = idx
+  const okCount = allVariants.value.length - failedCount.value
+  try {
+    await ElMessageBox.confirm(
+      `第${idx + 1}场失败（${failStageLabel(it)}）。\n\n` +
+        `目前只能整批重跑——已成功的 ${okCount} 场也会一并重来，` +
+        `全部跑团额度重新消耗一次。\n\n确定继续？`,
+      '重跑跑团',
+      { confirmButtonText: '整批重跑', cancelButtonText: '算了', type: 'warning' },
+    )
+  } catch {
+    rerunningIdx.value = -1
+    return
+  }
+  rerunningIdx.value = -1
+  onStart('')
+}
+
 async function onPickOne(id: string | null, idx?: number) {
   if (id == null || idx == null) return
-  pickedVariantId.value = id
   const pid = currentProjectId.value
   if (!pid) return
   const picked = allVariants.value[idx]
   if (!picked) return
+  // 失败场不能选作创作底本——它没有梗概。作者要的是「读懂后挑一个」，
+  // 挑一个空梗概毫无意义。与其在弹窗里拦，不如这里直接拒绝并给出动作入口。
+  if (isFailed(picked)) {
+    ElMessage.warning(
+      `第${idx + 1}场跑团失败（${failStageLabel(picked)}），没有梗概可选。请先重跑这一场。`,
+    )
+    return
+  }
+  pickedVariantId.value = id
   // 自定义/编辑卡 → 走 save-custom
   if (picked.is_custom) {
     try {
@@ -512,7 +743,7 @@ watch(() => props.volNo, () => {
         <el-input
           v-model="userDirective"
           type="textarea"
-          :rows="3"
+          :rows="5"
           placeholder="可选：对本场跑团的特别指令，例如「多死人」「让记者死在中段」「偏向黑暗结局」..."
           class="directive-input"
         />
@@ -520,11 +751,12 @@ watch(() => props.volNo, () => {
           <el-collapse-item title="高级选项" name="opts">
             <div class="opt-row">
               <label>每场最大 KP/PL 对数：{{ maxPairs }}（每对 = 1 段 KP 推进 + 1 段 PL 行动）</label>
-              <el-slider v-model="maxPairs" :min="3" :max="10" :step="1" />
+              <el-slider v-model="maxPairs" :min="8" :max="120" :step="4" />
+              <p class="opt-hint">仅作为上限：实际拍数由模组体量自动估算，通常高于此值时按估算走。</p>
             </div>
             <div class="opt-row">
               <label>每场硬上限回合数：{{ maxTurns }}</label>
-              <el-slider v-model="maxTurns" :min="8" :max="40" :step="2" />
+              <el-slider v-model="maxTurns" :min="20" :max="200" :step="10" />
             </div>
             <div class="opt-row">
               <el-checkbox v-model="useMock">快速演示（跳过 LLM，1 秒出 mock 占位，仅用于 UI 调试）</el-checkbox>
@@ -545,6 +777,40 @@ watch(() => props.volNo, () => {
         <h3>跑团进行中…</h3>
         <el-progress :percentage="Math.round(job?.progress ?? 0)" :status="(job?.progress ?? 0) >= 100 ? 'success' : undefined" />
         <p class="msg">{{ job?.message || '等待开场…' }}</p>
+
+        <!-- 实时推演：三场并行，各占一栏。分栏而不是混在一个框里，
+             是因为三场是独立支线——混排时 A 场的思考和 B 场的裁决会交替
+             出现，读起来像一场在胡言乱语。三栏并列后每场脉络各自连续。 -->
+        <div class="live-panel">
+          <div class="live-head">
+            <span class="live-title">实时推演</span>
+            <span class="live-hint">三场并行，各栏独立显示模型思考与逐拍裁决</span>
+          </div>
+          <div class="live-cols">
+            <section
+              v-for="pane in livePanes"
+              :key="pane.session"
+              class="live-col"
+              :class="{ 'is-active': pane.rows.length > 0 }"
+            >
+              <header class="live-col-head">
+                <span class="live-col-title">{{ pane.label }}</span>
+                <span class="live-col-status">{{ paneStatus(pane.session) || '等待开场…' }}</span>
+              </header>
+              <div class="live-scroll" :ref="(el: any) => setPaneRef(pane.session, el)">
+                <div v-if="!pane.rows.length" class="live-empty">等待模型开始输出…</div>
+                <div
+                  v-for="(row, i) in pane.rows"
+                  :key="i"
+                  class="live-row"
+                  :class="`live-${row.kind}`"
+                >
+                  <span class="live-text">{{ row.text }}</span>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
         <div class="variant-cards-loading">
           <div class="var-loading-row">
             <div v-for="i in 3" :key="i" class="var-loading-card">
@@ -576,6 +842,38 @@ watch(() => props.volNo, () => {
 
     <!-- 结果对比 + 拼贴（用 SushiCards ensemble）-->
     <div v-else-if="uiState === 'result'" class="sim-result">
+      <!-- 失败汇总条：作者不该靠逐张卡片去发现哪几场挂了 -->
+      <el-alert
+        v-if="failedCount > 0"
+        type="error"
+        show-icon
+        :closable="false"
+        class="fail-summary"
+      >
+        <template #title>
+          {{ failedCount }} / {{ allVariants.length }} 场跑团失败
+        </template>
+        <div class="fail-summary-body">
+          失败场没有产出梗概，不能选作创作底本。点失败卡上的按钮可整批重跑（已成功的场也会一并重来，额度重新消耗一次）。
+        </div>
+      </el-alert>
+
+      <!-- 截断汇总：没失败的场也可能只是撞预算截断，同样不能当完整底本 -->
+      <el-alert
+        v-if="truncatedCount > 0"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="fail-summary"
+      >
+        <template #title>
+          {{ truncatedCount }} 场没有自然讲完
+        </template>
+        <div class="fail-summary-body">
+          这些场撞到了拍数预算或硬约束（全员死亡 / 疯狂），后半段可能没写完。卡片上有橙色标记，选作底本前请先确认。
+        </div>
+      </el-alert>
+
       <SushiCards
         mode="ensemble"
         :items="allVariants"
@@ -592,10 +890,39 @@ watch(() => props.volNo, () => {
         @custom-write="onCustomWrite"
         @edit-card="onEditCard"
       >
-        <template #item="{ item: it }">
+        <template #item="{ item: it, index: idx }">
+          <!-- 失败态：红框 + 阶段 + 原因 + 单独重跑入口。
+               失败场不提供「选这盘」——没有梗概的场不能当创作底本。 -->
+          <div v-if="isFailed(it)" class="variant-failed">
+            <div class="variant-failed-head">
+              <el-tag type="danger" size="small" effect="dark">本场失败</el-tag>
+              <span class="variant-failed-stage">{{ failStageLabel(it) }}</span>
+            </div>
+            <div class="variant-failed-reason">{{ failReason(it) }}</div>
+            <div class="variant-failed-hint">
+              这一场没有产出梗概，无法选作创作底本。
+            </div>
+            <el-button
+              size="small"
+              type="danger"
+              plain
+              :loading="rerunningIdx === idx"
+              @click="onRerunFailed(idx)"
+            >重跑（含已成功场）</el-button>
+          </div>
+
           <div class="variant-meta-row">
             <span class="meta-chip">幸存者 {{ (it?.survivors || []).length }} 人</span>
             <span class="meta-chip" v-if="it?.turns">回合 {{ it.turns }}</span>
+            <span class="meta-chip" v-if="it?.beat_budget">
+              第 {{ it?.beats_done || 0 }} 拍 / 预算 {{ it.beat_budget }}
+            </span>
+            <span class="meta-chip phase-chip" v-if="it?.story_phase">{{ it.story_phase }}</span>
+            <span
+              class="meta-chip"
+              :class="`ending-${endingReasonMeta(it).level}`"
+              v-if="endingReasonMeta(it).text"
+            >{{ endingReasonMeta(it).text }}</span>
             <el-button
               link
               type="info"
@@ -603,6 +930,37 @@ watch(() => props.volNo, () => {
               @click="toggleTranscript(it?.vid)"
             >{{ expandedTranscript === it?.vid ? '收起跑团实况' : '查看跑团实况（素材）' }}</el-button>
           </div>
+          <!-- beat 进度条：只看「回合 N」判断不出故事讲够了没，这里给出语义进度 -->
+          <el-progress
+            v-if="it?.beat_budget && Number(it?.beats_done || 0) > 0"
+            :percentage="beatPercent(it)"
+            :status="endingReasonMeta(it).level === 'ok' ? 'success' : undefined"
+            :stroke-width="4"
+            class="beat-progress"
+          />
+          <!-- 截断警告：撞预算的场后半段没写完，直接当底本会漏情节 -->
+          <div
+            class="ending-warn-note"
+            v-if="endingReasonMeta(it).level === 'warn' && it?.ending_reason === 'hard_cap'"
+          >
+            本场撞到 beat 预算上限，后半段没有写完。选它当底本前请确认缺失部分可以自行补足。
+          </div>
+          <!-- 通稿：8000-12000 字完整故事，默认收起 -->
+          <div class="variant-meta-row" v-if="narrativeOf(it)">
+            <span class="meta-chip narrative-chip">通稿 {{ narrativeOf(it).length }} 字</span>
+            <el-button
+              link
+              type="success"
+              size="small"
+              @click="toggleNarrative(it?.vid)"
+            >{{ expandedNarrative === it?.vid ? '收起通稿' : '查看通稿（完整故事）' }}</el-button>
+          </div>
+          <el-collapse-transition>
+            <div v-if="expandedNarrative === it?.vid && narrativeOf(it)" class="variant-narrative">
+              <div class="mat-hint">本场完整故事通稿，可直接作为创作底本；梗概卡片是它的压缩版。</div>
+              <pre class="narrative-pre">{{ narrativeOf(it) }}</pre>
+            </div>
+          </el-collapse-transition>
           <el-collapse-transition>
             <div v-if="expandedTranscript === it?.vid" class="variant-transcript">
               <div class="mat-hint">以下为完整 KP/PL 跑团日志，作为小说化梗概的原始素材；选版时以梗概为准。</div>
@@ -709,7 +1067,7 @@ watch(() => props.volNo, () => {
         <el-input
           v-model="collageUserNote"
           type="textarea"
-          :rows="2"
+          :rows="4"
           placeholder="作者备注：整体基调、想保留的细节、后续调整说明…"
           class="user-note"
         />
@@ -731,10 +1089,24 @@ watch(() => props.volNo, () => {
         <div class="completed-body">
           <div class="summary-panel">
             <h4>小说化梗概（原剧本经过）</h4>
-            <el-scrollbar max-height="420">
+            <el-scrollbar max-height="560">
               <pre class="summary-pre">{{ completedSummary }}</pre>
             </el-scrollbar>
           </div>
+          <!-- 通稿（第二步）：完整故事，与梗概并列。作者主要看这一份。 -->
+          <div class="raw-toggle" v-if="completedNarrative">
+            <el-button link type="success" size="small" @click="showNarrative = !showNarrative">
+              {{ showNarrative ? '收起通稿' : `查看通稿（完整故事，${completedNarrative.length} 字）` }}
+            </el-button>
+          </div>
+          <el-collapse-transition>
+            <div v-if="showNarrative && completedNarrative" class="raw-panel">
+              <div class="mat-hint">本场完整故事通稿：每一拍都讲到了，可直接作为下一阶段的创作底本。</div>
+              <el-scrollbar max-height="560">
+                <pre class="narrative-pre">{{ completedNarrative }}</pre>
+              </el-scrollbar>
+            </div>
+          </el-collapse-transition>
           <div class="raw-toggle">
             <el-button link type="info" size="small" @click="showRaw = !showRaw">
               {{ showRaw ? '收起跑团实况（素材）' : '查看跑团实况（原始素材）' }}
@@ -743,7 +1115,7 @@ watch(() => props.volNo, () => {
           <el-collapse-transition>
             <div v-if="showRaw" class="raw-panel">
               <div class="mat-hint">完整 KP/PL 对话日志，作为素材归档；正文写作以梗概为准。</div>
-              <el-scrollbar max-height="300">
+              <el-scrollbar max-height="400">
                 <pre class="transcript-pre">{{ completedTranscript || '（无原始日志）' }}</pre>
               </el-scrollbar>
             </div>
@@ -788,8 +1160,8 @@ watch(() => props.volNo, () => {
 
 <style scoped>
 .coc-sim-view {
-  padding: 16px 24px;
-  max-width: 1200px;
+  padding: 24px 32px;
+  max-width: 1480px;
   margin: 0 auto;
 }
 
@@ -797,80 +1169,92 @@ watch(() => props.volNo, () => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 16px;
 }
 .sim-header h2 {
   margin: 0;
-  font-size: 22px;
+  font-size: 26px;
 }
 .sim-header .sub {
   color: #666;
-  margin: 8px 0 12px 0;
-  font-size: 13px;
-  line-height: 1.6;
+  margin: 12px 0 18px 0;
+  font-size: 14px;
+  line-height: 1.7;
 }
 .completed-banner {
   background: #f0f9eb;
   border: 1px solid #e1f3d8;
   color: #67c23a;
-  padding: 8px 12px;
-  border-radius: 6px;
+  padding: 14px 18px;
+  border-radius: 10px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
+  margin-bottom: 18px;
+  font-size: 14px;
 }
 
 .directive-input {
-  margin: 12px 0;
+  margin: 16px 0;
 }
 .options-collapse {
-  margin: 8px 0;
+  margin: 12px 0;
 }
 .opt-row {
-  padding: 8px 0;
+  padding: 16px 0;
 }
 .opt-row label {
   display: block;
-  margin-bottom: 6px;
-  font-size: 13px;
+  margin-bottom: 10px;
+  font-size: 14px;
   color: #444;
 }
+/* 解释「上限」语义：作者容易以为拖得越大越慢，需要说明实际由估算决定 */
+.opt-hint {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: #98a2b3;
+  line-height: 1.6;
+}
 .actions {
-  margin-top: 16px;
+  margin-top: 24px;
   text-align: center;
 }
 
 .msg {
-  margin: 12px 0;
+  margin: 16px 0;
+  font-size: 15px;
+  line-height: 1.7;
   color: #555;
 }
 
 /* 跑中态：简化三卡（不带选定按钮） */
 .variant-cards-loading {
-  margin-top: 16px;
+  margin-top: 24px;
 }
 .var-loading-row {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 18px;
 }
 .var-loading-card {
   border: 1px solid #ebeef5;
-  border-radius: 6px;
-  padding: 12px;
+  border-radius: 10px;
+  padding: 20px;
   background: #fafafa;
-  min-height: 100px;
+  min-height: 160px;
+  font-size: 14px;
 }
 .var-label {
   font-weight: 600;
+  font-size: 16px;
   color: #409eff;
-  margin-bottom: 8px;
+  margin-bottom: 12px;
 }
 .var-one-liner {
-  font-size: 13px;
+  font-size: 14px;
   color: #666;
-  line-height: 1.5;
+  line-height: 1.7;
 }
 .var-one-liner .muted {
   color: #bbb;
@@ -878,254 +1262,565 @@ watch(() => props.volNo, () => {
 
 /* 拼贴区域 */
 .collage-card {
-  margin-top: 16px;
+  margin-top: 24px;
   background: #fafafa;
+  padding: 8px;
 }
 .collage-card h3 {
-  margin: 0 0 4px 0;
+  margin: 8px 0 8px 0;
+  font-size: 17px;
 }
 .collage-card .hint {
   color: #888;
-  font-size: 13px;
-  margin: 0 0 16px 0;
+  font-size: 13.5px;
+  line-height: 1.7;
+  margin: 0 0 20px 0;
 }
 .collage-base-row {
-  margin-bottom: 8px;
+  margin-bottom: 12px;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 14px;
   flex-wrap: wrap;
 }
 .collage-base-row label {
   font-weight: 600;
-  font-size: 13px;
+  font-size: 14px;
 }
 .collage-base-one {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: 10px;
   background: #fff;
   border: 1px dashed #d9e3f0;
-  border-radius: 6px;
-  padding: 8px 10px;
-  margin-bottom: 12px;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 18px;
+  font-size: 14px;
+  line-height: 1.7;
 }
 .section-grid {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-bottom: 12px;
+  gap: 10px;
+  margin-bottom: 16px;
 }
 .section-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   background: #fff;
-  padding: 8px 10px;
-  border-radius: 6px;
+  padding: 12px 14px;
+  border-radius: 8px;
   border: 1px solid #eee;
 }
 .section-idx {
   color: #999;
-  font-size: 13px;
+  font-size: 14px;
   width: 22px;
   flex-shrink: 0;
 }
 .section-label-input {
-  width: 180px;
+  width: 210px;
   flex-shrink: 0;
 }
 .section-row .from-select {
-  width: 260px;
+  width: 300px;
   flex-shrink: 0;
 }
 .section-note {
   flex: 1;
-  min-width: 140px;
+  min-width: 180px;
 }
 .selected-summary {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
-  padding: 4px 10px 4px 38px;
-  font-size: 12px;
+  gap: 10px;
+  padding: 6px 12px 6px 42px;
+  font-size: 13px;
   color: #666;
 }
 .sum-section {
   color: #333;
   font-weight: 600;
-  min-width: 90px;
+  min-width: 100px;
 }
 .chip {
   background: #ecf5ff;
   color: #409eff;
-  padding: 1px 8px;
+  padding: 2px 10px;
   border-radius: 10px;
-  font-size: 12px;
+  font-size: 13px;
   white-space: nowrap;
   flex-shrink: 0;
 }
-.chip-sm { font-size: 11px; padding: 0 6px; }
+.chip-sm { font-size: 12px; padding: 1px 8px; }
 .one-liner-txt {
   color: #888;
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: 13px;
+  line-height: 1.6;
   overflow: hidden;
   text-overflow: ellipsis;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
 }
-.one-liner-txt-sm { font-size: 11px; -webkit-line-clamp: 1; }
+.one-liner-txt-sm { font-size: 12px; -webkit-line-clamp: 1; }
 
 .add-section-row {
-  margin-bottom: 10px;
+  margin-bottom: 14px;
 }
 .preset-list .preset-tip {
-  font-size: 12px;
+  font-size: 13px;
   color: #888;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 .preset-list .preset-btn {
   display: inline-block;
-  margin: 2px 4px 2px 0;
-  font-size: 12px;
+  margin: 3px 6px 3px 0;
+  font-size: 13px;
 }
 
 /* 下拉选项的两行式展示 */
 :global(.collage-popper) .el-select-dropdown__item {
   height: auto;
-  line-height: 1.4;
-  padding: 8px 12px;
+  line-height: 1.5;
+  padding: 10px 14px;
 }
 .opt-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 .opt-num {
   font-weight: 600;
   color: #409eff;
-  font-size: 13px;
+  font-size: 14px;
 }
 .opt-flavor {
-  font-size: 11px;
+  font-size: 12px;
 }
 .opt-one {
   color: #888;
-  font-size: 12px;
-  margin-top: 2px;
+  font-size: 13px;
+  line-height: 1.5;
+  margin-top: 4px;
   white-space: normal;
   word-break: break-all;
 }
 
 .user-note {
-  margin-top: 8px;
+  margin-top: 12px;
 }
 
 .completed-head {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: 14px;
+  margin-bottom: 16px;
 }
 .completed-head .summary {
-  font-size: 14px;
+  font-size: 15px;
   color: #333;
 }
 .log-scroll {
-  margin: 12px 0;
+  margin: 16px 0;
 }
 .full-log {
   white-space: pre-wrap;
   word-break: break-all;
-  font-size: 13px;
-  line-height: 1.6;
+  font-size: 14px;
+  line-height: 1.75;
   background: #f6f8fa;
-  padding: 12px;
-  border-radius: 4px;
+  padding: 16px;
+  border-radius: 8px;
   margin: 0;
 }
 
 /* ---- 平行宇宙卡片：梗概为主，实况折叠 ---- */
 .variant-meta-row {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
   flex-wrap: wrap;
-  margin-top: 8px;
+  margin-top: 12px;
 }
 .meta-chip {
-  font-size: 12px;
+  font-size: 13px;
   color: #666;
   background: #f0f2f5;
-  padding: 2px 8px;
+  padding: 3px 10px;
   border-radius: 10px;
 }
 .variant-transcript {
-  margin-top: 8px;
+  margin-top: 12px;
   border-top: 1px dashed #e0e4ea;
-  padding-top: 8px;
+  padding-top: 12px;
 }
 .mat-hint {
-  font-size: 12px;
+  font-size: 13px;
   color: #888;
-  margin-bottom: 6px;
+  margin-bottom: 10px;
+  line-height: 1.6;
 }
 .transcript-pre {
   white-space: pre-wrap;
   word-break: break-all;
-  font-size: 12px;
-  line-height: 1.55;
+  font-size: 13px;
+  line-height: 1.7;
   background: #fafbfc;
   border: 1px solid #eef0f3;
-  padding: 10px;
-  border-radius: 4px;
+  padding: 16px;
+  border-radius: 6px;
   margin: 0;
-  max-height: 280px;
+  max-height: 360px;
   overflow: auto;
 }
 .state-error {
-  margin-top: 6px;
-  font-size: 12px;
+  margin-top: 8px;
+  font-size: 13px;
   color: #c0392b;
   background: #fdecea;
+  padding: 10px 12px;
+  border-radius: 6px;
+  line-height: 1.6;
+}
+
+/* ---- 实时推演面板（第四步）---- */
+.live-panel {
+  margin-top: 18px;
+  border: 1px solid #e6e9ef;
+  border-radius: 10px;
+  background: #fbfcfd;
+  padding-bottom: 4px;
+}
+.live-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid #eef0f4;
+}
+.live-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #2f3a4a;
+}
+.live-hint {
+  font-size: 13px;
+  color: #98a2b3;
+}
+/* 三栏并列：每栏一场，独立滚动。三场是并行支线，混排会互相穿插。
+   用 auto-fit 而不是固定断点：左侧「书脊」面板展开时可用宽度会变，
+   写死断点会让三栏在窄窗口被压成三条缝。auto-fit 宽够就并排，
+   不够自动整行换栏，每栏始终保持可读宽度。 */
+.live-cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 14px;
+  padding: 14px 16px 16px;
+}
+.live-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid #eceff4;
+  border-radius: 8px;
+  background: #fff;
+  overflow: hidden;
+}
+.live-col.is-active {
+  border-color: #dbe3ee;
+}
+.live-col-head {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid #f0f2f6;
+  background: #fafbfd;
+  border-radius: 8px 8px 0 0;
+}
+.live-col-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #2f3a4a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 栏头状态：这一场「讲到哪了」，作者最关心的一句 */
+.live-col-status {
+  font-size: 13px;
+  color: #1f6b45;
+  line-height: 1.6;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.live-scroll {
+  height: 420px;
+  overflow-y: auto;
+  padding: 14px;
+  font-size: 13.5px;
+  line-height: 1.75;
+}
+.live-empty {
+  color: #b8bfcc;
+  padding: 16px 0;
+  font-size: 13.5px;
+}
+.live-row {
+  display: flex;
+  gap: 8px;
+  padding: 4px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.live-text {
+  flex: 1 1 auto;
+  color: #4a5568;
+  min-width: 0;
+}
+/* 模型思考流：淡灰斜体，与正文区分但都可读 */
+.live-thinking .live-text {
+  color: #9aa4b2;
+  font-style: italic;
+}
+/* 正在吐的正文 */
+.live-delta .live-text {
+  color: #2f3a4a;
+}
+/* 每拍裁决：这是作者最关心的一行，要突出 */
+.live-verdict {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-left: 3px solid #4c9a6a;
+  background: #f2faf5;
+  border-radius: 0 6px 6px 0;
+}
+.live-verdict .live-text {
+  color: #1f6b45;
+  font-weight: 500;
+}
+/* notice（门禁提示 / failover） */
+.live-notice .live-text {
+  color: #b26a12;
+}
+/* 结果态候选卡：SushiCards 是全局共用组件，这里只在本页把它的框放大，
+   不去改共用组件，避免影响其它阶段的卡片布局。 */
+:deep(.sushi-cards) {
+  gap: 20px;
+}
+:deep(.sushi-cand) {
+  padding: 20px 20px 16px;
+  border-radius: 10px;
+}
+:deep(.sushi-cand-title) {
+  font-size: 17px;
+  margin-bottom: 6px;
+}
+:deep(.sushi-cand-subtitle) {
+  font-size: 14px;
+  margin-bottom: 10px;
+}
+:deep(.sushi-cand-text) {
+  font-size: 15px;
+  line-height: 1.85;
+  height: 560px;
+  padding: 12px 14px;
+  border-radius: 8px;
+}
+:deep(.sushi-cand-text--truncated) {
+  height: 560px;
+}
+:deep(.sushi-cand-axis) {
+  font-size: 14px;
+  margin-bottom: 10px;
+  padding: 6px 0;
+}
+:deep(.sushi-cand-extra) {
+  font-size: 14px;
+  max-height: 340px;
+  padding: 12px;
+}
+:deep(.sushi-cand-rationale) {
+  font-size: 13px;
+  padding: 10px 12px;
+}
+:deep(.sushi-cand-pick) {
+  margin-top: 14px;
+  padding-top: 14px;
+}
+:deep(.sushi-cand-pick .el-button) {
+  font-size: 15px;
+  padding: 10px 32px;
+}
+:deep(.sushi-cand-idx) {
+  top: 14px;
+  right: 16px;
+  font-size: 13px;
+}
+:deep(.sushi-cand-actions) {
+  top: 14px;
+  left: 16px;
+}
+:deep(.sushi-cand-icon-btn) {
+  width: 30px;
+  height: 30px;
+  font-size: 14px;
+}
+:deep(.sushi-axis) {
+  font-size: 14px;
+  padding: 10px 14px;
+}
+:deep(.sushi-title-row) {
+  margin-bottom: 14px;
+}
+
+/* 窄屏降级：auto-fit 已经自动换栏，这里只保留高度微调——
+   纵向堆叠时每栏可以矮一点，否则一屏装不下一场。 */
+@media (max-width: 900px) {
+  .live-scroll {
+    height: 320px;
+  }
+  .var-loading-card {
+    min-height: 110px;
+  }
+}
+
+/* ---- beat 进度与终止原因（第二步）---- */
+.beat-progress {
+  margin-top: 6px;
+}
+.phase-chip {
+  background: #e8f0fe;
+  color: #3a6ea5;
+}
+/* 终止徽标：绿=自然讲完，橙=被截断/硬约束。颜色即语义，作者一眼能分。 */
+.ending-ok {
+  background: #e8f6ed;
+  color: #2e7d4f;
+}
+.ending-warn {
+  background: #fdf1e0;
+  color: #b26a12;
+}
+.ending-info {
+  background: #f0f2f5;
+  color: #666;
+}
+.ending-warn-note {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #b26a12;
+  background: #fdf6ec;
+  border-left: 3px solid #e0a458;
   padding: 6px 8px;
   border-radius: 4px;
+  line-height: 1.5;
+}
+.narrative-chip {
+  background: #eaf7ef;
+  color: #2e7d4f;
+}
+.variant-narrative {
+  margin-top: 12px;
+  border-top: 1px dashed #cfe3d6;
+  padding-top: 12px;
+}
+.narrative-pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 14.5px;
+  line-height: 1.9;
+  background: #fbfdfc;
+  border: 1px solid #e6efe9;
+  padding: 20px;
+  border-radius: 8px;
+  margin: 0;
+  max-height: 560px;
+  overflow: auto;
+}
+
+/* ---- 失败可见性 ----
+ * 失败必须「一眼看见」，而不是靠读内容发现这是一句报错。
+ * 旧实现把 traceback 写进 final_summary，卡片看起来是「一份有内容的梗概」。 */
+.fail-summary {
+  margin-bottom: 18px;
+}
+.fail-summary-body {
+  font-size: 13.5px;
+  line-height: 1.7;
+}
+.variant-failed {
+  margin-bottom: 16px;
+  padding: 16px 18px;
+  border: 1px solid #fbc4c4;
+  border-left: 3px solid #c45656;
+  border-radius: 8px;
+  background: #fef0f0;
+}
+.variant-failed-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.variant-failed-stage {
+  font-size: 13px;
+  color: #c45656;
+  font-weight: 600;
+}
+.variant-failed-reason {
+  font-size: 13px;
+  color: #606266;
+  line-height: 1.7;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.variant-failed-hint {
+  font-size: 12.5px;
+  color: #909399;
+  line-height: 1.6;
+  margin: 10px 0 12px;
 }
 
 /* ---- 已完成态：梗概面板 + 折叠实况 ---- */
 .completed-body {
-  margin: 12px 0;
+  margin: 18px 0;
 }
 .summary-panel h4 {
-  margin: 0 0 8px;
-  font-size: 14px;
+  margin: 0 0 12px;
+  font-size: 16px;
   color: #333;
   font-weight: 600;
 }
 .summary-pre {
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 14px;
-  line-height: 1.75;
+  font-size: 15px;
+  line-height: 1.9;
   background: #fafbfc;
-  padding: 14px 16px;
-  border-radius: 6px;
+  padding: 20px 24px;
+  border-radius: 8px;
   border-left: 3px solid #409eff;
   margin: 0;
 }
 .raw-toggle {
-  margin-top: 8px;
+  margin-top: 12px;
   text-align: right;
 }
 .raw-panel {
-  margin-top: 6px;
+  margin-top: 10px;
 }
 
 .loading {
   text-align: center;
   color: #888;
-  padding: 40px;
+  padding: 60px;
+  font-size: 15px;
 }
 </style>

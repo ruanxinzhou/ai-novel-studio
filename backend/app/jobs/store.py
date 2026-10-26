@@ -72,16 +72,59 @@ class Job:
     started_at: str | None = None
     finished_at: str | None = None
     meta: dict[str, Any] = field(default_factory=dict)
+    # 实时日志（第四步）：LLM 的流式输出实时落这里，SSE 每秒推给前端。
+    #
+    # 为什么需要：跑团是「等 LLM 吐字」的长任务，作者干等时完全看不到
+    # 进展——只有一行 message 在跳。把它透出去，作者能看到每拍的动作、
+    # 判定结果，以及模型此刻在想什么。
+    #
+    # 限制：只保留最近 N 行，防止长跑把内存和 SSE 流量撑爆。
+    live_log: list[dict] = field(default_factory=list)
 
     # ---- 序列化 ----
 
     def as_dict(self) -> dict:
         return asdict(self)
 
+    def append_live(self, kind: str, text: str, **extra) -> None:
+        """追加一行实时日志。
+
+        **必须按 session 分别限额**，不能用全局 FIFO。跑团是三场并行，
+        每场都在狂吐thinking/delta（单场实测 160+ 条）。全局上限会被
+        最先开跑的那场吃光，另外两场一条都留不下——表现为「第1 场正常、
+        #2 #3 永远停在『等待开场…』」，而实际上它们跑得好好的。
+        （真实事故：三场全部完成，live_log 却只有 session=1 的记录。）
+        """
+        row = {"kind": kind, "text": str(text or "")[:600], **extra}
+        self.live_log.append(row)
+        session = extra.get("session")
+        if session is None:
+            # 无场次归属的事件（批次级）走总量上限
+            if len(self.live_log) > _LIVE_LOG_MAX:
+                del self.live_log[:len(self.live_log) - _LIVE_LOG_MAX]
+            return
+        # 只裁剪本场自己的行，别人的行不能动
+        mine = [i for i, r in enumerate(self.live_log)
+                if r.get("session") == session]
+        overflow = len(mine) - _LIVE_LOG_PER_SESSION
+        if overflow > 0:
+            for i in mine[:overflow]:
+                self.live_log[i] = None       # 先挖空，避免边删边移错位
+            self.live_log = [r for r in self.live_log if r is not None]
+        # 总量兜底：按场切完仍超总上限时，从最旧的整体丢弃
+        if len(self.live_log) > _LIVE_LOG_MAX:
+            del self.live_log[:len(self.live_log) - _LIVE_LOG_MAX]
+
+
+# 每场上限：三栏展示各自只留最近这么多行，够看完又不撑爆 DOM
+_LIVE_LOG_PER_SESSION = 120
+# 总量兜底上限：三场 ×120 的 1.5 倍，留出批次级事件的空间
+_LIVE_LOG_MAX = 360
+
 
 _UPDATEABLE_FIELDS = {
     "status", "progress", "message", "sub_results",
-    "result", "error", "started_at", "finished_at", "meta",
+    "result", "error", "started_at", "finished_at", "meta", "live_log",
 }
 
 

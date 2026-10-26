@@ -42,13 +42,20 @@ class Router:
         return [self.channels[name] for name in order if name in self.channels]
 
     def chat_stream(self, step: str, messages: list[dict], model: str | None = None,
-                    max_tokens: int | None = None) -> Iterator[StreamEvent]:
-        """带 failover 的流式生成：primary 抛 ProviderError 时切 fallback。"""
+                    max_tokens: int | None = None,
+                    extra: dict | None = None) -> Iterator[StreamEvent]:
+        """带 failover 的流式生成：primary 抛 ProviderError 时切 fallback。
+
+        **extra 必须透传给底层通道**：MiniMax 靠 `extra["_layer"]` 选
+        reasoning_effort（见 minimax._REASONING_EFFORT_BY_LAYER）。以前这里
+        只传 messages/model/max_tokens，`_layer` 在路由层被吃掉，导致按层
+        调思考程度的配置全部失效——所有层都跑在默认 high 上。
+        """
         attempts = self.resolve(step)
         last_err: ProviderError | None = None
         for i, provider in enumerate(attempts):
             try:
-                yield from provider.chat_stream(messages, model, max_tokens)
+                yield from provider.chat_stream(messages, model, max_tokens, extra)
                 return
             except ProviderError as e:
                 last_err = e
@@ -66,10 +73,11 @@ class Router:
         raise last_err or ProviderError("无可用通道")
 
     def chat(self, step: str, messages: list[dict], model: str | None = None,
-             max_tokens: int | None = None) -> LLMResponse:
+             max_tokens: int | None = None,
+             extra: dict | None = None) -> LLMResponse:
         text_parts: list[str] = []
         usage = Usage()
-        for ev in self.chat_stream(step, messages, model, max_tokens):
+        for ev in self.chat_stream(step, messages, model, max_tokens, extra):
             if ev.kind == "delta":
                 text_parts.append(ev.text)
             elif ev.kind == "usage" and ev.usage:
